@@ -149,6 +149,12 @@ public sealed class X11Window
         Client.Send(X11Protocol.BuildPolyFillRectangle(Pixmap, Gc, new[] { new X11Protocol.Rect((short)x, (short)y, (ushort)width, (ushort)height) }));
     }
 
+    public void DrawLines(IReadOnlyList<X11Protocol.Point> points, uint color)
+    {
+        Client.Send(X11Protocol.BuildChangeGC(Gc, new() { [X11Protocol.GC.Foreground] = color }));
+        Client.Send(X11Protocol.BuildPolyLine(Pixmap, Gc, points));
+    }
+
     public void DrawText(string text, int x, int y, int scale = 2, uint color = 0xffffff)
     {
         Client.Send(X11Protocol.BuildChangeGC(Gc, new() { [X11Protocol.GC.Foreground] = color }));

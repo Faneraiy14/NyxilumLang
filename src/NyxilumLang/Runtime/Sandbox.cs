@@ -37,4 +37,14 @@ public static class Sandbox
         if (Enabled)
             throw new Exception("Пісочниця: запуск зовнішніх процесів заборонено (NX_SANDBOX=1)");
     }
+
+    // guiWindow(...) (Windows Forms і X11Gui) - відкриває СПРАВЖНЄ вікно, видиме
+    // на екрані користувача. Без цієї перевірки NX_SANDBOX=1 (призначений
+    // саме для потенційно ШІ-згенерованого коду - напр. NyxilumMcp) не
+    // заважав би такому коду малювати вікна на реальному робочому столі.
+    public static void CheckGui()
+    {
+        if (Enabled)
+            throw new Exception("Пісочниця: відкриття GUI-вікон заборонено (NX_SANDBOX=1)");
+    }
 }

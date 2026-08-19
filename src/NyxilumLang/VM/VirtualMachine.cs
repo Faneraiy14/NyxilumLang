@@ -469,6 +469,7 @@ public class VirtualMachine
         // взагалі їх використовує).
 #if WINDOWS
         _nativeFunctions["guiWindow"] = args => {
+            NyxilumLang.Runtime.Sandbox.CheckGui();
             var form = new Form {
                 Text = args[0].ToString(),
                 Width = Convert.ToInt32(args[1]),
