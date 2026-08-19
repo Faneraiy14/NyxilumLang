@@ -223,7 +223,15 @@ public static class PackageManager
                 ? entry.FullName[rootPrefix.Length..]
                 : entry.FullName;
 
-            var destPath = Path.Combine(targetDir, relative);
+            // "nx install" тягне АРХІВ ДОВІЛЬНОГО стороннього репозиторію
+            // (owner/repo від будь-кого) - без цієї перевірки шкідливий
+            // "пакет" міг би записом типу "../../../.bashrc" в імені файлу
+            // архіву вийти за межі targetDir і переписати щось поза
+            // nx_modules/. Той самий захист, що й у zipExtract() (ArchiveModule).
+            var destPath = Path.GetFullPath(Path.Combine(targetDir, relative));
+            if (!destPath.StartsWith(Path.GetFullPath(targetDir) + Path.DirectorySeparatorChar))
+                throw new Exception($"Підозрілий шлях у архіві пакета '{name}' ('{entry.FullName}' веде за межі {ModulesDir}/{name}) - можлива Zip Slip атака, встановлення скасовано");
+
             Directory.CreateDirectory(Path.GetDirectoryName(destPath)!);
             entry.ExtractToFile(destPath, overwrite: true);
         }
