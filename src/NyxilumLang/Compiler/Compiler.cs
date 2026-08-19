@@ -188,7 +188,9 @@ public class Compiler
         "guiWindow", "guiButton", "guiLabel", "guiTextBox", "guiAdd",
         "guiOnAction", "guiShow", "guiSetText", "guiGetText",
         "gc_stats", "gc_collect", "gc_limit", "exit",
-        "dbOpen", "dbClose", "dbSet", "dbGet", "dbHas", "dbDelete", "dbKeys", "dbCount", "dbCheckpoint"
+        "dbOpen", "dbClose", "dbSet", "dbGet", "dbHas", "dbDelete", "dbKeys", "dbCount", "dbCheckpoint",
+        "procStart", "procRun", "procWait", "procIsRunning", "procKill", "procPid", "procExitCode",
+        "procOutput", "procErrorOutput"
     };
 
     // knownGlobals — імена глобальних змінних, оголошених РАНІШЕ, поза цим

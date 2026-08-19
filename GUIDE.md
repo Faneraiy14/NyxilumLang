@@ -463,6 +463,7 @@ closeCanvas(canvas)
 - `isKeyDown(key)`, `isMouseDown(canvas)`, `getMouseX/Y(canvas)` - ввід для вікна
 - `randomInt(min,max)`, `randomDouble(min,max)`, `now()`, `today()`, `timestamp()` - утиліти
 - `osPlatform()`, `osArchitecture()`, `osMemory()`, `osCpuCount()`, `osEnv(name)`, `osCwd()` - інформація про систему
+- `procStart(cmd, args?, options?)` - запускає зовнішній процес ОС і одразу повертає хендл, НЕ чекаючи завершення (`args` - масив рядків, `options` - мапа з `cwd`/`env`); `procRun(cmd, args?, options?)` - те саме, але БЛОКУЄ до завершення й повертає мапу `{exitCode, stdout, stderr}`; `procWait(h)` - чекає завершення вже запущеного `procStart`, повертає код виходу; `procIsRunning(h)`, `procKill(h)`, `procPid(h)`, `procExitCode(h)` (`null`, доки процес ще працює); `procOutput(h)`/`procErrorOutput(h)` - усе, що процес вивів у stdout/stderr ДОСІ (можна перечитувати повторно, поки процес ще працює). У пісочниці (`NX_SANDBOX=1`) заборонено завжди
 - `httpGet(url)`, `urlStatus(url)` - HTTP-запити
 - `httpPost(url, body)` - POST-запит з тілом `body` (Content-Type `application/json`), повертає тіло відповіді рядком
 - `httpRequest(url, method, body?, headers?)` - запит довільним методом (`"PUT"`, `"DELETE"`, `"PATCH"` тощо), повертає мапу `{status, body}`; `headers` - мапа (`newMap`/`mapSet`) для заголовків на кшталт `Authorization`

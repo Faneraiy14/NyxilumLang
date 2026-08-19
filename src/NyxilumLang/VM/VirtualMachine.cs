@@ -523,6 +523,10 @@ public class VirtualMachine
         NyxilumLang.Runtime.Modules.RegexModule.Register(_nativeFunctions);
         NyxilumLang.Runtime.Modules.WebSocketModule.Register(_nativeFunctions);
         NyxilumLang.Runtime.Modules.ConcurrencyModule.Register(_nativeFunctions);
+        // System.Diagnostics.Process не залежить від Windows Forms - працює
+        // однаково на всіх платформах, тому поза #if WINDOWS (на відміну
+        // від guiWindow/GraphicsModule нижче).
+        NyxilumLang.Runtime.Modules.ProcessModule.Register(_nativeFunctions);
 #if WINDOWS
         NyxilumLang.Runtime.Modules.GraphicsModule.Register(_nativeFunctions);
 #endif

@@ -1,0 +1,63 @@
+// procRun/procStart/procWait/procKill — запуск СПРАВЖНІХ зовнішніх процесів
+// ОС (на відміну від spawn()/workerJoin(), які запускають NyxilumLang-функцію
+// у воркері всередині того ж .NET-процесу). "dotnet" узятий як команда, бо
+// вона гарантовано є в PATH там, де взагалі збирається й тестується сам
+// NyxilumLang (і на Windows, і на Linux/Mac) - на відміну від echo/sh, які
+// не однакові на всіх трьох платформах.
+func main() {
+    print("=== procRun (блокуюче) ===")
+    var r = procRun("dotnet", ["--version"])
+    if (r.exitCode == 0 && len(trim(r.stdout)) > 0) {
+        print("procRun: OK, версія dotnet=" + trim(r.stdout))
+    } else {
+        print("procRun: ПОМИЛКА, exitCode=" + toString(r.exitCode))
+    }
+
+    print("=== procStart / procIsRunning / procWait (неблокуюче) ===")
+    var isWindows = contains(osPlatform(), "Windows")
+    var longCmd = "sleep"
+    var longArgs = ["2"]
+    if (isWindows) {
+        longCmd = "ping"
+        longArgs = ["-n", "3", "127.0.0.1"]
+    }
+
+    var h = procStart(longCmd, longArgs)
+    var runningRightAfterStart = procIsRunning(h)
+    var code = procWait(h)
+    var runningAfterWait = procIsRunning(h)
+
+    if (runningRightAfterStart && !runningAfterWait) {
+        print("procStart/procWait: OK (running=true одразу, false після wait)")
+    } else {
+        print("procStart/procWait: ПОМИЛКА (running=" + toString(runningRightAfterStart) + "/" + toString(runningAfterWait) + ")")
+    }
+
+    print("=== procKill довгого процесу ===")
+    var h2 = procStart(longCmd, ["30"])
+    if (isWindows) { h2 = procStart(longCmd, ["-n", "60", "127.0.0.1"]) }
+    var beforeKill = procIsRunning(h2)
+    procKill(h2)
+    sleep(300)
+    var afterKill = procIsRunning(h2)
+
+    if (beforeKill && !afterKill) {
+        print("procKill: OK")
+    } else {
+        print("procKill: ПОМИЛКА (before=" + toString(beforeKill) + " after=" + toString(afterKill) + ")")
+    }
+
+    print("=== procPid і procExitCode ===")
+    var h3 = procRun("dotnet", ["--version"])
+    print("procRun exitCode доступний одразу: " + toString(h3.exitCode))
+
+    print("=== Помилка на неіснуючій команді ===")
+    try {
+        procRun("команди-якої-точно-нема-nx-test-999", [])
+        print("ПОМИЛКА: мало кинути виняток")
+    } catch (e) {
+        print("Виняток на неіснуючій команді: OK")
+    }
+
+    print("\n✅ Тест процесів завершено")
+}
