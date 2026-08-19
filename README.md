@@ -82,6 +82,8 @@ nx myprogram.nx
 | Вищий порядок | `mapArr`, `filter`, `reduce`, `sort` |
 | GC-інструментарій | `gc_stats()`, `gc_collect()`, `gc_limit(n)` |
 | Оптимізація гарячих циклів | автоматично, вимикається через `NX_JIT=0` |
+| Файли й теки | `deleteFile`, `makeDir`, `dirExists`, `deleteDir`, `listDir` |
+| Архіви | `zipCreate`, `zipExtract`, `zipEntries`, `zipExtractEntry` |
 | Вбудована БД | `dbOpen`, `dbGet/dbSet/dbHas/dbDelete`, `dbKeys`, `dbCount` — персистентна KV-база з WAL |
 | Конкурентність | `spawn(fn, ...args)`/`workerJoin(w)` — ізольовані воркери; `newChannel`/`channelSend`/`channelReceive` |
 | Зовнішні процеси ОС | `procStart`/`procRun` (запустити), `procWait`/`procIsRunning`/`procKill`, `procOutput`/`procErrorOutput` — реальний дочірній процес (не воркер) |
@@ -118,6 +120,25 @@ print("гра завершилась з кодом " + toString(procExitCode(gam
 мапа з `cwd` (робоча тека) і `env` (мапа змінних середовища для процесу).
 У пісочниці (`NX_SANDBOX=1`) запуск процесів заборонений завжди, без винятків —
 найширший з усіх доступів, обходить і файлове, і мережеве обмеження.
+
+### Файли, теки й архіви
+
+Раніше з файлом можна було лише `readFile`/`writeFile`/`appendFile` — не
+було способу його видалити, створити/перелічити теку чи розпакувати архів,
+хоча версії, бібліотеки й моди Minecraft розповсюджуються саме як `.zip`/`.jar`:
+
+```nx
+makeDir("mods")
+zipExtract("fabric-api.jar", "mods/fabric-api")   // розпакувати мод
+var files = listDir("mods")                        // що взагалі встановлено
+deleteFile("mods/old-mod.jar")                      // видалити один мод
+deleteDir("instances/стара-збірка")                 // видалити цілу збірку
+```
+
+`zipEntries(zipPath)` повертає список файлів усередині архіву БЕЗ
+розпаковування — зручно, щоб дістати з natives-jar лише потрібні `.dll`/`.so`
+через `zipExtractEntry`, не чіпаючи решту. `zipCreate(zipPath, sourceDir)` —
+запакувати теку назад (напр. експорт збірки).
 
 ### Пам'ять і GC
 
@@ -163,7 +184,7 @@ NX_SANDBOX=1 nx script.nx
 
 У цьому режимі:
 
-- `readFile`/`writeFile`/`appendFile`/`fileExists`/`readLines` дозволені лише всередині поточної робочої директорії — вихід за її межі через абсолютний шлях (`/etc/passwd`) чи `../..` кидає помилку
+- `readFile`/`writeFile`/`appendFile`/`fileExists`/`readLines`/`deleteFile`/`makeDir`/`dirExists`/`deleteDir`/`listDir`/`zipExtract`/`zipCreate`/`zipExtractEntry`/`zipEntries` дозволені лише всередині поточної робочої директорії — вихід за її межі через абсолютний шлях (`/etc/passwd`) чи `../..` кидає помилку
 - `httpGet`/`httpPost`/`httpRequest`/`httpServer`/`urlStatus`/`wsConnect` кидають помилку — мережа повністю відключена
 - `osEnv` кидає помилку — змінні середовища (де можуть лежати токени/ключі) недоступні
 - `procStart`/`procRun` кидають помилку — запуск зовнішніх процесів повністю заборонений (найширший доступ з усіх: довільний виконуваний файл обходить і файлове, і мережеве обмеження вище)
@@ -341,7 +362,7 @@ nx main.nx
 bash tests/run_all.sh
 ```
 
-50 тестів: рекурсія, замикання, фрейми, мапи, методи, стандартна бібліотека
+51 тест: рекурсія, замикання, фрейми, мапи, методи, стандартна бібліотека
 мови, `try/catch`, модулі (звичайний і вибірковий import), `lib/testing.nx`,
 `lib/strings.nx`, `lib/collections.nx`, `lib/datetime.nx`, самохостинг,
 `break`/`continue`, глобальні змінні, рівність чисел, умови з дужками,
@@ -350,7 +371,8 @@ bash tests/run_all.sh
 GC-інструментарій, regex, JIT (побайтова ідентичність з NX_JIT=0/1),
 вбудована БД (NyxilumDb), конкурентність (`spawn`/`workerJoin`/канали,
 включно зі стрес-тестом на гонки даних), зовнішні процеси ОС (`procRun`/
-`procStart`/`procKill`). Графічні тести й HTTP-сервер пропускаються
+`procStart`/`procKill`), файли/теки/архіви (`deleteFile`/`makeDir`/`listDir`/
+`zipCreate`/`zipExtract`). Графічні тести й HTTP-сервер пропускаються
 автоматично — вони відкривають вікна/слухають порт назавжди.
 
 Тести, де помилка є **очікуваним** результатом (наприклад необроблений

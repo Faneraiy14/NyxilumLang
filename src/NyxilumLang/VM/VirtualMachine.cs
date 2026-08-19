@@ -405,6 +405,40 @@ public class VirtualMachine
             NyxilumLang.Runtime.Sandbox.CheckPath(path);
             return File.ReadAllLines(path).Select(l => (object)l).ToList();
         };
+        // Без цих п'яти видалення/теки не було ЖОДНОГО способу прибрати чи
+        // переглянути файли з .nx-коду (лише читати/писати/дізнатись, чи є
+        // файл) - лаунчеру, наприклад, треба вміти видалити мод чи цілу
+        // теку збірки при видаленні, і перелічити вміст теки mods/.
+        _nativeFunctions["deleteFile"] = args => {
+            var path = args[0]?.ToString() ?? "";
+            NyxilumLang.Runtime.Sandbox.CheckPath(path);
+            if (!File.Exists(path)) return false;
+            File.Delete(path);
+            return true;
+        };
+        _nativeFunctions["makeDir"] = args => {
+            var path = args[0]?.ToString() ?? "";
+            NyxilumLang.Runtime.Sandbox.CheckPath(path);
+            Directory.CreateDirectory(path); // як mkdir -p - не падає, якщо вже існує чи батьківських тек нема
+            return true;
+        };
+        _nativeFunctions["dirExists"] = args => {
+            var path = args[0]?.ToString() ?? "";
+            NyxilumLang.Runtime.Sandbox.CheckPath(path);
+            return Directory.Exists(path);
+        };
+        _nativeFunctions["deleteDir"] = args => {
+            var path = args[0]?.ToString() ?? "";
+            NyxilumLang.Runtime.Sandbox.CheckPath(path);
+            if (!Directory.Exists(path)) return false;
+            Directory.Delete(path, recursive: true);
+            return true;
+        };
+        _nativeFunctions["listDir"] = args => {
+            var path = args[0]?.ToString() ?? "";
+            NyxilumLang.Runtime.Sandbox.CheckPath(path);
+            return Directory.GetFileSystemEntries(path).Select(p => (object)Path.GetFileName(p)).ToList();
+        };
         _nativeFunctions["printNoNewLine"] = args => {
             Console.Write(args[0]);
             return null;
@@ -527,6 +561,7 @@ public class VirtualMachine
         // однаково на всіх платформах, тому поза #if WINDOWS (на відміну
         // від guiWindow/GraphicsModule нижче).
         NyxilumLang.Runtime.Modules.ProcessModule.Register(_nativeFunctions);
+        NyxilumLang.Runtime.Modules.ArchiveModule.Register(_nativeFunctions);
 #if WINDOWS
         NyxilumLang.Runtime.Modules.GraphicsModule.Register(_nativeFunctions);
 #endif

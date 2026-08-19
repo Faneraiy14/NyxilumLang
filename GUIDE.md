@@ -439,6 +439,8 @@ closeCanvas(canvas)
 - `max/min(a,b)` або `max/min(arr)` - максимум/мінімум двох чисел або всього масиву
 - `toFixed(x,n)` - число як рядок з n знаками після коми, напр. `toFixed(3.14159, 2)` -> `"3.14"`
 - `readFile(path)`, `writeFile(path, content)`, `appendFile(path, content)`, `fileExists(path)`, `readLines(path)` - робота з файлами
+- `deleteFile(path)`, `makeDir(path)`, `dirExists(path)`, `deleteDir(path)` (рекурсивно), `listDir(path)` (масив імен файлів/тек усередині) - файли й теки
+- `zipCreate(zipPath, sourceDir)` - запакувати теку в архів; `zipExtract(zipPath, destDir)` - розпакувати ввесь архів, повертає кількість файлів; `zipEntries(zipPath)` - список імен файлів усередині БЕЗ розпаковування; `zipExtractEntry(zipPath, entryName, destPath)` - витягнути лише один файл, повертає `true`/`false` (є така точка в архіві?)
 - `toString(v)`, `toInt(v)`, `toDouble(v)`, `typeOf(v)`, `isNumber/isString/isArray/isBool(v)` - перетворення та перевірка типів
 - `charCode(s)` - код першого символу рядка (наприклад, `charCode("A")` -> 65); `fromCharCode(code)` - символ за кодом
 - `len(v)`, `substring(s,start,len)`, `replace/toUpper/toLower/contains/startsWith/endsWith(s,...)`, `split(s,sep)`, `join(arr,sep)` - рядки

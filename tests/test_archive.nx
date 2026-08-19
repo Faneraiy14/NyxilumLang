@@ -1,0 +1,53 @@
+// zipCreate/zipExtract/zipEntries/zipExtractEntry — без цього неможливо
+// написати лаунчер (версії/бібліотеки Minecraft і самі моди — це .zip/.jar).
+func main() {
+    // Окрема тека-джерело (а не "."!) - zipCreate(zip, ".") запакував би
+    // ЦІЛУ теку tests/ (усі інші .nx-файли), а не лише два файли цього тесту.
+    makeDir("archive_src")
+    writeFile("archive_src/archive_src_a.txt", "hello")
+    writeFile("archive_src/archive_src_b.txt", "world")
+
+    zipCreate("archive_test.zip", "archive_src")
+    var entries = zipEntries("archive_test.zip")
+    var hasA = indexOf(entries, "archive_src_a.txt") >= 0
+    var hasB = indexOf(entries, "archive_src_b.txt") >= 0
+    if (hasA && hasB) {
+        print("zipCreate/zipEntries: OK")
+    } else {
+        print("zipCreate/zipEntries: ПОМИЛКА")
+    }
+
+    var n = zipExtract("archive_test.zip", "archive_extracted")
+    var content = trim(readFile("archive_extracted/archive_src_a.txt"))
+    if (n > 0 && content == "hello") {
+        print("zipExtract: OK")
+    } else {
+        print("zipExtract: ПОМИЛКА (n=" + toString(n) + " content=" + content + ")")
+    }
+
+    var ok = zipExtractEntry("archive_test.zip", "archive_src_b.txt", "archive_single.txt")
+    var missing = zipExtractEntry("archive_test.zip", "нема-такого-файлу.txt", "archive_missing.txt")
+    if (ok && trim(readFile("archive_single.txt")) == "world" && !missing) {
+        print("zipExtractEntry: OK")
+    } else {
+        print("zipExtractEntry: ПОМИЛКА")
+    }
+
+    var listed = listDir("archive_src")
+    if (len(listed) == 2) {
+        print("makeDir/listDir: OK")
+    } else {
+        print("makeDir/listDir: ПОМИЛКА (" + toString(len(listed)) + " записів)")
+    }
+
+    // Прибираємо за собою — тест не має лишати сміття в tests/.
+    var delFileOk = deleteFile("archive_test.zip") && deleteFile("archive_single.txt")
+    var delDirOk = deleteDir("archive_src") && deleteDir("archive_extracted")
+    if (delFileOk && delDirOk && !dirExists("archive_src") && !dirExists("archive_extracted")) {
+        print("deleteFile/deleteDir: OK")
+    } else {
+        print("deleteFile/deleteDir: ПОМИЛКА")
+    }
+
+    print("\n✅ Тест архівів завершено")
+}

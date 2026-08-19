@@ -165,6 +165,7 @@ public class Compiler
         "print", "printNoNewLine",
         "readLine", "readInt", "readDouble",
         "readFile", "writeFile", "appendFile", "fileExists", "readLines",
+        "deleteFile", "makeDir", "dirExists", "deleteDir", "listDir",
         "sqrt", "abs", "pow", "sin", "cos", "tan",
         "round", "floor", "ceil", "max", "min", "clamp",
         "toString", "toInt", "toDouble", "toFixed", "len",
@@ -190,7 +191,8 @@ public class Compiler
         "gc_stats", "gc_collect", "gc_limit", "exit",
         "dbOpen", "dbClose", "dbSet", "dbGet", "dbHas", "dbDelete", "dbKeys", "dbCount", "dbCheckpoint",
         "procStart", "procRun", "procWait", "procIsRunning", "procKill", "procPid", "procExitCode",
-        "procOutput", "procErrorOutput"
+        "procOutput", "procErrorOutput",
+        "zipExtract", "zipEntries", "zipExtractEntry", "zipCreate"
     };
 
     // knownGlobals — імена глобальних змінних, оголошених РАНІШЕ, поза цим
