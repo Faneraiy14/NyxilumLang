@@ -564,6 +564,14 @@ public class VirtualMachine
         NyxilumLang.Runtime.Modules.ArchiveModule.Register(_nativeFunctions);
 #if WINDOWS
         NyxilumLang.Runtime.Modules.GraphicsModule.Register(_nativeFunctions);
+#else
+        // Linux/Mac: guiWindow/guiButton/... (той самий набір імен, що й
+        // Windows Forms-версія вище) - тут поверх власного X11-протоколу
+        // (Runtime/X11/), портованого з сестринського проєкту rawgui
+        // (github.com/Faneraiy14/rawgui, уже перевірений на реальному
+        // X-сервері). 2D/3D-канвас (createCanvas тощо, GraphicsModule) поки
+        // лишається лише для Windows - GUI-вікна для лаунчера важливіші.
+        NyxilumLang.Runtime.X11.X11Gui.Register(_nativeFunctions);
 #endif
     }
 
