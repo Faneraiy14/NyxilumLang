@@ -38,7 +38,31 @@ public class Parser
         return program;
     }
 
+    // Той самий клас проблеми, що й MaxExpressionDepth вище, але для
+    // ІНШОГО, незалежного ланцюжка рекурсії: глибоко вкладені БЛОКИ
+    // (напр. "if (true) { if (true) { if (true) { ... } } }") проганяють
+    // ParseStatement -> ParseIfStatement -> ParseBlockStatement ->
+    // ParseStatement на кожен рівень вкладеності - той самий нативний
+    // C#-стек, той самий некерований SIGABRT замість зрозумілої помилки.
+    // Перевірено живцем: 20 000 вкладених if - гарантований краш.
+    private const int MaxStatementDepth = 500;
+    private int _statementDepth;
+
     private StatementNode? ParseStatement()
+    {
+        if (++_statementDepth > MaxStatementDepth)
+            throw new Exception($"Занадто глибоко вкладені блоки (> {MaxStatementDepth} рівнів) на рядку {Peek().Line}, стовпець {Peek().Column}.");
+        try
+        {
+            return ParseStatementInner();
+        }
+        finally
+        {
+            _statementDepth--;
+        }
+    }
+
+    private StatementNode? ParseStatementInner()
     {
         var token = Peek();
 
@@ -428,46 +452,123 @@ public class Parser
         return new ExpressionStatement(expr);
     }
 
-    private ExpressionNode ParseExpression() => ParseAssignment();
+    // Глибоко вкладені дужки/масиви/аргументи (напр. "((((...1...))))")
+    // проганяють ввесь ланцюжок ParseAssignment -> ParseOr -> ... ->
+    // ParsePrimary (~10 нативних C#-фреймів) на КОЖЕН рівень вкладеності
+    // вкладеного виразу - ParsePrimary для "(" рекурсивно викликає назад
+    // ParseExpression. Це справжня рекурсія в C#-коді самого парсера (не
+    // в байткод-VM, де глибину викликів обмежено окремо), тож вона рано
+    // чи пізно вичерпує нативний стек ОС - StackOverflowException, яку
+    // НЕ можна зловити жодним try/catch ні в .NET, ні тим паче в
+    // NyxilumLang: процес завершується миттєво (SIGABRT), без жодного
+    // повідомлення. Перевірено живцем: 50 000 рівнів вкладеності -
+    // гарантований краш. 500 - з великим запасом для реального коду
+    // (жоден легітимний вираз так глибоко не вкладається), але ловить
+    // втечу задовго до реального ризику для нативного стека.
+    private const int MaxExpressionDepth = 500;
+    private int _expressionDepth;
 
-    private ExpressionNode ParseAssignment()
+    private ExpressionNode ParseExpression()
     {
-        var left = ParseOr();
-        var tok = Peek();
-        if (tok.Type == TokenType.Operator && tok.Value == "=")
+        if (++_expressionDepth > MaxExpressionDepth)
+            throw new Exception($"Вираз занадто глибоко вкладений (> {MaxExpressionDepth} рівнів) на рядку {Peek().Line}, стовпець {Peek().Column}.");
+        try
         {
-            Advance();
-            var right = ParseAssignment();
-            return new BinaryExpression(left, "=", right);
+            return ParseAssignment();
         }
-        // Compound assignment: x += y  -->  x = x + y
-        if (tok.Type == TokenType.Operator && (tok.Value == "+=" || tok.Value == "-=" || tok.Value == "*=" || tok.Value == "/="))
+        finally
         {
-            string baseOp = tok.Value[0].ToString(); // '+', '-', '*', '/'
-            Advance();
-            var right = ParseAssignment();
-            var expanded = new BinaryExpression(left, baseOp, right);
-            return new BinaryExpression(left, "=", expanded);
+            _expressionDepth--;
         }
-        // Postfix ++ / --  -->  x = x + 1  (returns new value, expression statement)
-        if (tok.Type == TokenType.Operator && (tok.Value == "++" || tok.Value == "--"))
-        {
-            string baseOp = tok.Value == "++" ? "+" : "-";
-            Advance();
-            var one = new LiteralExpression(1.0);
-            var expanded = new BinaryExpression(left, baseOp, one);
-            return new BinaryExpression(left, "=", expanded);
-        }
-        return left;
     }
 
-    private ExpressionNode ParseOr() { var left = ParseAnd(); while (Peek().Type == TokenType.Operator && Peek().Value == "||") { Advance(); var right = ParseAnd(); left = new BinaryExpression(left, "||", right); } return left; }
-    private ExpressionNode ParseAnd() { var left = ParseEquality(); while (Peek().Type == TokenType.Operator && Peek().Value == "&&") { Advance(); var right = ParseEquality(); left = new BinaryExpression(left, "&&", right); } return left; }
-    private ExpressionNode ParseEquality() { var left = ParseComparison(); while (Peek().Type == TokenType.Operator && (Peek().Value == "==" || Peek().Value == "!=")) { string op = Advance().Value; var right = ParseComparison(); left = new BinaryExpression(left, op, right); } return left; }
-    private ExpressionNode ParseComparison() { var left = ParseAddition(); while (Peek().Type == TokenType.Operator && (Peek().Value == "<" || Peek().Value == "<=" || Peek().Value == ">" || Peek().Value == ">=")) { string op = Advance().Value; var right = ParseAddition(); left = new BinaryExpression(left, op, right); } return left; }
-    private ExpressionNode ParseAddition() { var left = ParseMultiplication(); while (Peek().Type == TokenType.Operator && (Peek().Value == "+" || Peek().Value == "-")) { string op = Advance().Value; var right = ParseMultiplication(); left = new BinaryExpression(left, op, right); } return left; }
-    private ExpressionNode ParseMultiplication() { var left = ParseUnary(); while (Peek().Type == TokenType.Operator && (Peek().Value == "*" || Peek().Value == "/" || Peek().Value == "%")) { string op = Advance().Value; var right = ParseUnary(); left = new BinaryExpression(left, op, right); } return left; }
-    private ExpressionNode ParseUnary() { if (Peek().Type == TokenType.Operator && (Peek().Value == "!" || Peek().Value == "-")) { string op = Advance().Value; var right = ParseUnary(); return new UnaryExpression(op, right); } return ParsePrimary(); }
+    // Права асоціативність "=" рекурсить у СЕБЕ (двічі: звичайне "=" і
+    // складене "+="/тощо) для ланцюжка "a = a = a = ...", тим самим
+    // класом справжньої нативної рекурсії, що й ParseUnary вище.
+    private ExpressionNode ParseAssignment()
+    {
+        if (++_expressionDepth > MaxExpressionDepth)
+            throw new Exception($"Вираз занадто глибоко вкладений (> {MaxExpressionDepth} рівнів) на рядку {Peek().Line}, стовпець {Peek().Column}.");
+        try
+        {
+            var left = ParseOr();
+            var tok = Peek();
+            if (tok.Type == TokenType.Operator && tok.Value == "=")
+            {
+                Advance();
+                var right = ParseAssignment();
+                return new BinaryExpression(left, "=", right);
+            }
+            // Compound assignment: x += y  -->  x = x + y
+            if (tok.Type == TokenType.Operator && (tok.Value == "+=" || tok.Value == "-=" || tok.Value == "*=" || tok.Value == "/="))
+            {
+                string baseOp = tok.Value[0].ToString(); // '+', '-', '*', '/'
+                Advance();
+                var right = ParseAssignment();
+                var expanded = new BinaryExpression(left, baseOp, right);
+                return new BinaryExpression(left, "=", expanded);
+            }
+            // Postfix ++ / --  -->  x = x + 1  (returns new value, expression statement)
+            if (tok.Type == TokenType.Operator && (tok.Value == "++" || tok.Value == "--"))
+            {
+                string baseOp = tok.Value == "++" ? "+" : "-";
+                Advance();
+                var one = new LiteralExpression(1.0);
+                var expanded = new BinaryExpression(left, baseOp, one);
+                return new BinaryExpression(left, "=", expanded);
+            }
+            return left;
+        }
+        finally
+        {
+            _expressionDepth--;
+        }
+    }
+
+    // Ліві-асоціативні бінарні ланцюжки (a+b+c+d+...) НЕ рекурсять сам
+    // парсер (звичайний while-цикл, O(1) нативного стека) - але будують
+    // ЛІВО-ГЛИБОКЕ дерево BinaryExpression, яке пізніше рекурсивно обходить
+    // КОМПІЛЯТОР (CompileExpression). Досить довгий ланцюжок того самого
+    // оператора (перевірено живцем: 20 000 "+" підряд) валить нативний
+    // стек уже ТАМ, повз захист ParseExpression вище (parsing проходить
+    // успішно). ChainCheck рахує довжину саме такого ланцюжка.
+    private void ChainCheck(int chainLen)
+    {
+        if (chainLen > MaxExpressionDepth)
+            throw new Exception($"Занадто довгий ланцюжок операторів (> {MaxExpressionDepth}) на рядку {Peek().Line}, стовпець {Peek().Column}.");
+    }
+
+    private ExpressionNode ParseOr() { var left = ParseAnd(); int n = 0; while (Peek().Type == TokenType.Operator && Peek().Value == "||") { ChainCheck(++n); Advance(); var right = ParseAnd(); left = new BinaryExpression(left, "||", right); } return left; }
+    private ExpressionNode ParseAnd() { var left = ParseEquality(); int n = 0; while (Peek().Type == TokenType.Operator && Peek().Value == "&&") { ChainCheck(++n); Advance(); var right = ParseEquality(); left = new BinaryExpression(left, "&&", right); } return left; }
+    private ExpressionNode ParseEquality() { var left = ParseComparison(); int n = 0; while (Peek().Type == TokenType.Operator && (Peek().Value == "==" || Peek().Value == "!=")) { ChainCheck(++n); string op = Advance().Value; var right = ParseComparison(); left = new BinaryExpression(left, op, right); } return left; }
+    private ExpressionNode ParseComparison() { var left = ParseAddition(); int n = 0; while (Peek().Type == TokenType.Operator && (Peek().Value == "<" || Peek().Value == "<=" || Peek().Value == ">" || Peek().Value == ">=")) { ChainCheck(++n); string op = Advance().Value; var right = ParseAddition(); left = new BinaryExpression(left, op, right); } return left; }
+    private ExpressionNode ParseAddition() { var left = ParseMultiplication(); int n = 0; while (Peek().Type == TokenType.Operator && (Peek().Value == "+" || Peek().Value == "-")) { ChainCheck(++n); string op = Advance().Value; var right = ParseMultiplication(); left = new BinaryExpression(left, op, right); } return left; }
+    private ExpressionNode ParseMultiplication() { var left = ParseUnary(); int n = 0; while (Peek().Type == TokenType.Operator && (Peek().Value == "*" || Peek().Value == "/" || Peek().Value == "%")) { ChainCheck(++n); string op = Advance().Value; var right = ParseUnary(); left = new BinaryExpression(left, op, right); } return left; }
+
+    // ParseUnary рекурсить у СЕБЕ напряму для ланцюжка "!!!!!x"/"----x" -
+    // це вже СПРАВЖНЯ рекурсія нативного C#-стека (не while-цикл, як вище),
+    // тому потребує того самого _expressionDepth-захисту, що й ParseExpression
+    // (перевірено живцем: 20 000 "!" підряд - гарантований краш повз нього,
+    // бо ParseUnary ніколи не повертається в ParseExpression між ітераціями).
+    private ExpressionNode ParseUnary()
+    {
+        if (Peek().Type == TokenType.Operator && (Peek().Value == "!" || Peek().Value == "-"))
+        {
+            string op = Advance().Value;
+            if (++_expressionDepth > MaxExpressionDepth)
+                throw new Exception($"Вираз занадто глибоко вкладений (> {MaxExpressionDepth} рівнів) на рядку {Peek().Line}, стовпець {Peek().Column}.");
+            try
+            {
+                var right = ParseUnary();
+                return new UnaryExpression(op, right);
+            }
+            finally
+            {
+                _expressionDepth--;
+            }
+        }
+        return ParsePrimary();
+    }
 
     private ExpressionNode ParsePrimary()
     {
