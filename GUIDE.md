@@ -464,6 +464,7 @@ closeCanvas(canvas)
 - `guiShow(win)` - показати вікно (блокує, доки вікно не закриють)
 - `isKeyDown(key)`, `isMouseDown(canvas)`, `getMouseX/Y(canvas)` - ввід для вікна
 - `randomInt(min,max)`, `randomDouble(min,max)`, `now()`, `today()`, `timestamp()` - утиліти
+- `formatDate(timestamp, format?)` - Unix-timestamp (секунди) у рядок довільного формату (.NET custom date format, напр. `"dd.MM.yyyy HH:mm"`); без `format` - той самий вигляд, що й `now()`; `parseDate(str, format)` - обернена операція, рядок за форматом назад у Unix-timestamp; кидає помилку, якщо рядок не відповідає формату
 - `osPlatform()`, `osArchitecture()`, `osMemory()`, `osCpuCount()`, `osEnv(name)`, `osCwd()` - інформація про систему
 - `procStart(cmd, args?, options?)` - запускає зовнішній процес ОС і одразу повертає хендл, НЕ чекаючи завершення (`args` - масив рядків, `options` - мапа з `cwd`/`env`); `procRun(cmd, args?, options?)` - те саме, але БЛОКУЄ до завершення й повертає мапу `{exitCode, stdout, stderr}`; `procWait(h)` - чекає завершення вже запущеного `procStart`, повертає код виходу; `procIsRunning(h)`, `procKill(h)`, `procPid(h)`, `procExitCode(h)` (`null`, доки процес ще працює); `procOutput(h)`/`procErrorOutput(h)` - усе, що процес вивів у stdout/stderr ДОСІ (можна перечитувати повторно, поки процес ще працює). У пісочниці (`NX_SANDBOX=1`) заборонено завжди
 - `httpGet(url)`, `urlStatus(url)` - HTTP-запити

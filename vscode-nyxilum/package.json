@@ -2,7 +2,7 @@
   "name": "nyxilum",
   "displayName": "Nyxilum",
   "description": "Підсвічування синтаксису, автодоповнення й діагностика синтаксичних помилок для .nx файлів (NyxilumLang)",
-  "version": "0.4.1",
+  "version": "0.4.2",
   "publisher": "Faneraiy14",
   "license": "MIT",
   "repository": {

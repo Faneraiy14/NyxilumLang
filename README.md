@@ -1,7 +1,7 @@
 # NyxilumLang
 
 Мова програмування власної розробки: компілятор у байткод, стекова віртуальна
-машина та стандартна бібліотека з 135 вбудованих функцій — від математики й
+машина та стандартна бібліотека з 166 вбудованих функцій — від математики й
 рядків до HTTP, графіки та вводу з клавіатури.
 
 **Мова самохостована**: у `selfhosted/` лежить інтерпретатор NyxilumLang,
@@ -241,7 +241,7 @@ src/NyxilumLang/
   Core/       Lexer.cs, Parser.cs, Token.cs
   AST/        вузли дерева
   Compiler/   Compiler.cs, Bytecode.cs
-  VM/         VirtualMachine.cs — виконання + 135 вбудованих функцій
+  VM/         VirtualMachine.cs — виконання + 166 вбудованих функцій
   Runtime/    NxMap, NxJson, NxFunctionRef, модулі Http/Os/Graphics/Regex/WebSocket
   Tools/      Formatter.cs, Linter.cs
 

@@ -173,7 +173,7 @@ public class Compiler
         "trim", "repeat", "indexOf", "reverse",
         "append", "pop", "removeAt", "insert", "clear", "slice", "unique",
         "randomInt", "randomDouble",
-        "now", "today", "timestamp", "sleep",
+        "now", "today", "timestamp", "formatDate", "parseDate", "sleep",
         "typeOf", "isNumber", "isString", "isArray", "isBool", "isNull",
         "charCode", "fromCharCode",
         "newMap", "mapSet", "mapGet", "mapHas", "mapRemove", "mapKeys", "mapValues",
@@ -206,9 +206,19 @@ public class Compiler
     {
         _bytecode = new Bytecode();
 
-        foreach (var name in _builtins)
-            _functions[name] = -1;
-
+        // Раніше тут усі імена білтинів заздалегідь клались у _functions
+        // з адресою-заглушкою -1. Жоден зі споживачів _functions (виклик,
+        // посилання на функцію ЯК значення, авто-виклик main) насправді
+        // цього не потребує — обидва місця вже перевіряють _builtins
+        // окремо й незалежно, ДО того як впасти до ResolveFunctionName.
+        // А шкода була реальна: коли ResolveFunctionName перевіряється
+        // РАНІШЕ за _builtins.Contains (щоб власна/імпортована функція з
+        // іменем білтина коректно перекривала його — див. коментар нижче),
+        // ЦЯ заглушка змушувала виклик БУДЬ-ЯКОГО білтина резолвитись як
+        // "нібито відома функція" з адресою, що НІКОЛИ не патчиться (жоден
+        // білтин не компілюється в байткод) - CALL стрибав на -1, той самий
+        // клас "сміттєва адреса, Run() тихо завершується без помилки", що
+        // вже описаний нижче для вкладених функцій.
         foreach (var stmt in program.Statements)
             if (stmt is StructDeclaration sd) _structsByName[sd.Name] = sd;
         ValidateInheritanceChains();
@@ -641,6 +651,20 @@ public class Compiler
                     _bytecode!.Emit(OpCode.LOAD_VAR, varIdx);
                 else if (_globalNames.Contains(v.Name))
                     _bytecode!.Emit(OpCode.GET_GLOBAL, _bytecode.AddConstant(v.Name));
+                else if (ResolveFunctionName(v.Name) is string resolvedRefName)
+                {
+                    // Посилання на іменовану функцію ЯК ЗНАЧЕННЯ (без виклику).
+                    // Перевіряється ПЕРЕД _builtins - тими ж міркуваннями, що й
+                    // для виклику (CallExpression, вище): власна/імпортована
+                    // функція з іменем білтина має перекривати його й тут.
+                    // Адреса патчиться пізніше, коли всі функції вже скомпільовані.
+                    // resolvedRefName — уточнене ім'я з урахуванням вкладеності
+                    // (те саме лексичне резолвення, що й для звичайного виклику).
+                    var funcRef = new NxFunctionRef { Name = v.Name };
+                    int constIdx = _bytecode!.AddConstant(funcRef);
+                    _pendingFunctionRefs.Add((funcRef, resolvedRefName));
+                    _bytecode.Emit(OpCode.LOAD_CONST, constIdx);
+                }
                 else if (_builtins.Contains(v.Name))
                 {
                     // Посилання на НАТИВНУ функцію як значення (напр. var f = sqrt).
@@ -649,17 +673,6 @@ public class Compiler
                     var nativeRef = new NxFunctionRef { NativeName = v.Name };
                     int nativeConstIdx = _bytecode!.AddConstant(nativeRef);
                     _bytecode.Emit(OpCode.LOAD_CONST, nativeConstIdx);
-                }
-                else if (ResolveFunctionName(v.Name) is string resolvedRefName)
-                {
-                    // Посилання на іменовану функцію ЯК ЗНАЧЕННЯ (без виклику).
-                    // Адреса патчиться пізніше, коли всі функції вже скомпільовані.
-                    // resolvedRefName — уточнене ім'я з урахуванням вкладеності
-                    // (те саме лексичне резолвення, що й для звичайного виклику).
-                    var funcRef = new NxFunctionRef { Name = v.Name };
-                    int constIdx = _bytecode!.AddConstant(funcRef);
-                    _pendingFunctionRefs.Add((funcRef, resolvedRefName));
-                    _bytecode.Emit(OpCode.LOAD_CONST, constIdx);
                 }
                 else
                     throw new Exception($"Змінна '{v.Name}' не оголошена");
@@ -774,18 +787,26 @@ public class Compiler
                         // серед функцій верхнього рівня — інакше однойменна
                         // вкладена в іншому місці програми могла б випадково
                         // "перебити" ту, що справді видна звідси.
+                        //
+                        // resolvedName перевіряється ПЕРШИМ, перед _builtins:
+                        // раніше було навпаки, тож власна/імпортована функція з
+                        // іменем, що збігається з нативним білтином (напр.
+                        // lib/datetime.nx визначає свій formatDate/parseDate),
+                        // тихо й без жодної діагностики компілятора програвала
+                        // білтину — виклик у файлі, що явно імпортував саме
+                        // ЛОКАЛЬНУ функцію, насправді викликав щось зовсім інше.
                         string? resolvedName = ResolveFunctionName(c.FunctionName);
-                        if (_builtins.Contains(c.FunctionName))
-                        {
-                            foreach (var arg in c.Arguments) CompileExpression(arg);
-                            int nameConst = _bytecode!.AddConstant(c.FunctionName);
-                            _bytecode.Emit(OpCode.CALL_NATIVE, nameConst, c.Arguments.Count);
-                        }
-                        else if (resolvedName != null)
+                        if (resolvedName != null)
                         {
                             foreach (var arg in c.Arguments) CompileExpression(arg);
                             _bytecode!.Emit(OpCode.CALL, 0);
                             _pendingCalls.Add((_bytecode.Code.Count - 2, resolvedName));
+                        }
+                        else if (_builtins.Contains(c.FunctionName))
+                        {
+                            foreach (var arg in c.Arguments) CompileExpression(arg);
+                            int nameConst = _bytecode!.AddConstant(c.FunctionName);
+                            _bytecode.Emit(OpCode.CALL_NATIVE, nameConst, c.Arguments.Count);
                         }
                         else if (_vars.ContainsKey(c.FunctionName))
                         {

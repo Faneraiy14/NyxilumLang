@@ -1,0 +1,43 @@
+// formatDate/parseDate — now()/today()/timestamp() віддавали лише два
+// фіксовані формати; жодного способу ані відформатувати timestamp() у
+// власний вигляд, ані розпарсити рядок дати назад у число.
+func main() {
+    print("=== formatDate: формат за замовчуванням ===")
+    var ts = timestamp()
+    var defaultFmt = formatDate(ts)
+    if (len(defaultFmt) == 19) {
+        print("formatDate(ts): OK (" + defaultFmt + ")")
+    } else {
+        print("formatDate(ts): ПОМИЛКА, довжина=" + toString(len(defaultFmt)))
+    }
+
+    print("=== formatDate: власний формат ===")
+    var custom = formatDate(ts, "yyyy-MM-dd")
+    if (len(custom) == 10 && custom == today()) {
+        print("formatDate(ts, \"yyyy-MM-dd\"): OK (" + custom + ", збігається з today())")
+    } else {
+        print("formatDate(ts, \"yyyy-MM-dd\"): ПОМИЛКА (" + custom + " != " + today() + ")")
+    }
+
+    print("=== parseDate: round-trip з формату назад у timestamp ===")
+    var knownStr = "2026-01-15 10:30:00"
+    var parsed = parseDate(knownStr, "yyyy-MM-dd HH:mm:ss")
+    var backToStr = formatDate(parsed, "yyyy-MM-dd HH:mm:ss")
+    if (backToStr == knownStr) {
+        print("round-trip: OK (" + knownStr + " -> " + toString(parsed) + " -> " + backToStr + ")")
+    } else {
+        print("round-trip: ПОМИЛКА (" + knownStr + " -> " + backToStr + ")")
+    }
+
+    print("=== parseDate: неправильний рядок кидає помилку ===")
+    try {
+        parseDate("це не дата", "yyyy-MM-dd")
+        print("ПОМИЛКА: мало кинути виняток")
+    } catch (e) {
+        print("parseDate на сміттєвому вводі: OK (спіймано)")
+    }
+
+    print("\n✅ Тест дат завершено")
+}
+
+main()

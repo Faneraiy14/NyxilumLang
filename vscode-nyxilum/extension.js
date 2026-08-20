@@ -32,7 +32,7 @@ const BUILTINS = [
     'trim', 'repeat', 'indexOf', 'reverse',
     'append', 'pop', 'removeAt', 'insert', 'clear', 'slice', 'unique',
     'randomInt', 'randomDouble',
-    'now', 'today', 'timestamp', 'sleep',
+    'now', 'today', 'timestamp', 'formatDate', 'parseDate', 'sleep',
     'typeOf', 'isNumber', 'isString', 'isArray', 'isBool', 'isNull',
     'charCode', 'fromCharCode',
     'newMap', 'mapSet', 'mapGet', 'mapHas', 'mapRemove', 'mapKeys', 'mapValues',

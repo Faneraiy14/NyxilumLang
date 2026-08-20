@@ -448,6 +448,32 @@ public class VirtualMachine
         _nativeFunctions["now"] = args => DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss");
         _nativeFunctions["today"] = args => DateTime.Now.ToString("yyyy-MM-dd");
         _nativeFunctions["timestamp"] = args => DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+        // now()/today() віддавали лише два фіксовані формати - жодного способу
+        // ані відформатувати timestamp() у власний вигляд (напр. "dd.MM HH:mm"),
+        // ані розпарсити рядок дати назад у число. formatDate/parseDate
+        // закривають обидва напрямки через .NET custom date format strings.
+        _nativeFunctions["formatDate"] = args => {
+            long ts = (long)PopNumVal(args[0]);
+            string format = args.Length > 1 && args[1] != null ? args[1].ToString()! : "yyyy-MM-dd HH:mm:ss";
+            try
+            {
+                return DateTimeOffset.FromUnixTimeSeconds(ts).LocalDateTime.ToString(format);
+            }
+            catch (FormatException ex)
+            {
+                throw new Exception($"formatDate: неправильний формат \"{format}\": {ex.Message}");
+            }
+        };
+        _nativeFunctions["parseDate"] = args => {
+            string s = args[0]?.ToString() ?? "";
+            string format = args[1]?.ToString() ?? "";
+            if (!DateTime.TryParseExact(s, format, System.Globalization.CultureInfo.InvariantCulture,
+                    System.Globalization.DateTimeStyles.None, out var parsed))
+            {
+                throw new Exception($"parseDate: не вдалось розпарсити \"{s}\" за форматом \"{format}\"");
+            }
+            return new DateTimeOffset(parsed, TimeZoneInfo.Local.GetUtcOffset(parsed)).ToUnixTimeSeconds();
+        };
         _nativeFunctions["sleep"] = args => {
             System.Threading.Thread.Sleep(Convert.ToInt32(args[0]));
             return null;
