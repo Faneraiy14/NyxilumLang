@@ -16,7 +16,9 @@ EXE="${NX_EXE:-$TESTS_DIR/../src/NyxilumLang/bin/Debug/net10.0-windows/Nx.exe}"
 # Відкривають вікна, слухають порт назавжди або чекають на ввід —
 # у автоматичному прогоні пропускаємо. bench_loop.nx — навмисно повільний
 # неформальний бенчмарк (десятки секунд), не тест коректності.
-SKIP="test_graphics2d.nx test_graphics3d.nx calculator.nx test_http_server.nx bench_loop.nx"
+# test_sandbox_symlink.nx — окремий блок нижче (потребує NX_SANDBOX=1 і
+# готує/прибирає symlink навколо запуску, тут пройшов би без сенсу).
+SKIP="test_graphics2d.nx test_graphics3d.nx calculator.nx test_http_server.nx bench_loop.nx test_sandbox_symlink.nx"
 
 # Тести, де помилка — очікуваний результат.
 EXPECT_ERROR="test_throw_uncaught.nx test_nested_scope_error.nx test_selective_import_missing.nx test_lib_testing_fail.nx test_parser_stack_limits.nx"
@@ -126,6 +128,25 @@ else
     echo "❌ REPL — стан між рядками не зберігається або вивід продублювався"
     echo "$repl_out" | sed 's/^/       /'
     fail=$((fail+1)); failed+=("REPL — персистентність між рядками")
+fi
+
+# Пісочниця (Sandbox.CheckPath): symlink усередині робочої директорії,
+# що веде за її межі, раніше читався безперешкодно (Path.GetFullPath
+# лише нормалізує ТЕКСТ шляху, symlink на диску не резолвить). Готуємо
+# секретний файл ЗА межами tests/, symlink на нього ВСЕРЕДИНІ tests/,
+# і перевіряємо, що NX_SANDBOX=1 коректно блокує читання крізь нього.
+secret_file=$(mktemp)
+echo "секрет-поза-sandbox" > "$secret_file"
+ln -sf "$secret_file" escape_link.txt
+sandbox_out=$(timeout "$TIMEOUT_SEC" env NX_SANDBOX=1 "$EXE" test_sandbox_symlink.nx 2>&1)
+rm -f escape_link.txt "$secret_file"
+if echo "$sandbox_out" | grep -q "Спіймано: OK" && ! echo "$sandbox_out" | grep -q "секрет-поза-sandbox"; then
+    echo "✅ test_sandbox_symlink.nx — symlink-обхід пісочниці заблоковано"
+    pass=$((pass+1))
+else
+    echo "❌ test_sandbox_symlink.nx — symlink дозволив вийти за межі пісочниці"
+    echo "$sandbox_out" | sed 's/^/       /'
+    fail=$((fail+1)); failed+=("test_sandbox_symlink.nx — обхід пісочниці через symlink")
 fi
 
 echo

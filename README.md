@@ -184,7 +184,7 @@ NX_SANDBOX=1 nx script.nx
 
 У цьому режимі:
 
-- `readFile`/`writeFile`/`appendFile`/`fileExists`/`readLines`/`deleteFile`/`makeDir`/`dirExists`/`deleteDir`/`listDir`/`zipExtract`/`zipCreate`/`zipExtractEntry`/`zipEntries` дозволені лише всередині поточної робочої директорії — вихід за її межі через абсолютний шлях (`/etc/passwd`) чи `../..` кидає помилку
+- `readFile`/`writeFile`/`appendFile`/`fileExists`/`readLines`/`deleteFile`/`makeDir`/`dirExists`/`deleteDir`/`listDir`/`zipExtract`/`zipCreate`/`zipExtractEntry`/`zipEntries` дозволені лише всередині поточної робочої директорії — вихід за її межі через абсолютний шлях (`/etc/passwd`), `../..` чи символічне посилання (файл або тека всередині робочої директорії, що веде за її межі) кидає помилку
 - `httpGet`/`httpPost`/`httpRequest`/`httpServer`/`urlStatus`/`wsConnect` кидають помилку — мережа повністю відключена
 - `osEnv` кидає помилку — змінні середовища (де можуть лежати токени/ключі) недоступні
 - `procStart`/`procRun` кидають помилку — запуск зовнішніх процесів повністю заборонений (найширший доступ з усіх: довільний виконуваний файл обходить і файлове, і мережеве обмеження вище)

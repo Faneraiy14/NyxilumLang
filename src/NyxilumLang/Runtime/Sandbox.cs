@@ -20,6 +20,48 @@ public static class Sandbox
         var root = Path.GetFullPath(Directory.GetCurrentDirectory());
         if (full != root && !full.StartsWith(root + Path.DirectorySeparatorChar))
             throw new Exception($"Пісочниця: доступ до файлу поза робочою директорією заборонено ('{path}')");
+
+        // Символічне посилання (сам файл АБО будь-яка проміжна тека на
+        // шляху) може вести за межі root, навіть якщо ЛЕКСИЧНИЙ шлях
+        // (перевірений вище) лежить усередині — Path.GetFullPath лише
+        // нормалізує текст шляху ("."/".."), symlink на диску не резолвить.
+        // Живцем перевірено: "escape_link.txt" (symlink на /etc/passwd),
+        // покладений усередині sandbox-теки, читав /etc/passwd безперешкодно.
+        var resolved = ResolveRealPath(full);
+        if (resolved != full && resolved != root && !resolved.StartsWith(root + Path.DirectorySeparatorChar))
+            throw new Exception($"Пісочниця: символічне посилання веде поза робочу директорію ('{path}' → '{resolved}')");
+    }
+
+    // Той самий алгоритм, що й realpath() у libc: іде по шляху компонент
+    // за компонентом від кореня, резолвлячи symlink на КОЖНОМУ рівні (не
+    // лише кінцевий файл) — інакше "symlinked_dir/real_file.txt", де сама
+    // symlinked_dir веде назовні, а не файл у ній, пройшов би перевірку.
+    private static string ResolveRealPath(string fullPath)
+    {
+        var root = Path.GetPathRoot(fullPath) ?? Path.DirectorySeparatorChar.ToString();
+        var parts = fullPath.Substring(root.Length).Split(Path.DirectorySeparatorChar, StringSplitOptions.RemoveEmptyEntries);
+        var current = root;
+        var seenLinks = 0;
+        foreach (var part in parts)
+        {
+            current = Path.Combine(current, part);
+            // while, не if - ланцюжок symlink (a -> b -> c) резолвиться
+            // до кінця вже на цьому компоненті, а не по одному кроку на
+            // кожен наступний part (де ланцюжок міг лишитись недорозв'язаним).
+            while (File.Exists(current) || Directory.Exists(current))
+            {
+                var linkTarget = new FileInfo(current).LinkTarget;
+                if (linkTarget == null) break;
+
+                if (++seenLinks > 40) // захист від symlink-циклу (a -> b -> a)
+                    throw new Exception("Пісочниця: забагато рівнів символічних посилань у шляху.");
+
+                current = Path.IsPathRooted(linkTarget)
+                    ? linkTarget
+                    : Path.GetFullPath(linkTarget, Path.GetDirectoryName(current)!);
+            }
+        }
+        return Path.GetFullPath(current);
     }
 
     public static void CheckNetwork()
