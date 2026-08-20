@@ -41,6 +41,22 @@ public class Parser
     private StatementNode? ParseStatement()
     {
         var token = Peek();
+
+        // ';' - опційний роздільник операторів (як у C/JS/PHP), зручний
+        // для кількох statements на одному рядку. Лексер завжди визнавав
+        // ';' як Punctuation (див. Lexer.cs), але жодне правило парсера
+        // його не споживало: токен долітав аж до ParsePrimary() як
+        // "початок виразу", де для нього немає жодного правила, і падав з
+        // непов'язаною помилкою "Невідомий вираз" замість того, щоб
+        // просто нічого не робити. ParseProgram()/ParseBlockStatement()
+        // вже толерантні до null (просто не додають), тому no-op тут
+        // безпечний і для кількох ';' підряд, і для зайвого ';' в кінці.
+        if (token.Type == TokenType.Punctuation && token.Value == ";")
+        {
+            Advance();
+            return null;
+        }
+
         var stmt = token.Type switch
         {
             TokenType.Keyword when token.Value == "func" => ParseFunctionDeclaration(),
