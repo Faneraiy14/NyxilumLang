@@ -41,6 +41,28 @@ public class VirtualMachine
     private readonly Stack<Dictionary<int, object>> _frameStack = new();
     private readonly Stack<int> _callStack = new();
 
+    // Некерована рекурсія (напр. func f(n) { return f(n+1) } без умови
+    // виходу) нічим не обмежувалась: _callStack/_frameStack ростуть на
+    // керованій купі, а не на нативному стеку ОС, тож native StackOverflow
+    // тут не спрацьовує - процес просто мовчки жер пам'ять (виміряно:
+    // ~140 МБ/с) аж до вичерпання й OOM-краху чи kill-у ззовні, замість
+    // зрозумілої, зловлюваної через try/catch помилки. gc_limit/
+    // NX_GC_MAX_OBJECTS тут теж не рятує - він рахує NyxilumLang-виділення
+    // (масиви/структури/мапи), не глибину викликів. 10_000 - з запасом
+    // для реальних рекурсивних алгоритмів (обхід дерева, наївний Фібоначчі
+    // тощо), але ловить втечу задовго до відчутного споживання пам'яті.
+    private const int MaxCallDepth = 10_000;
+
+    // Спільна перевірка для CALL/CALL_METHOD/CALL_VALUE - усі три незалежно
+    // штовхають _callStack/_frameStack, тож перевірка в лише одному з них
+    // (напр. CALL) не захищала б рекурсію через метод (self.method()) чи
+    // через замикання/значення-функцію (var f = func(n) {...}; f(n+1)).
+    private void CheckCallDepth()
+    {
+        if (_callStack.Count >= MaxCallDepth)
+            throw new Exception($"Перевищено максимальну глибину викликів ({MaxCallDepth}) — схоже на нескінченну рекурсію без умови виходу.");
+    }
+
     // Глобальні змінні (var на верхньому рівні файлу) — окреме сховище за
     // ІМЕНЕМ, а не за номером слота. Слоти _currentFrame нумеруються окремо
     // для кожної функції (Compiler.cs скидає _varCounter=0 при вході в
@@ -854,6 +876,7 @@ public class VirtualMachine
                     break;
                 case OpCode.CALL:
                     int addr = ReadInt16();
+                    CheckCallDepth();
                     _callStack.Push(_ip);
                     _frameStack.Push(_currentFrame);
                     _currentFrame = new Dictionary<int, object>();
@@ -1109,6 +1132,7 @@ public class VirtualMachine
                             var fullName = $"{typeName}.{methodName}";
                             if (_functionAddresses.TryGetValue(fullName, out int methodAddr))
                             {
+                                CheckCallDepth();
                                 _callStack.Push(_ip);
                                 _frameStack.Push(_currentFrame);
                                 _currentFrame = new Dictionary<int, object>();
@@ -1156,6 +1180,7 @@ public class VirtualMachine
                             break;
                         }
 
+                        CheckCallDepth();
                         _callStack.Push(_ip);
                         _frameStack.Push(_currentFrame);
                         _currentFrame = new Dictionary<int, object>();

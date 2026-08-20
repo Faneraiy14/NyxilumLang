@@ -1,0 +1,51 @@
+// Некерована рекурсія (без умови виходу) раніше нічим не обмежувалась:
+// _callStack/_frameStack ростуть на керованій купі, не на нативному
+// стеку ОС, тож native StackOverflow не спрацьовує - процес просто
+// мовчки жер пам'ять (~140 МБ/с, виміряно живцем) аж до OOM-краху
+// замість зрозумілої, зловлюваної через try/catch помилки.
+func infiniteRecursion(n) {
+    return infiniteRecursion(n + 1)
+}
+
+struct Rec {
+    dummy: i32
+}
+func Rec.go() {
+    return self.go()
+}
+
+func main() {
+    print("=== Некерована рекурсія через звичайну функцію ===")
+    try {
+        infiniteRecursion(0)
+        print("ПОМИЛКА: мало кинути виняток")
+    } catch (e) {
+        print("Спіймано: OK")
+    }
+
+    print("=== Некерована рекурсія через метод структури ===")
+    try {
+        var r = Rec { dummy: 0 }
+        r.go()
+        print("ПОМИЛКА: мало кинути виняток")
+    } catch (e) {
+        print("Спіймано: OK")
+    }
+
+    print("=== Легітимна глибока (скінченна) рекурсія все ще працює ===")
+    var result = sumTo(5000)
+    if (result == 12502500) {
+        print("sumTo(5000) = 12502500: OK")
+    } else {
+        print("ПОМИЛКА: sumTo(5000) = " + toString(result))
+    }
+
+    print("\n✅ Тест ліміту глибини викликів завершено")
+}
+
+func sumTo(n) {
+    if (n <= 0) { return 0 }
+    return n + sumTo(n - 1)
+}
+
+main()
