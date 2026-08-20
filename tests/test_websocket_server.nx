@@ -1,0 +1,38 @@
+// httpServer(port, handler, wsHandler) - wsHandler(ws, request) приймає
+// WebSocket-з'єднання (System.Net.HttpListener.AcceptWebSocketAsync,
+// handshake/фреймінг з БКЛ), виконується в ОКРЕМОМУ потоці зі своєю VM
+// (той самий підхід, що й spawn()), тож довгоживуче з'єднання не блокує
+// прийом наступних клієнтів. ws - той самий тип, що й wsConnect() -
+// усередині wsHandler працюють ті самі wsSend/wsReceive/wsClose.
+//
+// Не в автоматичному прогоні (як test_http_server.nx) - httpServer блокує
+// назавжди. Ручна перевірка: запустити, у другому терміналі -
+// nx tests/manual_ws_client.nx (чи будь-який WS-клієнт) на ws://localhost:8878/echo
+
+func httpHandler(req) {
+    return "звичайний HTTP, не WS"
+}
+
+func wsEcho(ws, req) {
+    print("[WS] нове з'єднання: " + mapGet(req, "path"))
+    while (true) {
+        var msg = wsReceive(ws, 10000)
+        if (msg == null) {
+            print("[WS] тайм-аут")
+            break
+        }
+        print("[WS] отримано: " + msg)
+        wsSend(ws, "echo: " + msg)
+        if (msg == "стоп") {
+            break
+        }
+    }
+    wsClose(ws)
+    print("[WS] закрито")
+}
+
+func main() {
+    httpServer(8878, httpHandler, wsEcho)
+}
+
+main()

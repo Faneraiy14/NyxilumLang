@@ -18,7 +18,7 @@ EXE="${NX_EXE:-$TESTS_DIR/../src/NyxilumLang/bin/Debug/net10.0-windows/Nx.exe}"
 # неформальний бенчмарк (десятки секунд), не тест коректності.
 # test_sandbox_symlink.nx — окремий блок нижче (потребує NX_SANDBOX=1 і
 # готує/прибирає symlink навколо запуску, тут пройшов би без сенсу).
-SKIP="test_graphics2d.nx test_graphics3d.nx calculator.nx test_http_server.nx bench_loop.nx test_sandbox_symlink.nx"
+SKIP="test_graphics2d.nx test_graphics3d.nx calculator.nx test_http_server.nx test_websocket_server.nx bench_loop.nx test_sandbox_symlink.nx ws_client_check.nx"
 
 # Тести, де помилка — очікуваний результат.
 EXPECT_ERROR="test_throw_uncaught.nx test_nested_scope_error.nx test_selective_import_missing.nx test_lib_testing_fail.nx test_parser_stack_limits.nx"
@@ -148,6 +148,28 @@ else
     echo "$sandbox_out" | sed 's/^/       /'
     fail=$((fail+1)); failed+=("test_sandbox_symlink.nx — обхід пісочниці через symlink")
 fi
+
+# WebSocket-сервер (httpServer(port, handler, wsHandler)): піднімаємо
+# test_websocket_server.nx у фоні, підключаємось справжнім WS-клієнтом
+# (той самий wsConnect, що й на клієнтському боці) і перевіряємо, що
+# echo реально доходить туди й назад - не лише що handshake не падає.
+"$EXE" test_websocket_server.nx > /tmp/nx_ws_server.log 2>&1 &
+ws_server_pid=$!
+sleep 1
+ws_client_out=$(timeout 8 "$EXE" ws_client_check.nx 2>&1)
+kill "$ws_server_pid" 2>/dev/null
+wait "$ws_server_pid" 2>/dev/null
+if echo "$ws_client_out" | grep -q "REPLY:echo: перевірка"; then
+    echo "✅ test_websocket_server.nx — WS-сервер: клієнт підключився й отримав echo"
+    pass=$((pass+1))
+else
+    echo "❌ test_websocket_server.nx — WS-клієнт не отримав очікуваний echo"
+    echo "$ws_client_out" | sed 's/^/       /'
+    echo "--- лог сервера ---"
+    cat /tmp/nx_ws_server.log | sed 's/^/       /'
+    fail=$((fail+1)); failed+=("test_websocket_server.nx — WS round-trip не спрацював")
+fi
+rm -f /tmp/nx_ws_server.log
 
 echo
 echo "======================================"

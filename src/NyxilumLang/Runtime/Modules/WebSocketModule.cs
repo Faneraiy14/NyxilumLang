@@ -9,10 +9,17 @@ namespace NyxilumLang.Runtime.Modules;
 // Telegram (звичайний HTTPS+JSON), Discord вимагає постійне з'єднання
 // для отримання подій у реальному часі - REST API там лише для
 // НАДСИЛАННЯ (httpRequest із заголовком Authorization цілком вистачає).
+//
+// Socket типізований АБСТРАКТНИМ WebSocket, не конкретним ClientWebSocket:
+// серверний прийом з'єднання (HttpListenerContext.AcceptWebSocketAsync,
+// HttpModule.cs) віддає інший конкретний тип, що НЕ успадковує
+// ClientWebSocket, але SendAsync/ReceiveAsync/CloseAsync нижче однаково
+// визначені на самому абстрактному класі - той самий NxWebSocket і ті самі
+// wsSend/wsReceive/wsClose працюють для клієнтського й серверного боку.
 public sealed class NxWebSocket : IDisposable
 {
-    public ClientWebSocket Socket { get; }
-    public NxWebSocket(ClientWebSocket socket) => Socket = socket;
+    public WebSocket Socket { get; }
+    public NxWebSocket(WebSocket socket) => Socket = socket;
     public void Dispose() => Socket.Dispose();
 }
 

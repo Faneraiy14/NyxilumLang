@@ -1,4 +1,5 @@
 using System.Net;
+using System.Net.WebSockets;
 using System.Text;
 using NyxilumLang.VM;
 
@@ -31,28 +32,38 @@ public static class HttpModule
         }
     }
 
-    // httpServer(port, handler) — handler(request) викликається на кожен
-    // запит. Раніше передавав лише (path, method): жодного способу
-    // прочитати тіло POST-запиту (форми, JSON API, вебхуки) чи заголовки -
-    // будь-який застосунок складніший за "віддати статичний текст" був
-    // неможливий. request - мапа {path, method, body, query, headers}:
-    // ОДИН аргумент, а не (path, method, body, ...) позиційно, навмисно -
-    // InvokeFunctionValue штовхає ВСІ передані аргументи на спільний стек,
-    // а функція знімає РІВНО стільки, скільки в неї своїх параметрів;
-    // додавання ще одних позиційних аргументів до наявного (path, method)
-    // лишило б зайве значення висіти на стеку для наявних 2-параметрових
-    // handler'ів. Мапа з одним аргументом уникає цього назавжди - розширити
-    // новим ключем (напр. cookies) пізніше можна без жодного зламу.
+    // httpServer(port, handler, wsHandler?) — handler(request) викликається
+    // на кожен звичайний запит. Раніше передавав лише (path, method):
+    // жодного способу прочитати тіло POST-запиту (форми, JSON API, вебхуки)
+    // чи заголовки - будь-який застосунок складніший за "віддати статичний
+    // текст" був неможливий. request - мапа {path, method, body, query,
+    // headers}: ОДИН аргумент, а не (path, method, body, ...) позиційно,
+    // навмисно - InvokeFunctionValue штовхає ВСІ передані аргументи на
+    // спільний стек, а функція знімає РІВНО стільки, скільки в неї своїх
+    // параметрів; додавання ще одних позиційних аргументів до наявного
+    // (path, method) лишило б зайве значення висіти на стеку для наявних
+    // 2-параметрових handler'ів. Мапа з одним аргументом уникає цього
+    // назавжди - розширити новим ключем (напр. cookies) пізніше можна без
+    // жодного зламу.
     //
     // Відповідь handler: звичайний рядок (як і раніше - тіло, статус 200,
     // text/html) АБО мапа {status?, body?, contentType?} для повного
     // контролю (потрібно для API, що мають повертати конкретні коди: 201
     // Created, 404 Not Found, JSON замість HTML тощо).
+    //
+    // wsHandler(ws, request) — опційний третій аргумент: якщо переданий,
+    // запити з заголовком Upgrade: websocket приймаються як WebSocket
+    // (System.Net.HttpListener підтримує це нативно - AcceptWebSocketAsync,
+    // весь handshake/фреймінг уже реалізований у БКЛ) замість звичайного
+    // handler. ws - той самий тип, що й wsConnect() (WebSocketModule.cs),
+    // тож усередині wsHandler працюють ті самі wsSend/wsReceive/wsClose,
+    // що й на клієнтському боці.
     private static object? CreateServer(object[] args)
     {
         Sandbox.CheckNetwork();
         int port = Convert.ToInt32(args[0]);
         var handlerRef = (NxFunctionRef)args[1];
+        var wsHandlerRef = args.Length > 2 ? args[2] as NxFunctionRef : null;
         var vm = VirtualMachine.Current!;
 
         var listener = new HttpListener();
@@ -72,31 +83,13 @@ public static class HttpModule
                 break;
             }
 
-            string path = context.Request.Url?.AbsolutePath ?? "/";
-            string method = context.Request.HttpMethod;
-            string query = context.Request.Url?.Query ?? "";
-            if (query.StartsWith('?')) query = query.Substring(1);
-
-            string requestBody = "";
-            if (context.Request.HasEntityBody)
+            if (context.Request.IsWebSocketRequest && wsHandlerRef != null)
             {
-                using var reader = new StreamReader(context.Request.InputStream, context.Request.ContentEncoding);
-                requestBody = reader.ReadToEnd();
+                AcceptWebSocket(context, wsHandlerRef, vm);
+                continue;
             }
 
-            var headersMap = new NxMap();
-            foreach (var key in context.Request.Headers.AllKeys)
-            {
-                if (key == null) continue;
-                headersMap.Entries[key] = context.Request.Headers[key] ?? "";
-            }
-
-            var requestMap = new NxMap();
-            requestMap.Entries["path"] = path;
-            requestMap.Entries["method"] = method;
-            requestMap.Entries["body"] = requestBody;
-            requestMap.Entries["query"] = query;
-            requestMap.Entries["headers"] = headersMap;
+            var requestMap = BuildRequestMap(context.Request);
 
             int statusCode = 200;
             string body;
@@ -131,6 +124,100 @@ public static class HttpModule
         }
 
         return null;
+    }
+
+    private static NxMap BuildRequestMap(HttpListenerRequest request)
+    {
+        string path = request.Url?.AbsolutePath ?? "/";
+        string method = request.HttpMethod;
+        string query = request.Url?.Query ?? "";
+        if (query.StartsWith('?')) query = query.Substring(1);
+
+        string requestBody = "";
+        if (request.HasEntityBody)
+        {
+            using var reader = new StreamReader(request.InputStream, request.ContentEncoding);
+            requestBody = reader.ReadToEnd();
+        }
+
+        var headersMap = new NxMap();
+        foreach (var key in request.Headers.AllKeys)
+        {
+            if (key == null) continue;
+            headersMap.Entries[key] = request.Headers[key] ?? "";
+        }
+
+        var requestMap = new NxMap();
+        requestMap.Entries["path"] = path;
+        requestMap.Entries["method"] = method;
+        requestMap.Entries["body"] = requestBody;
+        requestMap.Entries["query"] = query;
+        requestMap.Entries["headers"] = headersMap;
+        return requestMap;
+    }
+
+    // Приймає WS-з'єднання й запускає wsHandler(ws, request) в ОКРЕМОМУ
+    // потоці зі своєю VM - той самий підхід, що й spawn() (ConcurrencyModule.
+    // cs): WebSocket-з'єднання довгоживуче за самою суттю (постійний обмін
+    // повідомленнями, не один запит-відповідь), тож виконання wsHandler
+    // прямо в головному циклі прийому заблокувало б прийом УСІХ наступних
+    // клієнтів (і звичайних HTTP, і інших WS) на весь час цієї розмови.
+    // DeepCopy аргументів/глобальних - той самий захист від гонки даних
+    // між потоками, що й у spawn().
+    private static void AcceptWebSocket(HttpListenerContext context, NxFunctionRef wsHandlerRef, VirtualMachine parentVm)
+    {
+        WebSocketContext wsContext;
+        try
+        {
+            wsContext = context.AcceptWebSocketAsync(subProtocol: null).GetAwaiter().GetResult();
+        }
+        catch (Exception ex)
+        {
+            context.Response.StatusCode = 500;
+            var buf = Encoding.UTF8.GetBytes("WebSocket handshake failed: " + ex.Message);
+            context.Response.OutputStream.Write(buf, 0, buf.Length);
+            context.Response.OutputStream.Close();
+            return;
+        }
+
+        var ws = new NxWebSocket(wsContext.WebSocket);
+        var requestMap = (NxMap)ConcurrencyModule.DeepCopy(BuildRequestMap(context.Request))!;
+        var handlerCopy = (NxFunctionRef)ConcurrencyModule.DeepCopy(wsHandlerRef)!;
+
+        var globalsCopy = new Dictionary<string, object>();
+        foreach (var kv in parentVm.Globals) globalsCopy[kv.Key] = ConcurrencyModule.DeepCopy(kv.Value)!;
+
+        var thread = new Thread(() =>
+        {
+            try
+            {
+                var workerVm = new VirtualMachine(parentVm, globalsCopy);
+                workerVm.RunFunction(handlerCopy, new object[] { ws, requestMap });
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine("[Nx] wsHandler завершився з помилкою: " + ex.Message);
+            }
+            finally
+            {
+                if (ws.Socket.State == WebSocketState.Open)
+                {
+                    try
+                    {
+                        ws.Socket.CloseAsync(WebSocketCloseStatus.NormalClosure, "", CancellationToken.None)
+                            .GetAwaiter().GetResult();
+                    }
+                    catch
+                    {
+                        // клієнт уже розірвав з'єднання зі свого боку - закривати нема що.
+                    }
+                }
+            }
+        })
+        {
+            IsBackground = true,
+        };
+        thread.Start();
     }
 
     private static object? HttpGet(object[] args)

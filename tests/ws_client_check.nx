@@ -1,0 +1,10 @@
+func main() {
+    var ws = wsConnect("ws://localhost:8878/echo")
+    wsSend(ws, "перевірка")
+    var reply = wsReceive(ws, 5000)
+    print("REPLY:" + toString(reply))
+    wsSend(ws, "стоп")
+    wsReceive(ws, 5000)
+    wsClose(ws)
+}
+main()
