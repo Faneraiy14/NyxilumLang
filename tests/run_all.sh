@@ -18,7 +18,7 @@ EXE="${NX_EXE:-$TESTS_DIR/../src/NyxilumLang/bin/Debug/net10.0-windows/Nx.exe}"
 # неформальний бенчмарк (десятки секунд), не тест коректності.
 # test_sandbox_symlink.nx — окремий блок нижче (потребує NX_SANDBOX=1 і
 # готує/прибирає symlink навколо запуску, тут пройшов би без сенсу).
-SKIP="test_graphics2d.nx test_graphics3d.nx calculator.nx test_http_server.nx test_websocket_server.nx bench_loop.nx test_sandbox_symlink.nx ws_client_check.nx"
+SKIP="test_graphics2d.nx test_graphics3d.nx calculator.nx test_http_server.nx test_websocket_server.nx bench_loop.nx test_sandbox_symlink.nx ws_client_check.nx ws_timeout_recovery_check.nx"
 
 # Тести, де помилка — очікуваний результат.
 EXPECT_ERROR="test_throw_uncaught.nx test_nested_scope_error.nx test_selective_import_missing.nx test_lib_testing_fail.nx test_parser_stack_limits.nx"
@@ -157,8 +157,6 @@ fi
 ws_server_pid=$!
 sleep 1
 ws_client_out=$(timeout 8 "$EXE" ws_client_check.nx 2>&1)
-kill "$ws_server_pid" 2>/dev/null
-wait "$ws_server_pid" 2>/dev/null
 if echo "$ws_client_out" | grep -q "REPLY:echo: перевірка"; then
     echo "✅ test_websocket_server.nx — WS-сервер: клієнт підключився й отримав echo"
     pass=$((pass+1))
@@ -168,6 +166,22 @@ else
     echo "--- лог сервера ---"
     cat /tmp/nx_ws_server.log | sed 's/^/       /'
     fail=$((fail+1)); failed+=("test_websocket_server.nx — WS round-trip не спрацював")
+fi
+
+# Регресія: wsReceive-тайм-аут раніше абортував сокет (CancellationToken
+# на ReceiveAsync -> стан Aborted), тож усе ПІСЛЯ першого тайм-ауту падало.
+# Той самий сервер вище ще живий - підключаємось повторно, навмисно ловимо
+# тайм-аут першим, і перевіряємо, що з'єднання лишається робочим.
+ws_recovery_out=$(timeout 8 "$EXE" ws_timeout_recovery_check.nx 2>&1)
+kill "$ws_server_pid" 2>/dev/null
+wait "$ws_server_pid" 2>/dev/null
+if echo "$ws_recovery_out" | grep -q "REPLY:echo: після тайм-ауту" && ! echo "$ws_recovery_out" | grep -qi "НЕСПОДІВАНО\|invalid state\|Aborted"; then
+    echo "✅ ws_timeout_recovery_check.nx — wsReceive-тайм-аут не ламає з'єднання"
+    pass=$((pass+1))
+else
+    echo "❌ ws_timeout_recovery_check.nx — з'єднання не пережило тайм-аут"
+    echo "$ws_recovery_out" | sed 's/^/       /'
+    fail=$((fail+1)); failed+=("ws_timeout_recovery_check.nx — тайм-аут ламає сокет")
 fi
 rm -f /tmp/nx_ws_server.log
 

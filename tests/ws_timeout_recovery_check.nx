@@ -1,0 +1,24 @@
+// Регресія: wsReceive(ws, timeoutMs), коли реально спрацьовує тайм-аут
+// (нічого не прийшло), раніше скасовував саму ReceiveAsync через
+// CancellationToken - System.Net.WebSockets переводить сокет у стан
+// Aborted при такому скасуванні, тож БУДЬ-ЯКИЙ наступний wsSend/wsReceive/
+// wsClose на тому ж з'єднанні падав з "invalid state ('Aborted')". Тут
+// навмисно чекаємо тайм-аут ПЕРШИМ (сервер ще нічого не надіслав), а тоді
+// перевіряємо, що з'єднання й далі повністю робоче.
+func main() {
+    var ws = wsConnect("ws://localhost:8878/echo")
+
+    var timedOut = wsReceive(ws, 300)
+    if (timedOut != null) {
+        print("НЕСПОДІВАНО: прийшло щось до тайм-ауту: " + toString(timedOut))
+    }
+
+    wsSend(ws, "після тайм-ауту")
+    var reply = wsReceive(ws, 5000)
+    print("REPLY:" + toString(reply))
+
+    wsSend(ws, "стоп")
+    wsReceive(ws, 5000)
+    wsClose(ws)
+}
+main()

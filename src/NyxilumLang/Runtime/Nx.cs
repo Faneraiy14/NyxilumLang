@@ -1,5 +1,7 @@
+using System.Globalization;
 using System.Linq;
 using System.Text;
+using System.Threading;
 using NyxilumLang.AST;
 using NyxilumLang.Core;
 using NyxilumLang.Compiler;
@@ -13,8 +15,18 @@ public class Nx
 {
     public static void Main(string[] args)
     {
+        // Числа в NyxilumLang (літерали, JSON, toDouble/toInt("...")) завжди
+        // використовують "." як десятковий роздільник, незалежно від локалі
+        // ОС. Без цього Convert.ToDouble/ToInt32 підхоплюють поточну культуру
+        // ОС (напр. uk-UA використовує ","), і toDouble("0.083") падає з
+        // "not in a correct format" на машинах з такою локаллю — поведінка
+        // програми не має залежати від того, де її запустили.
+        CultureInfo.DefaultThreadCurrentCulture = CultureInfo.InvariantCulture;
+        CultureInfo.DefaultThreadCurrentUICulture = CultureInfo.InvariantCulture;
+        Thread.CurrentThread.CurrentCulture = CultureInfo.InvariantCulture;
+
         Console.OutputEncoding = Encoding.UTF8;
-        
+
         if (args.Length == 0)
         {
             RunRepl();

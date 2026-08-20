@@ -1,0 +1,34 @@
+// Числові рядки з "." мають парситись однаково незалежно від локалі ОС.
+// Convert.ToDouble/ToInt32 без InvariantCulture підхоплюють поточну
+// культуру процесу - на машині з локаллю на кшталт uk-UA (кома як
+// десятковий роздільник) toDouble("0.083") раніше падав з
+// "The input string '0.083' was not in a correct format.", хоча "0.083" -
+// це рівно те, що видає JSON/regex/будь-який інший рядок з крапкою.
+// Виявлено живцем: /api/ping у Nyxilum Control Center падав саме тут.
+
+func expectDouble(s, expected) {
+    var v = toDouble(s)
+    if (v != expected) {
+        throw "toDouble(\"" + s + "\") = " + toString(v) + ", очікувалось " + toString(expected)
+    }
+}
+
+func main() {
+    expectDouble("0.083", 0.083)
+    expectDouble("3.14159", 3.14159)
+    expectDouble("42", 42)
+    expectDouble("-1.5", -1.5)
+
+    if (toInt("42.0") != 42) {
+        throw "toInt(\"42.0\") мав дати 42"
+    }
+
+    var sum = toDouble("1.1") + toDouble("2.2")
+    if (abs(sum - 3.3) > 0.0001) {
+        throw "1.1 + 2.2 через toDouble мало дати ~3.3, отримано " + toString(sum)
+    }
+
+    print("culture-invariant: OK")
+}
+
+main()
