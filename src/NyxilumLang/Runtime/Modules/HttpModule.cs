@@ -31,12 +31,23 @@ public static class HttpModule
         }
     }
 
-    // httpServer(port, handler) — handler(path, method) повертає рядок
-    // тіла відповіді. Раніше створювала HttpListener і одразу повертала
-    // його в NyxilumLang-код, але не було жодного способу прийняти запит чи
-    // відповісти — кожен клієнт просто зависав би назавжди. Тепер блокує
-    // й сама веде цикл прийому запитів, викликаючи NyxilumLang-колбек на
-    // кожен запит — той самий підхід, що й guiOnAction для кліків.
+    // httpServer(port, handler) — handler(request) викликається на кожен
+    // запит. Раніше передавав лише (path, method): жодного способу
+    // прочитати тіло POST-запиту (форми, JSON API, вебхуки) чи заголовки -
+    // будь-який застосунок складніший за "віддати статичний текст" був
+    // неможливий. request - мапа {path, method, body, query, headers}:
+    // ОДИН аргумент, а не (path, method, body, ...) позиційно, навмисно -
+    // InvokeFunctionValue штовхає ВСІ передані аргументи на спільний стек,
+    // а функція знімає РІВНО стільки, скільки в неї своїх параметрів;
+    // додавання ще одних позиційних аргументів до наявного (path, method)
+    // лишило б зайве значення висіти на стеку для наявних 2-параметрових
+    // handler'ів. Мапа з одним аргументом уникає цього назавжди - розширити
+    // новим ключем (напр. cookies) пізніше можна без жодного зламу.
+    //
+    // Відповідь handler: звичайний рядок (як і раніше - тіло, статус 200,
+    // text/html) АБО мапа {status?, body?, contentType?} для повного
+    // контролю (потрібно для API, що мають повертати конкретні коди: 201
+    // Created, 404 Not Found, JSON замість HTML тощо).
     private static object? CreateServer(object[] args)
     {
         Sandbox.CheckNetwork();
@@ -63,21 +74,57 @@ public static class HttpModule
 
             string path = context.Request.Url?.AbsolutePath ?? "/";
             string method = context.Request.HttpMethod;
+            string query = context.Request.Url?.Query ?? "";
+            if (query.StartsWith('?')) query = query.Substring(1);
 
+            string requestBody = "";
+            if (context.Request.HasEntityBody)
+            {
+                using var reader = new StreamReader(context.Request.InputStream, context.Request.ContentEncoding);
+                requestBody = reader.ReadToEnd();
+            }
+
+            var headersMap = new NxMap();
+            foreach (var key in context.Request.Headers.AllKeys)
+            {
+                if (key == null) continue;
+                headersMap.Entries[key] = context.Request.Headers[key] ?? "";
+            }
+
+            var requestMap = new NxMap();
+            requestMap.Entries["path"] = path;
+            requestMap.Entries["method"] = method;
+            requestMap.Entries["body"] = requestBody;
+            requestMap.Entries["query"] = query;
+            requestMap.Entries["headers"] = headersMap;
+
+            int statusCode = 200;
             string body;
+            string contentType = "text/html; charset=utf-8";
             try
             {
-                var result = vm.InvokeFunctionValue(handlerRef, new object[] { path, method });
-                body = result?.ToString() ?? "";
+                var result = vm.InvokeFunctionValue(handlerRef, new object[] { requestMap });
+                if (result is NxMap resultMap)
+                {
+                    if (resultMap.Entries.TryGetValue("status", out var s)) statusCode = Convert.ToInt32(s);
+                    if (resultMap.Entries.TryGetValue("body", out var b)) body = b?.ToString() ?? "";
+                    else body = "";
+                    if (resultMap.Entries.TryGetValue("contentType", out var ct)) contentType = ct?.ToString() ?? contentType;
+                }
+                else
+                {
+                    body = result?.ToString() ?? "";
+                }
             }
             catch (Exception ex)
             {
-                context.Response.StatusCode = 500;
+                statusCode = 500;
                 body = "Internal Server Error: " + ex.Message;
             }
 
             var buffer = Encoding.UTF8.GetBytes(body);
-            context.Response.ContentType = "text/html; charset=utf-8";
+            context.Response.StatusCode = statusCode;
+            context.Response.ContentType = contentType;
             context.Response.ContentLength64 = buffer.Length;
             context.Response.OutputStream.Write(buffer, 0, buffer.Length);
             context.Response.OutputStream.Close();

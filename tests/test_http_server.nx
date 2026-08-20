@@ -1,18 +1,32 @@
 // httpServer(port, handler) блокує назавжди (як guiShow), тому не в
 // автоматичному прогоні — для ручної перевірки: запустити й у другому
-// терміналі curl http://localhost:8765/
+// терміналі curl.
 //
-// Раніше httpServer(port) створював HttpListener і одразу повертав його
-// в NyxilumLang, але не було способу прийняти запит чи відповісти — кожен
-// клієнт зависав би назавжди. Тепер сама веде цикл прийому запитів і
-// викликає NyxilumLang-колбек на кожен — той самий підхід, що й guiOnAction.
+// handler отримує ОДИН аргумент — мапу запиту {path, method, body, query,
+// headers} — а не (path, method) окремо: дозволяє читати тіло POST-запиту
+// (форми, JSON API, вебхуки), чого раніше не можна було зробити взагалі.
+// Відповідь — звичайний рядок (статус 200, text/html) або мапа
+// {status?, body?, contentType?} для повного контролю.
 
-func handler(path, method) {
-    print("Запит: " + method + " " + path)
+func handler(req) {
+    var path = mapGet(req, "path")
+    var method = mapGet(req, "method")
+    print("Запит: " + method + " " + path + " (тіло: " + toString(len(mapGet(req, "body"))) + " байт)")
+
     if path == "/" {
         return "Привіт з NyxilumLang HTTP-сервера!"
     }
-    return "Не знайдено: " + path
+    if path == "/echo" && method == "POST" {
+        var m = newMap()
+        mapSet(m, "status", 200)
+        mapSet(m, "body", mapGet(req, "body"))
+        mapSet(m, "contentType", "text/plain; charset=utf-8")
+        return m
+    }
+    var notFound = newMap()
+    mapSet(notFound, "status", 404)
+    mapSet(notFound, "body", "Не знайдено: " + path)
+    return notFound
 }
 
 func main() {
