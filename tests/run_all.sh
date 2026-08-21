@@ -18,7 +18,7 @@ EXE="${NX_EXE:-$TESTS_DIR/../src/NyxilumLang/bin/Debug/net10.0-windows/Nx.exe}"
 # неформальний бенчмарк (десятки секунд), не тест коректності.
 # test_sandbox_symlink.nx — окремий блок нижче (потребує NX_SANDBOX=1 і
 # готує/прибирає symlink навколо запуску, тут пройшов би без сенсу).
-SKIP="test_graphics2d.nx test_graphics3d.nx calculator.nx test_http_server.nx test_websocket_server.nx bench_loop.nx test_sandbox_symlink.nx ws_client_check.nx ws_timeout_recovery_check.nx"
+SKIP="test_graphics2d.nx test_graphics3d.nx calculator.nx test_http_server.nx test_websocket_server.nx bench_loop.nx test_sandbox_symlink.nx ws_client_check.nx ws_timeout_recovery_check.nx test_ast_dump.nx"
 
 # Тести, де помилка — очікуваний результат.
 EXPECT_ERROR="test_throw_uncaught.nx test_nested_scope_error.nx test_selective_import_missing.nx test_lib_testing_fail.nx test_parser_stack_limits.nx"
@@ -184,6 +184,22 @@ else
     fail=$((fail+1)); failed+=("ws_timeout_recovery_check.nx — тайм-аут ламає сокет")
 fi
 rm -f /tmp/nx_ws_server.log
+
+# "nx ast файл.nx" (AstJsonDumper.cs): AST у канонічній JSON-схемі, яку
+# читає anylint (github.com/Faneraiy14/anylint) через NyxilumProvider.
+# Перевіряємо форму, а не повний дамп - схема стабільна, конкретне дерево
+# може вирости новими вузлами й це не має ламати цей тест.
+ast_out=$(timeout "$TIMEOUT_SEC" "$EXE" ast test_ast_dump.nx 2>&1)
+if echo "$ast_out" | grep -q '"type":"FunctionDecl","line":7,"attributes":{"name":"f"}' \
+    && echo "$ast_out" | grep -q '"type":"Return"' \
+    && echo "$ast_out" | grep -q '"type":"CatchClause".*"children":\[{"type":"Block","line":13,"attributes":{},"children":\[\]}\]'; then
+    echo "✅ test_ast_dump.nx — 'nx ast' видає канонічний JSON (FunctionDecl/Return/порожній CatchClause)"
+    pass=$((pass+1))
+else
+    echo "❌ test_ast_dump.nx — 'nx ast' видав щось несподіване"
+    echo "$ast_out" | sed 's/^/       /'
+    fail=$((fail+1)); failed+=("test_ast_dump.nx — форма AST-дампу зламана")
+fi
 
 echo
 echo "======================================"

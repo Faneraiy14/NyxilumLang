@@ -488,3 +488,5 @@ closeCanvas(canvas)
 Інші команди:
 - `nx format program.nx` - вивести відформатований код
 - `nx lint program.nx` - перевірити код на типові помилки (невикористані змінні, задовгі рядки, порожні блоки)
+- `nx check program.nx` - лише Lexer+Parser (без Compiler/VM) - "чи взагалі валідний синтаксис", без побічних ефектів; виводить `OK` або `Parse Error: ...`
+- `nx ast program.nx` - AST у канонічній JSON-схемі `{"type","line","attributes","children"}` (`AstJsonDumper.cs`) - той самий формат, що видає `PhpProvider` в [anylint](https://github.com/Faneraiy14/anylint) із дерева `nikic/php-parser`, тож структурні правила аналізатора (dead-code-after-return, empty-catch) працюють на `.nx`-файлах без жодної зміни свого коду через `NyxilumProvider`

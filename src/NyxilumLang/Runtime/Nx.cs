@@ -59,6 +59,12 @@ public class Nx
             return;
         }
 
+        if (command == "ast" && args.Length > 1)
+        {
+            RunAst(args[1]);
+            return;
+        }
+
         if (command == "install")
         {
             RunInstall(args.Length > 1 ? args[1] : null);
@@ -193,6 +199,34 @@ public class Nx
             var parser = new Parser(tokens);
             parser.ParseProgram();
             Console.WriteLine("OK");
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Parse Error: {ex.Message}");
+            Environment.Exit(1);
+        }
+    }
+
+    // "nx ast файл.nx" — той самий Lexer+Parser, що й "nx check" (без
+    // Compiler/VM), але замість "OK" виводить AST у JSON за канонічною
+    // схемою, яку читає anylint (github.com/Faneraiy14/anylint) через свій
+    // NyxilumProvider - див. AstJsonDumper.cs, чому саме ця форма.
+    private static void RunAst(string path)
+    {
+        if (!File.Exists(path))
+        {
+            Console.WriteLine($"Error: Cannot find file '{path}'");
+            Environment.Exit(1);
+            return;
+        }
+        try
+        {
+            string code = File.ReadAllText(path, Encoding.UTF8);
+            var lexer = new Lexer(code);
+            var tokens = lexer.Tokenize();
+            var parser = new Parser(tokens);
+            var program = parser.ParseProgram();
+            Console.WriteLine(NyxilumLang.Tools.AstJsonDumper.Dump(program));
         }
         catch (Exception ex)
         {
