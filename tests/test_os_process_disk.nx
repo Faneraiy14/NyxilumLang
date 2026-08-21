@@ -1,0 +1,42 @@
+// osProcessList()/osDiskFree() - регресія: dot-доступ (p.pid) працює
+// лише на Dictionary<string,object> (те саме, що gc_stats()/procRun()),
+// а не на NxMap - перша версія цієї функції поверталась через NxMap і
+// падала з "значення зліва - null або не структура".
+
+func main() {
+    var procs = osProcessList()
+    if (len(procs) < 1) {
+        throw "osProcessList() мав повернути хоча б один процес (сам себе)"
+    }
+
+    var p = procs[0]
+    if (typeOf(p.pid) != "number") {
+        throw "p.pid мав бути числом, отримано " + typeOf(p.pid)
+    }
+    if (typeOf(p.name) != "string" || len(p.name) == 0) {
+        throw "p.name мав бути непорожнім рядком"
+    }
+    if (typeOf(p.memMB) != "number" || p.memMB < 0) {
+        throw "p.memMB мав бути невід'ємним числом"
+    }
+    if (typeOf(p.cpuPercent) != "number") {
+        throw "p.cpuPercent мав бути числом"
+    }
+
+    var sorted = sort(procs, func(a, b) { return b.memMB - a.memMB })
+    if (sorted[0].memMB < sorted[len(sorted) - 1].memMB) {
+        throw "sort() за memMB зламано"
+    }
+
+    var disk = osDiskFree(".")
+    if (typeOf(disk.freeGB) != "number" || typeOf(disk.totalGB) != "number") {
+        throw "osDiskFree() мав повернути {freeGB, totalGB} числами"
+    }
+    if (disk.freeGB > disk.totalGB) {
+        throw "вільного місця не може бути більше за загальне"
+    }
+
+    print("os_process_disk: OK (" + toString(len(procs)) + " процесів, " + toString(disk.freeGB) + " ГБ вільно)")
+}
+
+main()

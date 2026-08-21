@@ -179,6 +179,7 @@ public class Compiler
         "newMap", "mapSet", "mapGet", "mapHas", "mapRemove", "mapKeys", "mapValues",
         "sort", "mapArr", "filter", "reduce", "toJson", "fromJson", "callWithArgs",
         "osPlatform", "osArchitecture", "osMemory", "osCpuCount", "osEnv", "osCwd",
+        "osProcessList", "osDiskFree", "notify",
         "httpServer", "httpGet", "urlStatus", "httpPost", "httpRequest",
         "regexTest", "regexMatch", "regexFindAll", "regexReplace",
         "wsConnect", "wsSend", "wsReceive", "wsClose",
