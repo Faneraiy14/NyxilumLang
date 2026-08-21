@@ -170,7 +170,7 @@ public class Compiler
         "round", "floor", "ceil", "max", "min", "clamp",
         "toString", "toInt", "toDouble", "toFixed", "len",
         "substring", "replace", "toUpper", "toLower", "contains", "startsWith", "endsWith", "split", "join",
-        "trim", "repeat", "indexOf", "reverse",
+        "trim", "repeat", "indexOf", "reverse", "utf8ByteCount",
         "append", "pop", "removeAt", "insert", "clear", "slice", "unique",
         "randomInt", "randomDouble",
         "now", "today", "timestamp", "formatDate", "parseDate", "sleep",

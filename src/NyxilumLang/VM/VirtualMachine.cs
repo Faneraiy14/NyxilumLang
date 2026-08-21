@@ -1,3 +1,4 @@
+using System.Text;
 using NyxilumLang.Compiler;
 using NyxilumLang.Runtime;
 using NyxilumDbLib = NyxilumDb.NyxilumDb;
@@ -330,6 +331,14 @@ public class VirtualMachine
         _nativeFunctions["startsWith"] = args => (args[0]?.ToString() ?? "").StartsWith(args[1]?.ToString() ?? "");
         _nativeFunctions["endsWith"] = args => (args[0]?.ToString() ?? "").EndsWith(args[1]?.ToString() ?? "");
         _nativeFunctions["trim"] = args => (args[0]?.ToString() ?? "").Trim();
+        // len(s) рахує UTF-16 code units (.NET string.Length), НЕ байти -
+        // для кирилиці/емодзі це майже вдвічі менше за реальний розмір,
+        // яким рядок ляже на диск (усе зберігається як UTF-8, напр.
+        // dbSet). Ліміт розміру на кшталт "len(text) > MAX_BYTES" тому
+        // системно пропускав удвічі більше кирилиці, ніж малось на увазі
+        // (живий приклад: nyxilum-paste приймав 400КБ кирилиці при
+        // заявленому ліміті 200КБ). utf8ByteCount(s) дає реальний розмір.
+        _nativeFunctions["utf8ByteCount"] = args => (double)Encoding.UTF8.GetByteCount(args[0]?.ToString() ?? "");
         _nativeFunctions["repeat"] = args => string.Concat(Enumerable.Repeat(args[0]?.ToString() ?? "", TruncToInt(args[1])));
         _nativeFunctions["indexOf"] = args => {
             if (args[0] is List<object> arr) return (double)arr.FindIndex(item => ValuesEqual(item, args[1]));

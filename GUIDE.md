@@ -445,6 +445,7 @@ closeCanvas(canvas)
 - `charCode(s)` - код першого символу рядка (наприклад, `charCode("A")` -> 65); `fromCharCode(code)` - символ за кодом
 - `len(v)`, `substring(s,start,len)`, `replace/toUpper/toLower/contains/startsWith/endsWith(s,...)`, `split(s,sep)`, `join(arr,sep)` - рядки
 - `trim(s)` - прибирає пробіли з обох боків; `repeat(s,n)` - повторює рядок n разів
+- `utf8ByteCount(s)` - реальний розмір рядка в байтах UTF-8. `len(s)` рахує символи (.NET `string.Length`, UTF-16 code units), НЕ байти - для кирилиці/емодзі це майже вдвічі менше за розмір, яким рядок ляже на диск чи в мережу (усе кодується як UTF-8). Ліміт розміру на кшталт `if (len(text) > MAX_BYTES)` системно пропускає вдвічі більше кирилиці, ніж малось на увазі - для реального ліміту в байтах використовуй саме цю функцію
 - `indexOf(v,item)` - позиція елемента/підрядка (-1, якщо нема); працює і для рядків, і для масивів
 - `reverse(v)` - розвертає рядок або масив (оригінальний масив не змінює)
 - `append(arr,v)`, `pop(arr)`, `insert(arr,i,v)`, `removeAt(arr,i)`, `clear(arr)` - масиви
