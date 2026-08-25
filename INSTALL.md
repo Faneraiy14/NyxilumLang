@@ -62,8 +62,11 @@ nx --version
 ```bash
 git clone https://github.com/Faneraiy14/NyxilumLang.git
 cd NyxilumLang
-dotnet build src/NyxilumLang
+dotnet build src/NyxilumLang -f net10.0 -p:EnableWindowsTargeting=true
 ```
+
+(csproj мультитаргетить `net10.0-windows;net10.0` — на Linux/Mac без
+`-f net10.0 -p:EnableWindowsTargeting=true` збірка впаде з NETSDK1100.)
 
 Далі — той самий скрипт встановлення, що й у Способі 1, лежить прямо в
 корені репозиторію й сам знаходить щойно зібраний бінарник:

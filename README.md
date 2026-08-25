@@ -38,8 +38,11 @@ Linux і Mac. З вихідного коду (потрібен [.NET SDK 10](htt
 крос-платформний):
 
 ```bash
-dotnet build src/NyxilumLang
+dotnet build src/NyxilumLang -f net10.0 -p:EnableWindowsTargeting=true
 ```
+
+(csproj мультитаргетить `net10.0-windows;net10.0` — без `-f net10.0
+-p:EnableWindowsTargeting=true` на Linux/Mac збірка впаде з NETSDK1100.)
 
 Windows:
 
