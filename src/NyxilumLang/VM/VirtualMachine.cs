@@ -214,7 +214,16 @@ public class VirtualMachine
         // "байтовий масив", а більшість реальних застосунків мови й так
         // оперує рядками/JSON, тож розширювати модель значень заради
         // сирих байтів у першій версії не варто.
-        _nativeFunctions["dbOpen"] = args => NyxilumDbLib.Open(args[0]?.ToString() ?? "");
+        //
+        // dbOpen() приймає шлях до файлу бази й тому, як і readFile/writeFile
+        // вище, проходить через Sandbox.CheckPath — без цього NX_SANDBOX=1
+        // не заважав би dbOpen("../outside/escaped_db") відкрити файл поза
+        // робочою директорією.
+        _nativeFunctions["dbOpen"] = args => {
+            var path = args[0]?.ToString() ?? "";
+            NyxilumLang.Runtime.Sandbox.CheckPath(path);
+            return NyxilumDbLib.Open(path);
+        };
         _nativeFunctions["dbClose"] = args => { ((NyxilumDbLib)args[0]).Dispose(); return null; };
         _nativeFunctions["dbSet"] = args => {
             ((NyxilumDbLib)args[0]).Set(args[1]?.ToString() ?? "", System.Text.Encoding.UTF8.GetBytes(args[2]?.ToString() ?? ""));

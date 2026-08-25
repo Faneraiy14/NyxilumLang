@@ -36,6 +36,25 @@ public static class PackageManager
         public Dictionary<string, string> Dependencies { get; set; } = new();
     }
 
+    // Дозволяємо лише "безпечні" ключі пакетів. Ключ (з nx.json або
+    // аргументу командного рядка) у кінцевому підсумку йде в
+    // Path.Combine(projectDir, ModulesDir, name) - і в InstallOne, і в
+    // Uninstall, і (транзитивно через InstallOne) в UpdateOne. Без цієї
+    // перевірки ключ на кшталт ".." чи "../pwned" у nx.json дозволяв би
+    // Directory.Delete(targetDir, true), що виконується ПЕРЕД розпаковкою,
+    // видалити щось ПОЗА nx_modules/ - аж до цілого projectDir. Живцем
+    // перевірено: такий nx.json видаляв увесь проєкт і підміняв його
+    // завантаженим репозиторієм.
+    private static void ValidatePackageName(string name)
+    {
+        if (string.IsNullOrWhiteSpace(name))
+            throw new Exception("Порожнє ім'я пакета неприпустиме.");
+
+        if (name.Contains("..") || name.Contains('/') || name.Contains('\\') || name != Path.GetFileName(name))
+            throw new Exception(
+                $"Неприпустиме ім'я пакета '{name}' - імена не можуть містити '..', '/', '\\' чи інакше вказувати на шлях поза {ModulesDir}/.");
+    }
+
     private static string ManifestPath(string projectDir) => Path.Combine(projectDir, ManifestName);
 
     private static Manifest LoadManifest(string projectDir)
@@ -99,6 +118,8 @@ public static class PackageManager
     // залежностей просто не існує як поняття.
     public static void Uninstall(string name, string projectDir)
     {
+        ValidatePackageName(name);
+
         var manifest = LoadManifest(projectDir);
         if (!manifest.Dependencies.ContainsKey(name))
         {
@@ -156,6 +177,8 @@ public static class PackageManager
 
     private static void UpdateOne(string name, Manifest manifest, string projectDir)
     {
+        ValidatePackageName(name);
+
         var (ownerRepo, oldRef) = SplitRef(manifest.Dependencies[name]);
         var oldSha = oldRef ?? "";
 
@@ -180,6 +203,8 @@ public static class PackageManager
     // (InstallSingle) записують саме його в nx.json, а не вихідний ref.
     private static async Task<string> InstallOne(string name, string source, string projectDir)
     {
+        ValidatePackageName(name);
+
         var (ownerRepo, explicitRef) = SplitRef(source);
         var parts = ownerRepo.Split('/');
         if (parts.Length != 2)

@@ -1,0 +1,17 @@
+// dbOpen() раніше НЕ проходив через Sandbox.CheckPath (на відміну від
+// readFile/writeFile/deleteFile тощо), тож NX_SANDBOX=1 не заважав
+// dbOpen("../outside/...") відкрити (і створити!) базу даних ЗА межами
+// робочої директорії. Живцем перевірено: створювало теку поза sandbox.
+// Сам цей .nx-файл нічого не готує (run_all.sh готує/прибирає теку
+// назовні навколо виклику), запускається лише з NX_SANDBOX=1.
+func main() {
+    try {
+        var db = dbOpen("../db_sandbox_escape_target/escaped_db")
+        print("ПРОВАЛ: пісочниця не завадила dbOpen вийти за межі робочої директорії")
+        dbClose(db)
+    } catch (e) {
+        print("Спіймано: OK")
+    }
+}
+
+main()

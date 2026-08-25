@@ -16,9 +16,10 @@ EXE="${NX_EXE:-$TESTS_DIR/../src/NyxilumLang/bin/Debug/net10.0-windows/Nx.exe}"
 # Відкривають вікна, слухають порт назавжди або чекають на ввід —
 # у автоматичному прогоні пропускаємо. bench_loop.nx — навмисно повільний
 # неформальний бенчмарк (десятки секунд), не тест коректності.
-# test_sandbox_symlink.nx — окремий блок нижче (потребує NX_SANDBOX=1 і
-# готує/прибирає symlink навколо запуску, тут пройшов би без сенсу).
-SKIP="test_graphics2d.nx test_graphics3d.nx calculator.nx test_http_server.nx test_websocket_server.nx bench_loop.nx test_sandbox_symlink.nx ws_client_check.nx ws_timeout_recovery_check.nx test_ast_dump.nx"
+# test_sandbox_symlink.nx / test_db_sandbox_escape.nx — окремі блоки нижче
+# (потребують NX_SANDBOX=1 і готують/прибирають теки/symlink навколо
+# запуску, тут пройшли б без сенсу чи забруднили б диск поза sandbox).
+SKIP="test_graphics2d.nx test_graphics3d.nx calculator.nx test_http_server.nx test_websocket_server.nx bench_loop.nx test_sandbox_symlink.nx test_db_sandbox_escape.nx ws_client_check.nx ws_timeout_recovery_check.nx test_ast_dump.nx"
 
 # Тести, де помилка — очікуваний результат.
 EXPECT_ERROR="test_throw_uncaught.nx test_nested_scope_error.nx test_selective_import_missing.nx test_lib_testing_fail.nx test_parser_stack_limits.nx"
@@ -147,6 +148,54 @@ else
     echo "❌ test_sandbox_symlink.nx — symlink дозволив вийти за межі пісочниці"
     echo "$sandbox_out" | sed 's/^/       /'
     fail=$((fail+1)); failed+=("test_sandbox_symlink.nx — обхід пісочниці через symlink")
+fi
+
+# dbOpen() раніше не проходив через Sandbox.CheckPath (на відміну від
+# readFile/writeFile тощо) - NX_SANDBOX=1 не заважав відкрити/створити базу
+# ЗА межами робочої директорії. Готуємо теку-ціль поза tests/, перевіряємо,
+# що NX_SANDBOX=1 блокує dbOpen("../db_sandbox_escape_target/...") і що
+# теку так і не створено.
+db_escape_target="$TESTS_DIR/../db_sandbox_escape_target"
+rm -rf "$db_escape_target"
+db_sandbox_out=$(timeout "$TIMEOUT_SEC" env NX_SANDBOX=1 "$EXE" test_db_sandbox_escape.nx 2>&1)
+db_escape_created=0
+[ -e "$db_escape_target" ] && db_escape_created=1
+rm -rf "$db_escape_target"
+if echo "$db_sandbox_out" | grep -q "Спіймано: OK" && [ "$db_escape_created" -eq 0 ]; then
+    echo "✅ test_db_sandbox_escape.nx — dbOpen() за межі робочої директорії заблоковано"
+    pass=$((pass+1))
+else
+    echo "❌ test_db_sandbox_escape.nx — dbOpen() дозволив вийти за межі пісочниці"
+    echo "$db_sandbox_out" | sed 's/^/       /'
+    fail=$((fail+1)); failed+=("test_db_sandbox_escape.nx — dbOpen() обходить пісочницю")
+fi
+
+# PackageManager: ключ залежності з nx.json ("nx install") чи аргумент
+# "nx uninstall"/"nx update" ішов прямо в Path.Combine(projectDir,
+# nx_modules, name) без перевірки - ключ на кшталт ".." дозволяв
+# Directory.Delete(targetDir, true) (InstallOne, ПЕРЕД розпаковкою) знести
+# щось ЗА межами nx_modules/, аж до цілого projectDir. Живцем перевірено.
+# Перевірка (ValidatePackageName) спрацьовує ще ДО мережевих запитів, тож
+# тест не потребує інтернету.
+pkg_work="$TESTS_DIR/../pkg_traversal_work"
+pkg_canary="$TESTS_DIR/../pkg_traversal_canary.txt"
+rm -rf "$pkg_work" "$pkg_canary"
+mkdir -p "$pkg_work"
+echo "canary" > "$pkg_canary"
+cat > "$pkg_work/nx.json" <<'EOF'
+{"dependencies": {"..": "octocat/Hello-World"}}
+EOF
+pkg_out=$(cd "$pkg_work" && timeout "$TIMEOUT_SEC" "$EXE" install 2>&1)
+pkg_canary_survived=0
+[ -f "$pkg_canary" ] && pkg_canary_survived=1
+rm -rf "$pkg_work" "$pkg_canary"
+if echo "$pkg_out" | grep -q "Неприпустиме ім'я пакета" && [ "$pkg_canary_survived" -eq 1 ]; then
+    echo "✅ pkg_traversal — 'nx install' з '..' у nx.json відхилено, файли поза nx_modules/ не зачеплено"
+    pass=$((pass+1))
+else
+    echo "❌ pkg_traversal — 'nx install' з '..' у nx.json НЕ відхилено належним чином"
+    echo "$pkg_out" | sed 's/^/       /'
+    fail=$((fail+1)); failed+=("pkg_traversal — обхід через ключ залежності '..'")
 fi
 
 # WebSocket-сервер (httpServer(port, handler, wsHandler)): піднімаємо
