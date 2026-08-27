@@ -14,6 +14,13 @@
 
 $ErrorActionPreference = "Stop"
 
+# Подвійний клік -> "Запустити за допомогою PowerShell" відкриває НОВЕ вікно,
+# яке саме закривається одразу після завершення скрипта - і успіх, і крах
+# виглядають однаково як "мигнуло й зникло", жодного повідомлення прочитати
+# не встигаєш. try/catch + Read-Host в кінці тримають вікно відкритим у
+# ОБОХ випадках, поки хтось сам не натисне Enter.
+try {
+
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 
 # Спершу шукаємо вже готовий .exe поруч зі скриптом (так буде на чужому ПК,
@@ -29,7 +36,7 @@ if (-not $exe) {
     Write-Host "Nx.exe не знайдено поруч зі скриптом і не зібрано локально." -ForegroundColor Red
     Write-Host "Або поклади Nx.exe (з Releases) у цю ж папку, або зберіть проєкт:"
     Write-Host "    dotnet build src\NyxilumLang"
-    exit 1
+    throw "Nx.exe не знайдено"
 }
 Write-Host "Знайдено: $exe"
 
@@ -86,4 +93,12 @@ if ($vsix -and $codeCmd) {
     Write-Host ""
     Write-Host "VS Code не знайдено в PATH — пропускаю автоматичне встановлення розширення."
     Write-Host "Якщо поставиш VS Code пізніше: code --install-extension `"$($vsix.FullName)`""
+}
+
+} catch {
+    Write-Host ""
+    Write-Host "Сталася помилка: $_" -ForegroundColor Red
+} finally {
+    Write-Host ""
+    Read-Host "Натисни Enter, щоб закрити це вікно"
 }
