@@ -341,6 +341,11 @@ nx update owner-repo # лише один, за назвою (як у nx.json)
 - **[nyxilum-control-center](https://github.com/Faneraiy14/nyxilum-control-center)**
   — живий монітор системи: веб-дашборд з метриками (пам'ять, CPU, GC-стан
   самої VM), WebSocket-пуш раз на 2 секунди без перезавантаження сторінки.
+- **[nyxilum-chat](https://github.com/Faneraiy14/nyxilum-chat)** — живий
+  груповий чат: справжнє WebSocket-розсилання одне-до-багатьох (не лише
+  push в одного глядача, як control-center) — журнал повідомлень у
+  NyxilumDb, кожне з'єднання опитує й досилає лише нове. Перевірено живим
+  тестом на двох одночасних клієнтах.
 
 ## Самохостинг
 
