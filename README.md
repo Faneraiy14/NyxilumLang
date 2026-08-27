@@ -1,12 +1,14 @@
 # NyxilumLang
 
-Мова програмування власної розробки: компілятор у байткод, стекова віртуальна
-машина та стандартна бібліотека з 166 вбудованих функцій — від математики й
-рядків до HTTP, графіки та вводу з клавіатури.
+*[Українською](README.uk.md)*
 
-**Мова самохостована**: у `selfhosted/` лежить інтерпретатор NyxilumLang,
-написаний **мовою NyxilumLang**, який виконує програми з рекурсією, структурами,
-методами, масивами та замиканнями.
+A programming language built from scratch: a bytecode compiler, a stack-based
+virtual machine, and a standard library of 166 built-in functions — everything
+from math and strings to HTTP, graphics, and keyboard input.
+
+**The language is self-hosted**: `selfhosted/` contains an interpreter for
+NyxilumLang, written **in NyxilumLang itself**, capable of running programs
+with recursion, structs, methods, arrays, and closures.
 
 ```nx
 func factorial(n) {
@@ -31,18 +33,18 @@ func main() {
 }
 ```
 
-## Швидкий старт
+## Quick Start
 
-Готовий бінарник (без .NET) — розділ [INSTALL.md](INSTALL.md), є для Windows,
-Linux і Mac. З вихідного коду (потрібен [.NET SDK 10](https://dotnet.microsoft.com/download),
-крос-платформний):
+Prebuilt binary (no .NET required) — see [INSTALL.md](INSTALL.md), available
+for Windows, Linux, and Mac. From source (requires the
+[.NET SDK 10](https://dotnet.microsoft.com/download), cross-platform):
 
 ```bash
 dotnet build src/NyxilumLang -f net10.0 -p:EnableWindowsTargeting=true
 ```
 
-(csproj мультитаргетить `net10.0-windows;net10.0` — без `-f net10.0
--p:EnableWindowsTargeting=true` на Linux/Mac збірка впаде з NETSDK1100.)
+(The csproj multi-targets `net10.0-windows;net10.0` — without `-f net10.0
+-p:EnableWindowsTargeting=true`, the build fails on Linux/Mac with NETSDK1100.)
 
 Windows:
 
@@ -50,386 +52,401 @@ Windows:
 powershell -ExecutionPolicy Bypass -File install-nx.ps1
 ```
 
-Linux/Mac (без GUI/графіки — тільки Windows Forms підтримує їх, решта мови
-працює однаково):
+Linux/Mac (no GUI/graphics — only Windows Forms supports those, the rest of
+the language works the same everywhere):
 
 ```bash
 bash install-nx.sh
 ```
 
-Обидва скрипти самі знаходять зібраний бінарник у `src/NyxilumLang/bin/.../publish/`
-і реєструють глобальну команду `nx`. Після цього — нове вікно термінала і:
+Both scripts automatically locate the built binary in
+`src/NyxilumLang/bin/.../publish/` and register the global `nx` command.
+After that — open a new terminal window and run:
 
 ```bash
 nx myprogram.nx
 ```
 
-## Що вміє мова
+## Language Features
 
-| Можливість | Приклад |
+| Feature | Example |
 |---|---|
-| Змінні, `null` | `var x = 10`, `var n = null` |
-| String interpolation | `"Привіт, ${імя}! Тобі ${вік} років"` — будь-який вираз усередині `${...}` |
-| Функції, рекурсія | `func add(a, b) { return a + b }` |
-| Замикання | `var f = func() { return count }` |
-| Функції як значення | `var op = sqrt`, `sort(arr, cmp)` |
-| Структури й методи | `struct Point { x, y }`, `func Point.len() {...}` |
-| Успадкування | `struct Dog extends Animal { ... }`, `super.method(...)`, поліморфізм за замовчуванням |
-| Мапи | `newMap()`, `mapSet`, `mapGet`, `mapKeys` |
-| Масиви | `[1, 2, 3]`, `arr[0]`, `append(arr, 4)` |
-| Цикли | `for i in 0..10`, `for x in arr`, `while` |
-| `break` / `continue` | працюють у всіх циклах, зокрема вкладених |
-| Кирилиця в іменах | `func привітати(імя) { ... }` |
-| Помилки | `try { ... } catch (e) { ... }`, `throw`, повідомлення містять номер рядка |
-| Модулі | `import "helpers.nx"`, вибірково `import "helpers.nx" { func1, func2 }` |
-| Вищий порядок | `mapArr`, `filter`, `reduce`, `sort` |
-| GC-інструментарій | `gc_stats()`, `gc_collect()`, `gc_limit(n)` |
-| Оптимізація гарячих циклів | автоматично, вимикається через `NX_JIT=0` |
-| Файли й теки | `deleteFile`, `makeDir`, `dirExists`, `deleteDir`, `listDir` |
-| Архіви | `zipCreate`, `zipExtract`, `zipEntries`, `zipExtractEntry` |
-| Вбудована БД | `dbOpen`, `dbGet/dbSet/dbHas/dbDelete`, `dbKeys`, `dbCount` — персистентна KV-база з WAL |
-| Конкурентність | `spawn(fn, ...args)`/`workerJoin(w)` — ізольовані воркери; `newChannel`/`channelSend`/`channelReceive` |
-| Зовнішні процеси ОС | `procStart`/`procRun` (запустити), `procWait`/`procIsRunning`/`procKill`, `procOutput`/`procErrorOutput` — реальний дочірній процес (не воркер) |
+| Variables, `null` | `var x = 10`, `var n = null` |
+| String interpolation | `"Hello, ${name}! You are ${age} years old"` — any expression works inside `${...}` |
+| Functions, recursion | `func add(a, b) { return a + b }` |
+| Closures | `var f = func() { return count }` |
+| Functions as values | `var op = sqrt`, `sort(arr, cmp)` |
+| Structs and methods | `struct Point { x, y }`, `func Point.len() {...}` |
+| Inheritance | `struct Dog extends Animal { ... }`, `super.method(...)`, polymorphism by default |
+| Maps | `newMap()`, `mapSet`, `mapGet`, `mapKeys` |
+| Arrays | `[1, 2, 3]`, `arr[0]`, `append(arr, 4)` |
+| Loops | `for i in 0..10`, `for x in arr`, `while` |
+| `break` / `continue` | work in all loops, including nested ones |
+| Cyrillic in identifiers | `func привітати(імя) { ... }` |
+| Errors | `try { ... } catch (e) { ... }`, `throw`, messages include the line number |
+| Modules | `import "helpers.nx"`, selective `import "helpers.nx" { func1, func2 }` |
+| Higher-order | `mapArr`, `filter`, `reduce`, `sort` |
+| GC tooling | `gc_stats()`, `gc_collect()`, `gc_limit(n)` |
+| Hot-loop optimization | automatic, can be disabled via `NX_JIT=0` |
+| Files and directories | `deleteFile`, `makeDir`, `dirExists`, `deleteDir`, `listDir` |
+| Archives | `zipCreate`, `zipExtract`, `zipEntries`, `zipExtractEntry` |
+| Built-in database | `dbOpen`, `dbGet/dbSet/dbHas/dbDelete`, `dbKeys`, `dbCount` — persistent KV store with WAL |
+| Concurrency | `spawn(fn, ...args)`/`workerJoin(w)` — isolated workers; `newChannel`/`channelSend`/`channelReceive` |
+| External OS processes | `procStart`/`procRun` (launch), `procWait`/`procIsRunning`/`procKill`, `procOutput`/`procErrorOutput` — a real child process (not a worker) |
 
-Стандартна бібліотека охоплює математику, рядки (зокрема `trim`, `repeat`,
-`indexOf`, `reverse`), масиви (`slice`, `unique`, `indexOf`, `reverse`),
-мапи, JSON, файли, час, HTTP-запити, 2D-графіку на канвасі, зчитування
-клавіш та GUI-вікна на Windows Forms з робочими кнопками (`guiWindow`,
-`guiButton`, `guiOnAction` — клік дійсно викликає NyxilumLang-функцію).
+The standard library covers math, strings (including `trim`, `repeat`,
+`indexOf`, `reverse`), arrays (`slice`, `unique`, `indexOf`, `reverse`),
+maps, JSON, files, time, HTTP requests, 2D canvas graphics, keyboard
+input, and GUI windows on Windows Forms with working buttons (`guiWindow`,
+`guiButton`, `guiOnAction` — the click actually invokes a NyxilumLang function).
 
-### Зовнішні процеси
+### External Processes
 
-`System.Diagnostics.Process` під капотом, кросплатформно (на відміну від
-GUI, працює однаково на Windows/Linux/Mac) — без цього написати, наприклад,
-лаунчер (запустити `java -jar ...` і стежити за ним) було неможливо:
+`System.Diagnostics.Process` under the hood, cross-platform (unlike GUI, it
+works the same on Windows/Linux/Mac) — without it, writing something like a
+launcher (start `java -jar ...` and monitor it) would have been impossible:
 
 ```nx
-// Блокуюче - чекає завершення й одразу повертає результат
+// Blocking - waits for completion and returns the result right away
 var r = procRun("java", ["-version"])
-print("код: " + toString(r.exitCode) + ", stderr: " + r.stderr)
+print("code: " + toString(r.exitCode) + ", stderr: " + r.stderr)
 
-// Неблокуюче - для довгих процесів (сама гра), скрипт працює далі паралельно
+// Non-blocking - for long-running processes (the game itself), the script keeps going in parallel
 var game = procStart("java", ["-jar", "server.jar"])
 while (procIsRunning(game)) {
-    print(procOutput(game))   // усе, що процес вивів ДОСІ
+    print(procOutput(game))   // everything the process has output SO FAR
     sleep(1000)
 }
-print("гра завершилась з кодом " + toString(procExitCode(game)))
+print("game exited with code " + toString(procExitCode(game)))
 
-// procKill(game) - примусово завершити (разом з дочірніми процесами)
+// procKill(game) - force-terminate (along with child processes)
 ```
 
-Опції третім аргументом (`procStart`/`procRun`, як заголовки в `httpRequest`) —
-мапа з `cwd` (робоча тека) і `env` (мапа змінних середовища для процесу).
-У пісочниці (`NX_SANDBOX=1`) запуск процесів заборонений завжди, без винятків —
-найширший з усіх доступів, обходить і файлове, і мережеве обмеження.
+Options as the third argument (`procStart`/`procRun`, like headers in
+`httpRequest`) — a map with `cwd` (working directory) and `env` (a map of
+environment variables for the process). In the sandbox (`NX_SANDBOX=1`),
+launching processes is always forbidden, no exceptions — it's the broadest
+access of all, since it bypasses both the filesystem and network restrictions.
 
-### Файли, теки й архіви
+### Files, Directories, and Archives
 
-Раніше з файлом можна було лише `readFile`/`writeFile`/`appendFile` — не
-було способу його видалити, створити/перелічити теку чи розпакувати архів,
-хоча версії, бібліотеки й моди Minecraft розповсюджуються саме як `.zip`/`.jar`:
+Previously, the only file operations available were
+`readFile`/`writeFile`/`appendFile` — there was no way to delete a file,
+create/list a directory, or extract an archive, even though Minecraft
+versions, libraries, and mods are distributed exactly as `.zip`/`.jar` files:
 
 ```nx
 makeDir("mods")
-zipExtract("fabric-api.jar", "mods/fabric-api")   // розпакувати мод
-var files = listDir("mods")                        // що взагалі встановлено
-deleteFile("mods/old-mod.jar")                      // видалити один мод
-deleteDir("instances/стара-збірка")                 // видалити цілу збірку
+zipExtract("fabric-api.jar", "mods/fabric-api")   // extract the mod
+var files = listDir("mods")                        // what's actually installed
+deleteFile("mods/old-mod.jar")                      // delete one mod
+deleteDir("instances/old-modpack")                  // delete an entire modpack
 ```
 
-`zipEntries(zipPath)` повертає список файлів усередині архіву БЕЗ
-розпаковування — зручно, щоб дістати з natives-jar лише потрібні `.dll`/`.so`
-через `zipExtractEntry`, не чіпаючи решту. `zipCreate(zipPath, sourceDir)` —
-запакувати теку назад (напр. експорт збірки).
+`zipEntries(zipPath)` returns the list of files inside an archive WITHOUT
+extracting it — handy for pulling just the `.dll`/`.so` files you need out
+of a natives jar via `zipExtractEntry`, without touching the rest.
+`zipCreate(zipPath, sourceDir)` — packs a directory back up (e.g. exporting
+a modpack).
 
-### Пам'ять і GC
+### Memory and GC
 
-NyxilumLang-значення — це боксовані CLR-об'єкти, тож збиранням сміття (в тому
-числі циклів посилань у структурах) вже коректно займається сама .NET CLR.
-Замість дублювання цього runtime додає NyxilumLang-скриптам облік власних
-виділень (масиви/структури/мапи) і опційний ліміт, щоб некерований цикл
-виділень не поклав хост-процес:
+NyxilumLang values are boxed CLR objects, so garbage collection (including
+reference cycles in structs) is already correctly handled by the .NET CLR
+itself. Instead of duplicating that, the runtime gives NyxilumLang scripts
+their own allocation accounting (arrays/structs/maps) and an optional limit,
+so a runaway allocation loop can't take down the host process:
 
-- `gc_stats()` → структура `{ allocated, limit, bytesEstimate }`
-- `gc_collect()` → форсує `GC.Collect()` і оновлює оцінку пам'яті
-- `gc_limit(n)` → встановлює ліміт кількості виділень для поточного запуску; перевищення кидає помилку, яку можна зловити через `try/catch`
+- `gc_stats()` → returns the struct `{ allocated, limit, bytesEstimate }`
+- `gc_collect()` → forces `GC.Collect()` and refreshes the memory estimate
+- `gc_limit(n)` → sets the allocation-count limit for the current run; exceeding it throws an error that can be caught with `try/catch`
 
-Ліміт також можна задати ззовні без зміни коду: `NX_GC_MAX_OBJECTS=10000 nx script.nx`.
+The limit can also be set externally without changing the code:
+`NX_GC_MAX_OBJECTS=10000 nx script.nx`.
 
-### Оптимізація гарячих циклів (JIT)
+### Hot-Loop Optimization (JIT)
 
-Значення NyxilumLang — боксовані CLR-об'єкти, тож "справжня" компіляція в
-машинний код виграла б хіба що в диспетчеризації switch, а не в боксингу й
-словникових пошуках, які й так домінують — тобто не варта складності й
-ризику для мови без статичних типів значень. Натомість VM розпізнає у
-байткоді дві конкретні безпечні "гарячі" послідовності (лічильник циклу
-`i = i + константа` і порівняння лічильника з межею) й після ~512
-ітерацій виконує їх напряму через C#-арифметику замість стек-диспетчеризації
-— з перевіркою типів на кожній ітерації, тож зміна типу всередині циклу
-миттєво й безпечно повертає виконання в звичайний інтерпретатор. Цикли з
-`try/catch`/`throw` у тілі не оптимізуються взагалі (безпечний відкат).
+NyxilumLang values are boxed CLR objects, so "real" compilation to machine
+code would only win on switch dispatch, not on the boxing and dictionary
+lookups that actually dominate the cost — meaning it's not worth the
+complexity and risk for a language without static value types. Instead, the
+VM recognizes two specific, safe "hot" sequences in the bytecode (a loop
+counter `i = i + constant` and a counter compared against a bound), and after
+~512 iterations executes them directly via C# arithmetic instead of stack
+dispatch — with a type check on every iteration, so a type change inside the
+loop immediately and safely falls back to the regular interpreter. Loops with
+`try/catch`/`throw` in the body are never optimized at all (a safe bailout).
 
-Вимірювання на Release-збірці (цикл на 20 млн ітерацій): ~30с з увімкненою
-оптимізацією проти ~58с без неї. Вимкнути можна через `NX_JIT=0`.
+Measured on a Release build (a loop of 20 million iterations): ~30s with the
+optimization enabled versus ~58s without it. It can be disabled with `NX_JIT=0`.
 
-### Пісочниця для ненадійного коду
+### Sandbox for Untrusted Code
 
-За замовчуванням `.nx`-скрипт має повний доступ до файлової системи,
-мережі й змінних середовища — так само, як звичайний Python/Node.js-скрипт.
-Якщо NyxilumLang-код запускає інший сервіс від імені користувача (наприклад,
-[NyxilumMcp](https://github.com/Faneraiy14/NyxilumMcp) виконує потенційно
-згенерований ШІ код), увімкни обмежений режим прапорцем:
+By default, a `.nx` script has full access to the filesystem, network, and
+environment variables — just like a regular Python/Node.js script. If
+NyxilumLang code is run by another service on the user's behalf (for
+example, [NyxilumMcp](https://github.com/Faneraiy14/NyxilumMcp) executes
+potentially AI-generated code), turn on the restricted mode with a flag:
 
 ```bash
 NX_SANDBOX=1 nx script.nx
 ```
 
-У цьому режимі:
+In this mode:
 
-- `readFile`/`writeFile`/`appendFile`/`fileExists`/`readLines`/`deleteFile`/`makeDir`/`dirExists`/`deleteDir`/`listDir`/`zipExtract`/`zipCreate`/`zipExtractEntry`/`zipEntries` дозволені лише всередині поточної робочої директорії — вихід за її межі через абсолютний шлях (`/etc/passwd`), `../..` чи символічне посилання (файл або тека всередині робочої директорії, що веде за її межі) кидає помилку
-- `httpGet`/`httpPost`/`httpRequest`/`httpServer`/`urlStatus`/`wsConnect` кидають помилку — мережа повністю відключена
-- `osEnv` кидає помилку — змінні середовища (де можуть лежати токени/ключі) недоступні
-- `procStart`/`procRun` кидають помилку — запуск зовнішніх процесів повністю заборонений (найширший доступ з усіх: довільний виконуваний файл обходить і файлове, і мережеве обмеження вище)
-- `guiWindow` кидає помилку — відкриття СПРАВЖНЬОГО вікна на екрані користувача заборонене (стосується й Windows Forms, і X11-версії на Linux/Mac)
+- `readFile`/`writeFile`/`appendFile`/`fileExists`/`readLines`/`deleteFile`/`makeDir`/`dirExists`/`deleteDir`/`listDir`/`zipExtract`/`zipCreate`/`zipExtractEntry`/`zipEntries` are only allowed within the current working directory — escaping it via an absolute path (`/etc/passwd`), `../..`, or a symlink (a file or directory inside the working directory that points outside it) throws an error
+- `httpGet`/`httpPost`/`httpRequest`/`httpServer`/`urlStatus`/`wsConnect` throw an error — the network is fully disabled
+- `osEnv` throws an error — environment variables (where tokens/keys might live) are inaccessible
+- `procStart`/`procRun` throw an error — launching external processes is completely forbidden (the broadest access of all: an arbitrary executable bypasses both the filesystem and network restrictions above)
+- `guiWindow` throws an error — opening an ACTUAL window on the user's screen is forbidden (this applies both to Windows Forms and the X11 version on Linux/Mac)
 
-Прапорець вимкнений за замовчуванням — жоден звичайний скрипт, що читає
-файли поза своєю папкою чи ходить у мережу, не зламається, доки хтось явно
-не попросить обмежений режим.
+The flag is off by default — no regular script that reads files outside its
+own folder or talks to the network will break, unless someone explicitly
+asks for the restricted mode.
 
-### Вбудована база даних
+### Built-in Database
 
-[NyxilumDb](https://github.com/Faneraiy14/NyxilumDb) — сестринський проєкт,
-embedded KV-база з WAL-довговічністю — підключена як stdlib:
+[NyxilumDb](https://github.com/Faneraiy14/NyxilumDb) — a sister project, an
+embedded KV store with WAL durability — is wired in as part of the stdlib:
 
 ```nx
 var db = dbOpen("mydata")
-dbSet(db, "greeting", "Привіт!")
+dbSet(db, "greeting", "Hello!")
 print(dbGet(db, "greeting"))
 dbClose(db)
 ```
 
-Значення в v1 — лише рядки (UTF8). Повний список: `dbOpen(path)`,
+Values in v1 are strings only (UTF-8). Full list: `dbOpen(path)`,
 `dbClose(db)`, `dbSet(db,k,v)`, `dbGet(db,k)`, `dbHas(db,k)`,
 `dbDelete(db,k)`, `dbKeys(db,prefix?)`, `dbCount(db)`,
-`dbCheckpoint(db)`. Дані переживають перезапуск процесу — WAL і
-компакція описані в README NyxilumDb.
+`dbCheckpoint(db)`. Data survives a process restart — the WAL and
+compaction are described in the NyxilumDb README.
 
 ### VS Code
 
-Розширення для підсвічування синтаксису `.nx` — у [vscode-nyxilum/](vscode-nyxilum/README.md).
+Syntax highlighting extension for `.nx` — in [vscode-nyxilum/](vscode-nyxilum/README.md).
 
-Повний опис синтаксису — у [GUIDE.md](GUIDE.md).
+The full syntax reference is in [GUIDE.md](GUIDE.md).
 
-## Як це влаштовано
+## How It Works
 
 ```
-Вихідний код (.nx)
+Source code (.nx)
       │
-   Lexer.cs        токенізація
+   Lexer.cs        tokenization
       │
-   Parser.cs       рекурсивний спуск -> AST
+   Parser.cs       recursive descent -> AST
       │
-   Compiler.cs     AST -> байткод (61 опкод)
+   Compiler.cs     AST -> bytecode (61 opcodes)
       │
-VirtualMachine.cs  стекова VM виконує байткод
+VirtualMachine.cs  stack-based VM executes the bytecode
 ```
 
-Це **не** дерево-обхідний інтерпретатор: програма спочатку компілюється
-в байткод, а вже його виконує VM зі стеком операндів, стеком фреймів
-локальних змінних і власним стеком обробників `try/catch`.
+This is **not** a tree-walking interpreter: the program is first compiled
+into bytecode, and the VM then executes that bytecode using an operand
+stack, a stack of local-variable frames, and its own stack of `try/catch`
+handlers.
 
 ```
 src/NyxilumLang/
   Core/       Lexer.cs, Parser.cs, Token.cs
-  AST/        вузли дерева
+  AST/        tree nodes
   Compiler/   Compiler.cs, Bytecode.cs
-  VM/         VirtualMachine.cs — виконання + 166 вбудованих функцій
-  Runtime/    NxMap, NxJson, NxFunctionRef, модулі Http/Os/Graphics/Regex/WebSocket
+  VM/         VirtualMachine.cs — execution + 166 built-in functions
+  Runtime/    NxMap, NxJson, NxFunctionRef, Http/Os/Graphics/Regex/WebSocket modules
   Tools/      Formatter.cs, Linter.cs
 
-selfhosted/   інтерпретатор NyxilumLang, написаний на NyxilumLang
-bootstrap/    ранній мінімальний самохост
-tests/        тести + run_all.sh
-programs/     приклади (nx_dashboard — системний дашборд, guess_the_number — гра "вгадай число")
-lib/          стандартна бібліотека .nx-модулів (strings, collections, datetime, testing, http_client, telegram, discord) — підключаються через import
+selfhosted/   NyxilumLang interpreter, written in NyxilumLang
+bootstrap/    early minimal self-host
+tests/        tests + run_all.sh
+programs/     examples (nx_dashboard — a system dashboard, guess_the_number — a "guess the number" game)
+lib/          standard library of .nx modules (strings, collections, datetime, testing, http_client, telegram, discord) — pulled in via import
 ```
 
-## Команди
+## Commands
 
-| Команда | Що робить |
+| Command | What it does |
 |---|---|
-| `nx файл.nx` | запустити файл |
-| `nx` | REPL — виконання рядок за рядком, `exit()` для виходу |
-| `nx install owner/repo` | встановити пакет, додати в `nx.json` |
-| `nx install` | встановити все з `nx.json` |
-| `nx uninstall name` | прибрати пакет з `nx.json` і видалити з `nx_modules/` |
-| `nx update` | оновити всі пакети на поточний default branch кожного |
-| `nx update name` | оновити лише один пакет |
-| `nx format файл.nx` | форматувати файл (виводить у консоль) |
-| `nx lint файл.nx` | перевірити файл на типові помилки |
-| `nx check файл.nx` | перевірити лише синтаксис (без виконання коду) |
-| `nx --version` | версія |
+| `nx file.nx` | run the file |
+| `nx` | REPL — line-by-line execution, `exit()` to quit |
+| `nx install owner/repo` | install a package, add it to `nx.json` |
+| `nx install` | install everything from `nx.json` |
+| `nx uninstall name` | remove a package from `nx.json` and delete it from `nx_modules/` |
+| `nx update` | update all packages to each one's current default branch |
+| `nx update name` | update only one package |
+| `nx format file.nx` | format a file (prints to the console) |
+| `nx lint file.nx` | check a file for common mistakes |
+| `nx check file.nx` | check syntax only (without running the code) |
+| `nx --version` | print the version |
 
-Кожна деталь про пакети — у розділі [«Менеджер пакетів»](#менеджер-пакетів)
-нижче; про саму установку `nx` — у [INSTALL.md](INSTALL.md).
+Every detail about packages is in the ["Package Manager"](#package-manager)
+section below; for installing `nx` itself, see [INSTALL.md](INSTALL.md).
 
-## Менеджер пакетів
+## Package Manager
 
-Пакетів "офіційного реєстру" немає — пакет це будь-який публічний
-GitHub-репозиторій із `main.nx` у корені. Установка:
+There's no "official registry" of packages — a package is just any public
+GitHub repository with a `main.nx` at its root. To install:
 
 ```bash
 nx install owner/repo
 ```
 
-Тягне репозиторій, кладе в `nx_modules/<repo>/` і дописує в `nx.json`
-поруч із твоїм файлом. Записується не назва гілки, а точний SHA коміта,
-на якому вона стояла в момент установки (SHA-пінінг):
+Pulls the repository down, drops it into `nx_modules/<repo>/`, and appends
+an entry to `nx.json` next to your file. What gets recorded isn't the
+branch name, but the exact commit SHA it pointed to at install time
+(SHA pinning):
 
 ```json
 { "dependencies": { "repo": "owner/repo@4b99d80c38cbbbff2abfe957eb869efc47452ffa" } }
 ```
 
-Це робить установку відтворюваною: наступний `nx install` завжди дістане
-той самий байт-в-байт вміст, навіть якщо гілку пакета оновили чи переписали
-заднім числом. Можна вказати конкретну гілку/тег/коміт при установці
-(`nx install owner/repo@dev`) — вона так само буде зафіксована як SHA
-у `nx.json` одразу після встановлення.
+This makes installs reproducible: a later `nx install` always fetches the
+exact same byte-for-byte content, even if the package's branch has since
+been updated or force-pushed. You can specify a particular branch/tag/commit
+at install time (`nx install owner/repo@dev`) — it will still get pinned as
+a SHA in `nx.json` right after installing.
 
-Без аргументу `nx install` ставить усе з `nx.json` — так само,
-як `npm install` без пакета ставить усе з `package.json`.
+Without an argument, `nx install` installs everything from `nx.json` — the
+same way `npm install` with no package name installs everything from
+`package.json`.
 
-Підключення — імпорт без `.nx`:
+To use it — import without the `.nx` extension:
 
 ```nx
 import "repo"
 
 func main() {
-    print(якась_функція_з_пакета())
+    print(someFunctionFromThePackage())
 }
 ```
 
-Пошук пакета йде від папки поточного файлу вгору до кореня диска —
-так само, як Node.js шукає `node_modules`.
+Package resolution walks up from the current file's directory to the disk
+root — the same way Node.js looks for `node_modules`.
 
-SHA-пінінг робить `nx install` відтворюваним, але як наслідок він сам
-ніколи не підхопить новий коміт пакета — для цього окрема команда:
+SHA pinning makes `nx install` reproducible, but as a consequence it will
+never pick up a package's new commits on its own — there's a separate
+command for that:
 
 ```bash
-nx update          # усі пакети з nx.json
-nx update owner-repo # лише один, за назвою (як у nx.json)
+nx update          # all packages from nx.json
+nx update owner-repo # just one, by name (as it appears in nx.json)
 ```
 
-Перерезолвлює `owner/repo` проти його поточного default branch і
-перезаписує SHA-пін. Якщо пакет ставився з конкретної гілки/тегу
-(`owner/repo@dev`), `update` однаково піде на default branch — щоб
-оновитись саме в межах тієї самої гілки, простіше повторити
+Re-resolves `owner/repo` against its current default branch and overwrites
+the SHA pin. If the package was installed from a specific branch/tag
+(`owner/repo@dev`), `update` will still go to the default branch — to
+update within that same branch instead, it's simplest to just re-run
 `nx install owner/repo@dev`.
 
-Прибрати пакет — `nx uninstall name` видаляє запис з `nx.json` і саму
-папку з `nx_modules/`.
+To remove a package — `nx uninstall name` deletes the entry from `nx.json`
+and the directory itself from `nx_modules/`.
 
-## Реальні застосунки
+## Real-World Applications
 
-Доказ, що мова тягне не лише навчальні приклади, а робочі застосунки:
+Proof that the language can handle more than toy examples — real working
+applications:
 
-- **[nyxilum-paste](https://github.com/Faneraiy14/nyxilum-paste)** — сервіс
-  для шерингу текстових сніпетів (як Pastebin), без жодної зовнішньої
-  бібліотеки чи іншої мови під капотом — лише `httpServer` і `dbOpen` зі
-  стандартної бібліотеки самої мови.
+- **[nyxilum-paste](https://github.com/Faneraiy14/nyxilum-paste)** — a
+  text-snippet sharing service (like Pastebin), with zero external
+  libraries or other languages under the hood — just `httpServer` and
+  `dbOpen` from the language's own standard library.
 - **[nyxilum-control-center](https://github.com/Faneraiy14/nyxilum-control-center)**
-  — живий монітор системи: веб-дашборд з метриками (пам'ять, CPU, GC-стан
-  самої VM), WebSocket-пуш раз на 2 секунди без перезавантаження сторінки.
-- **[nyxilum-chat](https://github.com/Faneraiy14/nyxilum-chat)** — живий
-  груповий чат: справжнє WebSocket-розсилання одне-до-багатьох (не лише
-  push в одного глядача, як control-center) — журнал повідомлень у
-  NyxilumDb, кожне з'єднання опитує й досилає лише нове. Перевірено живим
-  тестом на двох одночасних клієнтах.
+  — a live system monitor: a web dashboard with metrics (memory, CPU, the
+  VM's own GC state), pushed over WebSocket every 2 seconds with no page
+  reload.
+- **[nyxilum-chat](https://github.com/Faneraiy14/nyxilum-chat)** — a live
+  group chat: real one-to-many WebSocket broadcasting (not just a
+  single-viewer push like control-center) — message history stored in
+  NyxilumDb, with each connection polling and sending only what's new.
+  Verified with a live test using two simultaneous clients.
 
-## Самохостинг
+## Self-Hosting
 
-`selfhosted/` — доказ того, що мова достатньо повна, щоб описати саму себе:
+`selfhosted/` is proof the language is complete enough to describe itself:
 
-| Файл | Що робить |
+| File | What it does |
 |---|---|
-| `lexer.nx` | токенізація |
-| `parser.nx` | рекурсивний спуск, AST у вигляді мап |
-| `interpreter.nx` | обхід AST, середовища-ланцюжки, замикання |
-| `main.nx` | точка входу, запускає гостьову програму |
+| `lexer.nx` | tokenization |
+| `parser.nx` | recursive descent, AST represented as maps |
+| `interpreter.nx` | AST walking, chained environments, closures |
+| `main.nx` | entry point, runs the guest program |
 
 ```bash
 cd selfhosted
 nx main.nx
 ```
 
-Очікуваний вивід: `720 / 5 / 100 / 30 / 1 2 3 / 256 / ПРИВІТ` — рекурсія,
-структура з методом, масиви, індексація, лічильник на замиканні з мутацією
-захопленого стану, нативний виклик і робота з рядками.
+Expected output: `720 / 5 / 100 / 30 / 1 2 3 / 256 / ПРИВІТ` — recursion, a
+struct with a method, arrays, indexing, a closure-based counter mutating
+captured state, a native call, and string handling.
 
-Два цікаві рішення всередині:
+Two interesting design choices inside:
 
-- **Середовища — ланцюжок мап** `{__vars, __parent}`. Оскільки мапа
-  посилальна, замикання ділять один мутабельний стан — саме тому лічильник
-  справді рахує, а не повертає одиницю щоразу.
-- **`return` реалізований через `throw`/`try`**: значення загортається
-  в маркер `__isReturn` і піднімається до найближчого виклику функції.
-  Маркер критичний — без нього `catch` ловив би й справжні помилки,
-  тихо перетворюючи їх на результат функції.
+- **Environments are a chain of maps** `{__vars, __parent}`. Since a map is
+  a reference type, closures share one mutable state — which is exactly why
+  the counter actually counts instead of returning one every time.
+- **`return` is implemented via `throw`/`try`**: the value is wrapped in an
+  `__isReturn` marker and propagated up to the nearest function call. The
+  marker is critical — without it, `catch` would also swallow real errors,
+  silently turning them into a function's return value.
 
-## Тести
+## Tests
 
 ```bash
 bash tests/run_all.sh
 ```
 
-51 тест: рекурсія, замикання, фрейми, мапи, методи, стандартна бібліотека
-мови, `try/catch`, модулі (звичайний і вибірковий import), `lib/testing.nx`,
-`lib/strings.nx`, `lib/collections.nx`, `lib/datetime.nx`, самохостинг,
-`break`/`continue`, глобальні змінні, рівність чисел, умови з дужками,
-виклик результату виклику напряму, відкидання дробової частини (`toInt`,
-індекси масивів), вкладені іменовані функції з лексичною видимістю,
-GC-інструментарій, regex, JIT (побайтова ідентичність з NX_JIT=0/1),
-вбудована БД (NyxilumDb), конкурентність (`spawn`/`workerJoin`/канали,
-включно зі стрес-тестом на гонки даних), зовнішні процеси ОС (`procRun`/
-`procStart`/`procKill`), файли/теки/архіви (`deleteFile`/`makeDir`/`listDir`/
-`zipCreate`/`zipExtract`). Графічні тести й HTTP-сервер пропускаються
-автоматично — вони відкривають вікна/слухають порт назавжди.
+51 tests: recursion, closures, frames, maps, methods, the language's
+standard library, `try/catch`, modules (both plain and selective import),
+`lib/testing.nx`, `lib/strings.nx`, `lib/collections.nx`, `lib/datetime.nx`,
+self-hosting, `break`/`continue`, global variables, numeric equality,
+parenthesized conditions, calling the result of a call directly,
+fractional-part truncation (`toInt`, array indices), nested named functions
+with lexical visibility, GC tooling, regex, JIT (byte-for-byte identical
+output with NX_JIT=0/1), the built-in database (NyxilumDb), concurrency
+(`spawn`/`workerJoin`/channels, including a data-race stress test), external
+OS processes (`procRun`/`procStart`/`procKill`), files/directories/archives
+(`deleteFile`/`makeDir`/`listDir`/`zipCreate`/`zipExtract`). Graphics tests
+and the HTTP server are skipped automatically — they open windows/listen on
+a port forever.
 
-Тести, де помилка є **очікуваним** результатом (наприклад необроблений
-`throw`), перелічені в `EXPECT_ERROR` усередині скрипта: для них провалом
-вважається якраз відсутність помилки.
+Tests where an error is the **expected** outcome (e.g. an unhandled
+`throw`) are listed in `EXPECT_ERROR` inside the script: for those, the
+absence of an error is what counts as a failure.
 
-## Команда nx
+## The nx Command
 
-Ставиться разом з мовою — `install-nx.ps1` з готового релізу чи з клону
-репозиторію, детальніше в [INSTALL.md](INSTALL.md). Після встановлення
-з будь-якої папки:
+Installed together with the language — `install-nx.ps1` from a prebuilt
+release or from a repo clone, details in [INSTALL.md](INSTALL.md). After
+installation, from any folder:
 
 ```bash
 nx myprogram.nx
 ```
 
-## Відомі обмеження
+## Known Limitations
 
-- Іменовану `func` можна оголосити всередині іншої функції — вона видима
-  лише в межах "батька" (і глибше, у ще вкладених func), лексично, як
-  у більшості мов. Однакова назва в різних "батьках" не конфліктує —
-  кожен викликає свою. Це **не замикання**: вкладена функція не бачить
-  локальних змінних "батька" (для цього — анонімні лямбди
-  `var f = func() {...}`, які саме захоплюють оточення).
-- GUI (`guiWindow`, ...) і 2D/3D-графіка (`createCanvas`, ...) працюють
-  лише на Windows (Windows Forms). На Linux/Mac ці функції недоступні —
-  виклик дає чітку помилку часу виконання, а не крашиться. Решта мови
-  (усе, крім GUI/графіки) кросплатформна, збирається таргетом `net10.0`.
-- GUI-функції, що чіпають уже створений контрол (`guiSetText`, `guiGetText`,
-  `guiAdd`, `guiShow`, `guiOnAction`, `presentCanvas`, `closeCanvas`), не
-  можна викликати з воркера (`spawn`) — Windows Forms вимагає, щоб контрол
-  чіпав лише той потік, який його створив. Виклик з воркера кидає чітку
-  помилку замість непередбачуваного крашу чи пошкодження стану вікна.
-  Якщо воркеру треба оновити GUI за результатами обчислень — передай
-  результат назад через `workerJoin`/канал, онови сам GUI з головного потоку.
+- A named `func` can be declared inside another function — it's visible
+  only within that "parent" (and deeper, in further-nested funcs),
+  lexically, as in most languages. The same name in different "parents"
+  doesn't conflict — each calls its own. This is **not a closure**: the
+  nested function can't see the parent's local variables (for that, use
+  anonymous lambdas — `var f = func() {...}` — which do capture their
+  environment).
+- GUI (`guiWindow`, ...) and 2D/3D graphics (`createCanvas`, ...) only work
+  on Windows (Windows Forms). On Linux/Mac these functions aren't
+  available — calling them gives a clear runtime error rather than
+  crashing. The rest of the language (everything except GUI/graphics) is
+  cross-platform, built with the `net10.0` target.
+- GUI functions that touch an already-created control (`guiSetText`,
+  `guiGetText`, `guiAdd`, `guiShow`, `guiOnAction`, `presentCanvas`,
+  `closeCanvas`) can't be called from a worker (`spawn`) — Windows Forms
+  requires that a control only be touched by the thread that created it.
+  Calling one from a worker throws a clear error instead of an
+  unpredictable crash or corrupted window state. If a worker needs to
+  update the GUI based on its computation, pass the result back via
+  `workerJoin`/a channel and update the GUI itself from the main thread.
 
-## Ліцензія
+## License
 
-MIT — див. [LICENSE](LICENSE). Автор — Faneraiy14.
+MIT — see [LICENSE](LICENSE). Author: Faneraiy14.

@@ -1,28 +1,30 @@
-# Nyxilum для VS Code
+# Nyxilum for VS Code
 
-Підсвічування синтаксису `.nx`-файлів: ключові слова (`func`, `var`, `struct`,
+*[Українською](README.uk.md)*
+
+Syntax highlighting for `.nx` files: keywords (`func`, `var`, `struct`,
 `if`/`else`, `while`, `for`/`in`, `try`/`catch`/`throw`, `import`, `break`/`continue`),
-типи (`i32`, `f64`, `string`, `bool`), рядки, числа, коментарі (`//` і `/* */`),
-виклики функцій та імена структур перед `{`.
+types (`i32`, `f64`, `string`, `bool`), strings, numbers, comments (`//` and `/* */`),
+function calls, and struct names before `{`.
 
-Автодоповнення: ключові слова, усі вбудовані функції, символи
-(`func`/`struct`/`var`) з відкритого документа.
+Autocomplete: keywords, all built-in functions, and symbols
+(`func`/`struct`/`var`) from the currently open document.
 
-Діагностика синтаксичних помилок під час набору: підкреслює місце й
-показує повідомлення парсера (незакрита дужка, невідомий символ тощо)
-з невеликою затримкою після паузи в наборі. Потребує `nx` у PATH
-(ставиться разом з мовою — див. [INSTALL.md](../INSTALL.md)); викликає
-`nx check <тимчасовий_файл>` — лише Lexer+Parser, без виконання коду
-(на відміну від запуску файлу напряму, це безпечно робити на кожну паузу
-в наборі, поки текст ще не дописаний).
+Syntax-error diagnostics while you type: underlines the location and shows
+the parser's message (unclosed bracket, unknown symbol, etc.) with a small
+delay after you pause typing. Requires `nx` in PATH (installed together with
+the language — see [INSTALL.md](../INSTALL.md)); it calls
+`nx check <temp_file>` — Lexer+Parser only, no code execution
+(unlike running the file directly, this is safe to do on every pause while
+typing, even while the text isn't finished yet).
 
-## Локальне тестування (без публікації)
+## Local testing (without publishing)
 
-1. Відкрий теку `vscode-nyxilum` у VS Code.
-2. Натисни `F5` — відкриється нове вікно ("Extension Development Host") з
-   активованим розширенням. Відкрий у ньому будь-який `.nx`-файл з `tests/`.
+1. Open the `vscode-nyxilum` folder in VS Code.
+2. Press `F5` — a new window ("Extension Development Host") opens with the
+   extension active. Open any `.nx` file from `tests/` in it.
 
-## Пакування у `.vsix` (щоб встановити собі без Marketplace)
+## Packaging into a `.vsix` (to install it yourself without the Marketplace)
 
 ```bash
 npm install -g @vscode/vsce
@@ -30,6 +32,6 @@ vsce package
 code --install-extension nyxilum-0.4.0.vsix
 ```
 
-Публікація в офіційний VS Code Marketplace — окремий крок (потрібен
-Publisher-акаунт на https://marketplace.visualstudio.com), тут не робиться
-автоматично.
+Publishing to the official VS Code Marketplace is a separate step (requires
+a Publisher account at https://marketplace.visualstudio.com) — not done
+automatically here.
