@@ -196,7 +196,14 @@ public class Lexer
             if (char.IsLetter(c) || c == '_')
             {
                 string word = "";
-                while (_pos < _source.Length && (char.IsLetterOrDigit(_source[_pos]) || _source[_pos] == '_'))
+                // Апостроф - законна частина українського письма всередині
+                // слова (ім'я, об'єкт, п'ять), а не рядковий роздільник (той
+                // - лише "). Дозволяємо його ТІЛЬКИ між двома літерами, щоб
+                // не проковтнути випадковий/кінцевий апостроф і не
+                // приховати справжню помилку "Невідомий символ" деінде.
+                while (_pos < _source.Length && (
+                    char.IsLetterOrDigit(_source[_pos]) || _source[_pos] == '_' ||
+                    (_source[_pos] == '\'' && _pos + 1 < _source.Length && char.IsLetter(_source[_pos + 1]))))
                 {
                     word += _source[_pos];
                     _pos++;
