@@ -260,7 +260,7 @@ a file in `tests/`, or `lib/...` if the script sits next to `lib/` itself):
 
 - **`lib/datetime.nx`** — date arithmetic with correct leap years (Howard Hinnant's algorithm, pure NyxilumLang): `daysFromCivil(y,m,d)`/`civilFromDays(z)` (date <-> days since epoch), `isLeapYear(y)`, `dayOfWeek(y,m,d)` (0=Sunday), `dayName(weekday)`, `addDays(y,m,d,n)`, `diffDays(y1,m1,d1,y2,m2,d2)`, `formatDate(y,m,d)`, `parseDate(s)`, `todayCivil()`.
 - **`lib/strings.nx`** — `capitalize(s)`, `titleCase(s)`, `isBlank(s)`, `isEmpty(s)`, `padLeft(s, len, ch)`, `padRight(s, len, ch)`, `countOccurrences(s, sub)`.
-- **`lib/collections.nx`** — `range(n)`, `rangeFrom(start, end)`, `sum(arr)`, `first(arr)`, `last(arr)`, `flatten(arr)` (one level), `zip(arr1, arr2)`, `chunk(arr, size)`, `count(arr, fn)`.
+- **`lib/collections.nx`** — `range(n)`, `rangeFrom(start, end)`, `sum(arr)`, `first(arr)`, `last(arr)`, `flatten(arr)` (one level), `zip(arr1, arr2)`, `chunk(arr, size)`, `count(arr, fn)`, `find(arr, fn)` (first match or `null`), `findIndex(arr, fn)` (index of first match or `-1`), `every(arr, fn)`, `some(arr, fn)`.
 - **`lib/testing.nx`** — `assertTrue(cond, msg)`, `assertFalse(cond, msg)`, `assertEqual(actual, expected, msg)`, `assertThrows(fn, msg)`. A failure is just a regular `throw`, so either catch it yourself with `try/catch`, or leave it uncaught so the process exits with a non-zero code (handy for CI).
   ```nx
   import "lib/testing.nx" { assertEqual }

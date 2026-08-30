@@ -100,3 +100,58 @@ func count(arr, fn) {
     }
     return total
 }
+
+// fn(item) -> bool; перший елемент, для якого fn повернула true, або null,
+// якщо жоден не підійшов (на відміну від first(), яка кидає на порожньому
+// масиві - тут "нічого не знайдено" це нормальний, а не винятковий випадок).
+func find(arr, fn) {
+    var i = 0
+    while i < len(arr) {
+        if fn(arr[i]) {
+            return arr[i]
+        }
+        i = i + 1
+    }
+    return null
+}
+
+// Той самий пошук, що й find(), але повертає ІНДЕКС (-1, якщо не знайдено) -
+// потрібно, коли після пошуку треба саме місце в масиві (наприклад для
+// removeAt), а не сам елемент.
+func findIndex(arr, fn) {
+    var i = 0
+    while i < len(arr) {
+        if fn(arr[i]) {
+            return i
+        }
+        i = i + 1
+    }
+    return -1
+}
+
+// fn(item) -> bool; true, лише якщо ВСІ елементи задовольняють fn (як
+// Python all() / lodash every) - порожній масив дає true (вакуумна істина,
+// той самий принцип, що й математичне "для всіх x з порожньої множини").
+func every(arr, fn) {
+    var i = 0
+    while i < len(arr) {
+        if !fn(arr[i]) {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+// fn(item) -> bool; true, якщо БУДЬ-ЯКИЙ елемент задовольняє fn (як Python
+// any() / lodash some) - порожній масив дає false.
+func some(arr, fn) {
+    var i = 0
+    while i < len(arr) {
+        if fn(arr[i]) {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}

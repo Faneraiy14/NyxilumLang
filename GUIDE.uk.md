@@ -244,7 +244,7 @@ func main() {
 
 - **`lib/datetime.nx`** — арифметика дат з правильними високосними роками (алгоритм Говарда Гіннанта, чиста NyxilumLang): `daysFromCivil(y,m,d)`/`civilFromDays(z)` (дата <-> днів від епохи), `isLeapYear(y)`, `dayOfWeek(y,m,d)` (0=неділя), `dayName(weekday)`, `addDays(y,m,d,n)`, `diffDays(y1,m1,d1,y2,m2,d2)`, `formatDate(y,m,d)`, `parseDate(s)`, `todayCivil()`.
 - **`lib/strings.nx`** — `capitalize(s)`, `titleCase(s)`, `isBlank(s)`, `isEmpty(s)`, `padLeft(s, len, ch)`, `padRight(s, len, ch)`, `countOccurrences(s, sub)`.
-- **`lib/collections.nx`** — `range(n)`, `rangeFrom(start, end)`, `sum(arr)`, `first(arr)`, `last(arr)`, `flatten(arr)` (один рівень), `zip(arr1, arr2)`, `chunk(arr, size)`, `count(arr, fn)`.
+- **`lib/collections.nx`** — `range(n)`, `rangeFrom(start, end)`, `sum(arr)`, `first(arr)`, `last(arr)`, `flatten(arr)` (один рівень), `zip(arr1, arr2)`, `chunk(arr, size)`, `count(arr, fn)`, `find(arr, fn)` (перший збіг або `null`), `findIndex(arr, fn)` (індекс першого збігу або `-1`), `every(arr, fn)`, `some(arr, fn)`.
 - **`lib/testing.nx`** — `assertTrue(cond, msg)`, `assertFalse(cond, msg)`, `assertEqual(actual, expected, msg)`, `assertThrows(fn, msg)`. Провал — звичайний `throw`, тож або лови його `try/catch` сам, або лишай непійманим, щоб процес впав з ненульовим кодом (зручно для CI).
   ```nx
   import "lib/testing.nx" { assertEqual }
