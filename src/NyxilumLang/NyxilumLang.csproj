@@ -15,12 +15,15 @@
          (коротка команда), тому файл на диску Nx(.exe), а не
          NyxilumLang(.exe). -->
     <AssemblyName>Nx</AssemblyName>
-    <!-- Єдине джерело правди для версії, яку показує команда version у
-         Nx.cs (Assembly.GetName().Version), а не хардкоджений рядок
-         окремо; той раніше застарів непомітно і не відповідав жодному
-         реальному тегу чи файлу в репозиторії. Синхронізуй з git tag
-         при релізі. -->
-    <Version>1.0.0</Version>
+    <!-- Значення тут - лише дефолт для локальної збірки (звичайний
+         dotnet build чи dotnet run без прапорців). Реальний реліз
+         (NyxilumNode/.github/workflows/release.yml) підставляє версію з
+         git-тегу автоматично через dotnet publish з прапорцем Version,
+         тому цей рядок більше НЕ треба вручну синхронізувати з тегом -
+         раніше про це забували, і команда version у зібраному nx
+         місяцями показувала застарілу версію. Тримаємо орієнтовно
+         актуальним про людське око, критичності немає. -->
+    <Version>1.4.0</Version>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <UseWindowsForms Condition="'$(TargetFramework)' == 'net10.0-windows'">true</UseWindowsForms>
