@@ -19,7 +19,12 @@ public enum NativeTarget { Linux, NyxOS }
 // NUL-термінований UTF-8 буфер: або статичний .rodata-літерал, або
 // (наступний крок) купа - для ЦЬОГО кроку досить статичних літералів,
 // присвоєних змінній, - купа/розподілювач пам'яті ще НЕ потрібні.
-enum ValType { Number, Bool, String }
+// Array (Фаза N3, третя частина) - вказівник на купу (heap_alloc,
+// власний bump-розподілювач через syscall brk - Linux-ціль лише,
+// дивись коментар над HeapAlloc нижче): [довжина:4 байти][padding:4
+// байти][елементи - по 8 байтів, СПРОЩЕННЯ - лише Number, не змішані
+// типи, бо немає повноцінного tagged union].
+enum ValType { Number, Bool, String, Array }
 
 // NativeCodegen — Фази N1-N3 (NATIVE_ROADMAP.md): справжня x86-компіляція
 // NyxilumLang, БЕЗ жодної VM під час виконання (на відміну від
@@ -99,6 +104,7 @@ public class NativeCodegen
         EmitPrintCharHelper();
         EmitPrintDoubleHelper();
         EmitPrintStringValueHelper();
+        EmitHeapAllocHelper();
 
         if (_rodata.Length > 0)
         {
@@ -230,6 +236,11 @@ public class NativeCodegen
         BinaryExpression { Operator: "&&" or "||" } => ValType.Bool,
         BinaryExpression { Operator: "==" or "!=" or "<" or "<=" or ">" or ">=" } => ValType.Bool,
         BinaryExpression => ValType.Number, // + - * %
+        ArrayLiteralExpression => ValType.Array,
+        // СПРОЩЕННЯ: масиви лише з Number-елементів (Фаза N3) - інакше
+        // довелось би вирішувати проблему змішаних типів без
+        // повноцінного tagged union.
+        IndexExpression => ValType.Number,
         _ => throw new Exception($"native codegen: неможливо визначити тип виразу - {expr.GetType().Name}")
     };
 
@@ -286,6 +297,14 @@ public class NativeCodegen
                             // print_string_value у рантаймі.
                             _asm.AppendLine("    call print_string_value");
                             break;
+
+                        case ValType.Array:
+                            // БЕЗ явної помилки тут масив надрукувався б
+                            // як True/False (потрапивши в гілку Bool
+                            // нижче, бо вказівник - теж просто ненульове
+                            // число) - неправильно й тихо, тому чесна
+                            // відмова замість цього.
+                            throw new Exception("native codegen (Фаза N3): print() масиву напряму ще не підтримується - друкуйте елементи через arr[i] у циклі");
 
                         default: // Bool
                             // Друкуємо ТЕКСТОМ "True"/"False" - РЕАЛЬНА
@@ -454,6 +473,55 @@ public class NativeCodegen
                     break;
                 }
 
+            case ArrayLiteralExpression arrLit:
+                {
+                    // Масив - вказівник на купу (Фаза N3, третя частина):
+                    // [довжина:4][padding:4][елементи, по 8 байтів кожен].
+                    // СПРОЩЕННЯ: лише Number-елементи (немає повноцінного
+                    // tagged union для змішаних типів - Фаза N4+). Лише
+                    // Linux-ціль - у NyxOS ще немає syscall'у виділення
+                    // пам'яті в ABI цього компілятора.
+                    if (_target != NativeTarget.Linux)
+                        throw new Exception("native codegen (Фаза N3): масиви поки підтримуються лише для --target linux - потрібен syscall виділення пам'яті, якого ще немає в ABI NyxOS (Фаза N6+)");
+                    foreach (var el in arrLit.Elements)
+                    {
+                        if (InferExprType(el) != ValType.Number)
+                            throw new Exception("native codegen (Фаза N3): елементи масиву підтримуються лише числові (Number) - змішані типи потребують tagged union (Фаза N4+)");
+                    }
+                    int count = arrLit.Elements.Count;
+                    int totalBytes = 8 + count * 8;
+                    _asm.AppendLine($"    mov ${totalBytes}, %eax");
+                    _asm.AppendLine("    call heap_alloc");         // -> %eax = новий блок
+                    _asm.AppendLine($"    mov ${count}, (%eax)");   // довжина в перших 4 байтах
+                    _asm.AppendLine("    push %eax");                // зберігаємо вказівник - компіляція елементів зіпсує %eax/%xmm0
+                    for (int i = 0; i < count; i++)
+                    {
+                        CompileExpression(arrLit.Elements[i]);       // -> %xmm0
+                        _asm.AppendLine("    mov (%esp), %eax");     // підглядаємо вказівник, НЕ знімаючи зі стека
+                        _asm.AppendLine($"    movsd %xmm0, {8 + i * 8}(%eax)");
+                    }
+                    _asm.AppendLine("    pop %eax");                  // результат виразу - сам вказівник
+                    break;
+                }
+
+            case IndexExpression idx:
+                {
+                    if (InferExprType(idx.Array) != ValType.Array)
+                        throw new Exception("native codegen: індексування [..] підтримується лише для масивів");
+                    if (InferExprType(idx.Index) != ValType.Number)
+                        throw new Exception("native codegen: індекс масиву має бути числом");
+                    CompileExpression(idx.Array);                    // -> %eax (вказівник)
+                    _asm.AppendLine("    push %eax");
+                    CompileExpression(idx.Index);                    // -> %xmm0
+                    _asm.AppendLine("    cvttsd2si %xmm0, %ecx");    // індекс -> ціле
+                    _asm.AppendLine("    pop %eax");
+                    // ВІДОМЕ, свідомо НЕ виправлене обмеження цієї фази:
+                    // БЕЗ перевірки меж - вихід за [0, довжина) читає за
+                    // межі виділеного блоку (Фаза N4+).
+                    _asm.AppendLine("    movsd 8(%eax,%ecx,8), %xmm0");
+                    break;
+                }
+
             case VariableExpression varExpr:
                 {
                     if (!_varOffsets.TryGetValue(varExpr.Name, out int offset))
@@ -526,9 +594,34 @@ public class NativeCodegen
 
             case BinaryExpression { Operator: "=" } assign:
                 {
+                    if (assign.Left is IndexExpression idxTarget)
+                    {
+                        // arr[i] = значення - на відміну від присвоєння
+                        // звичайній змінній (нижче), тут ОБИДВА - і масив,
+                        // і індекс - самі є виразами, що можуть клáсти
+                        // будь-що в %eax/%xmm0, тому зберігаємо їх на
+                        // стеку (LIFO), поки рахуємо RHS.
+                        if (InferExprType(idxTarget.Array) != ValType.Array)
+                            throw new Exception("native codegen: індексоване присвоєння arr[i] = ... підтримується лише для масивів");
+                        if (InferExprType(idxTarget.Index) != ValType.Number)
+                            throw new Exception("native codegen: індекс масиву має бути числом");
+                        if (InferExprType(assign.Right) != ValType.Number)
+                            throw new Exception("native codegen (Фаза N3): елементи масиву підтримуються лише числові (Number)");
+
+                        CompileExpression(idxTarget.Array);          // -> %eax
+                        _asm.AppendLine("    push %eax");            // [array ptr]
+                        CompileExpression(idxTarget.Index);          // -> %xmm0
+                        _asm.AppendLine("    cvttsd2si %xmm0, %ecx");
+                        _asm.AppendLine("    push %ecx");            // [array ptr, index]
+                        CompileExpression(assign.Right);             // -> %xmm0
+                        _asm.AppendLine("    pop %ecx");             // індекс
+                        _asm.AppendLine("    pop %eax");             // вказівник масиву
+                        _asm.AppendLine("    movsd %xmm0, 8(%eax,%ecx,8)");
+                        break;
+                    }
                     if (assign.Left is not VariableExpression target)
                     {
-                        throw new Exception("native codegen: присвоєння підтримується лише у звичайну змінну (масиви/структури - наступна фаза)");
+                        throw new Exception("native codegen: присвоєння підтримується лише у звичайну змінну чи arr[i] (структури - наступна фаза)");
                     }
                     if (!_varOffsets.TryGetValue(target.Name, out int targetOffset))
                     {
@@ -593,6 +686,10 @@ public class NativeCodegen
                         // помилка компіляції краща за неперевірену,
                         // можливо хибну поведінку (Фаза N4+).
                         throw new Exception($"native codegen (Фаза N3): оператор '{bin.Operator}' для рядків ще не підтримується (потрібне порівняння ЗМІСТУ/strcmp - Фаза N4+)");
+                    }
+                    else if (leftType == ValType.Array)
+                    {
+                        throw new Exception($"native codegen (Фаза N3): оператор '{bin.Operator}' для масивів не підтримується (індексуйте arr[i] замість порівняння/арифметики над самим масивом)");
                     }
                     else
                     {
@@ -919,6 +1016,72 @@ public class NativeCodegen
         _asm.AppendLine(".section .bss");
         _asm.AppendLine(".lcomm print_buf, 13"); // макс. 32-бітна ціла частина (обрізана з double) - до 11 цифр+знак
         _asm.AppendLine(".lcomm char_buf, 1");   // скретч-байт для print_char (лише Linux-ціль пише через нього)
+        _asm.AppendLine(".lcomm heap_ptr, 4");   // поточний bump-покажчик heap_alloc (0 = ще не ініціалізовано)
+        _asm.AppendLine(".lcomm heap_end, 4");   // поточна межа (brk) виділеної області
+    }
+
+    // heap_alloc(розмір у %eax) -> %eax = вказівник на новий блок.
+    // ВЛАСНИЙ, написаний ВРУЧНУ bump-розподілювач через syscall brk
+    // (Linux, #45) - НЕ malloc/free з libc: цей компілятор свідомо НЕ
+    // лінкується з libc ніде (сирі syscall'и всюди, ближче до того, що
+    // знадобиться на freestanding NyxOS - дивись NATIVE_ROADMAP.md,
+    // Фаза N3 item 9). Розмір округлюється до кратного 8 (вирівнювання
+    // під double). ЧЕСНО, як і задокументовано в плані: НЕМАЄ free() -
+    // пам'ять просто "тече" (прийнятно для коротких скриптових програм,
+    // справжнє збирання сміття/lst - окрема, значно пізніша Фаза N4+).
+    private void EmitHeapAllocHelper()
+    {
+        _asm.AppendLine("""
+            heap_alloc:
+                push %ebp
+                mov %esp, %ebp
+                push %ebx
+                push %ecx
+
+                add $7, %eax
+                and $0xfffffff8, %eax
+                mov %eax, %ecx              # ecx = запитаний розмір (округлений)
+
+                cmpl $0, heap_ptr
+                jne .Lha_inited
+                # перша ініціалізація - brk(0) повертає ПОТОЧНИЙ break
+                push %ecx
+                mov $45, %eax                # syscall brk
+                xor %ebx, %ebx
+                int $0x80
+                mov %eax, heap_ptr
+                mov %eax, heap_end
+                pop %ecx
+            .Lha_inited:
+                mov heap_ptr, %eax
+                add %ecx, %eax
+                cmp heap_end, %eax
+                jbe .Lha_have_space
+
+                # недостатньо місця - розширюємо через brk одразу з
+                # запасом (64КБ), щоб не викликати syscall на КОЖНЕ
+                # (навіть маленьке) виділення.
+                push %ecx
+                mov heap_end, %ebx
+                add $65536, %ebx
+                add %ecx, %ebx
+                mov $45, %eax
+                int $0x80
+                mov %eax, heap_end
+                pop %ecx
+            .Lha_have_space:
+                mov heap_ptr, %eax           # результат - старий bump-покажчик
+                push %eax
+                mov heap_ptr, %ebx
+                add %ecx, %ebx
+                mov %ebx, heap_ptr
+                pop %eax
+
+                pop %ecx
+                pop %ebx
+                pop %ebp
+                ret
+            """);
     }
 
     // Записує UTF-8-байти рядка в .rodata як `.byte` (НЕ `.ascii "..."` -
