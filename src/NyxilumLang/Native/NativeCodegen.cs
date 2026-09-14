@@ -3,16 +3,18 @@ using NyxilumLang.AST;
 
 namespace NyxilumLang.Native;
 
-// NativeCodegen — Фаза N1 (NATIVE_ROADMAP.md): НАЙМЕНШИЙ можливий доказ,
+// NativeCodegen — Фаза N1-N2 (NATIVE_ROADMAP.md): НАЙМЕНШИЙ можливий доказ,
 // що NyxilumLang здатна компілюватись у СПРАВЖНІЙ x86 машинний код, а не
 // лише в байткод для VM (VirtualMachine.cs), якій самій потрібна повна
 // ОС/.NET під собою.
 //
 // Підмножина мови зараз: func main() без параметрів, var з цілими
-// числами/арифметикою (+ - * /), print() з ОДНИМ цілим аргументом. Усі
-// числові літерали в AST - `double` (Parser.cs: `double.Parse`), тут
-// свідомо ЗРІЗАЄМО до 32-бітного цілого - плаваюча кома, if/while,
-// функції з параметрами, рядки, масиви - НАСТУПНІ фази, не ця.
+// числами/арифметикою (+ - * / %), if/else, while, break/continue,
+// присвоєння (x = ...), порівняння (== != < <= > >=), логічні (&& || !),
+// print() з ОДНИМ цілим аргументом. Усі числові літерали в AST -
+// `double` (Parser.cs: `double.Parse`), тут свідомо ЗРІЗАЄМО до
+// 32-бітного цілого - плаваюча кома, функції з параметрами, рядки,
+// масиви, структури - НАСТУПНІ фази, не ця.
 //
 // Виводить ТЕКСТ GAS-асемблера (AT&T-синтаксис, 32-біт) - той самий
 // інструментарій (`as`/`ld`), що вже збирає ЦІЛЕ ядро NyxOS - жодного
@@ -22,6 +24,11 @@ public class NativeCodegen
     private readonly StringBuilder _asm = new();
     private readonly Dictionary<string, int> _varOffsets = new();
     private int _nextLocalOffset; // зростає на 4 з кожною НОВОЮ змінною; offset(%ebp) - ЗАВЖДИ від'ємний
+    private int _labelCounter;
+    // (стартова мітка, кінцева мітка) НАЙБЛИЖЧОГО активного циклу - break
+    // стрибає на кінець, continue - на старт (перевірку умови). Стек, а
+    // не одна змінна - цикли можуть бути ВКЛАДЕНІ.
+    private readonly Stack<(string Start, string End)> _loopLabels = new();
 
     public string Compile(ProgramNode program)
     {
@@ -30,21 +37,30 @@ public class NativeCodegen
             .FirstOrDefault(f => f.Name == "main")
             ?? throw new Exception("native codegen (Фаза N1): у файлі немає func main()");
 
-        // Перший прохід - порахувати, СКІЛЬКИ локальних змінних узагалі є
-        // (лише прямі var у тілі main, без вкладених блоків - Фаза N1 ще
-        // не підтримує if/while/вкладені блоки) - щоб виділити РІВНО
-        // стільки місця на стеку заздалегідь, однією інструкцією `sub`.
-        int localCount = mainFunc.Body.Statements.OfType<VariableDeclaration>().Count();
+        // РЕАЛЬНА ПОМИЛКА Фази N1, виправлена в N2: перший прохід рахував
+        // ЛИШЕ ПРЯМІ var у тілі main - щойно з'явились if/while (Фаза N2),
+        // var усередині ЇХНІХ блоків не отримували слот на стеку ВЗАГАЛІ
+        // (компілятор впав би з KeyNotFoundException на першому ж
+        // "if (x) { var y = 1 }"). Тепер збираємо імена РЕКУРСИВНО з
+        // УСІХ вкладених блоків - той самий підхід, яким "справжні"
+        // компілятори роблять hoisting локальних змінних.
+        var allVarNames = new List<string>();
+        CollectVarNames(mainFunc.Body, allVarNames);
+        foreach (var name in allVarNames.Distinct())
+        {
+            _nextLocalOffset -= 4;
+            _varOffsets[name] = _nextLocalOffset;
+        }
 
-        _asm.AppendLine("# Згенеровано NativeCodegen.cs (NyxilumLang, Фаза N1) - НЕ редагувати вручну.");
+        _asm.AppendLine("# Згенеровано NativeCodegen.cs (NyxilumLang, Фаза N1-N2) - НЕ редагувати вручну.");
         _asm.AppendLine(".section .text");
         _asm.AppendLine(".global _start");
         _asm.AppendLine("_start:");
         _asm.AppendLine("    push %ebp");
         _asm.AppendLine("    mov %esp, %ebp");
-        if (localCount > 0)
+        if (allVarNames.Count > 0)
         {
-            _asm.AppendLine($"    sub ${localCount * 4}, %esp");
+            _asm.AppendLine($"    sub ${allVarNames.Distinct().Count() * 4}, %esp");
         }
 
         foreach (var stmt in mainFunc.Body.Statements)
@@ -63,40 +79,132 @@ public class NativeCodegen
         return _asm.ToString();
     }
 
+    private static void CollectVarNames(BlockStatement block, List<string> names)
+    {
+        foreach (var stmt in block.Statements)
+        {
+            switch (stmt)
+            {
+                case VariableDeclaration v:
+                    names.Add(v.Name);
+                    break;
+                case IfStatement ifs:
+                    CollectVarNames(ifs.ThenBlock, names);
+                    if (ifs.ElseBlock != null) CollectVarNames(ifs.ElseBlock, names);
+                    break;
+                case WhileStatement ws:
+                    CollectVarNames(ws.Body, names);
+                    break;
+                case BlockStatement b:
+                    CollectVarNames(b, names);
+                    break;
+            }
+        }
+    }
+
+    private void CompileBlock(BlockStatement block)
+    {
+        foreach (var stmt in block.Statements)
+        {
+            CompileStatement(stmt);
+        }
+    }
+
     private void CompileStatement(StatementNode stmt)
     {
         switch (stmt)
         {
             case VariableDeclaration varDecl:
                 {
-                    if (!_varOffsets.TryGetValue(varDecl.Name, out int offset))
-                    {
-                        _nextLocalOffset -= 4;
-                        offset = _nextLocalOffset;
-                        _varOffsets[varDecl.Name] = offset;
-                    }
+                    // Слот УЖЕ виділено в Compile() (CollectVarNames) -
+                    // тут лише записуємо ПОЧАТКОВЕ значення, якщо воно є.
                     if (varDecl.Initializer != null)
                     {
+                        int offset = _varOffsets[varDecl.Name];
                         CompileExpression(varDecl.Initializer); // результат -> %eax
                         _asm.AppendLine($"    mov %eax, {offset}(%ebp)");
                     }
                     break;
                 }
+
             case PrintStatement printStmt:
                 {
-                    // РЕАЛЬНА ПОМИЛКА, знайдена живим тестом: `print(x)` у
-                    // NyxilumLang НЕ виклик функції (CallExpression) - це
-                    // ОКРЕМИЙ вузол AST, PrintStatement (Parser.cs розбирає
-                    // "print" як спеціальну синтаксичну форму, не звичайний
-                    // виклик). Перша версія кодогенератора шукала
-                    // неіснуючий випадок і завжди падала на будь-якому
-                    // print().
+                    // РЕАЛЬНА ПОМИЛКА Фази N1: `print(x)` у NyxilumLang НЕ
+                    // виклик функції (CallExpression) - Parser.cs розбирає
+                    // його як ОКРЕМИЙ вузол AST, PrintStatement.
                     CompileExpression(printStmt.Expression); // -> %eax
                     _asm.AppendLine("    call print_int");
                     break;
                 }
+
+            case ExpressionStatement exprStmt:
+                // Напр. "x = x + 1" як самостійний рядок - результат
+                // виразу (значення присвоєння) просто відкидаємо.
+                CompileExpression(exprStmt.Expression);
+                break;
+
+            case IfStatement ifStmt:
+                {
+                    int id = _labelCounter++;
+                    CompileExpression(ifStmt.Condition);
+                    _asm.AppendLine("    cmp $0, %eax");
+                    if (ifStmt.ElseBlock != null)
+                    {
+                        _asm.AppendLine($"    je .Lelse{id}");
+                        CompileBlock(ifStmt.ThenBlock);
+                        _asm.AppendLine($"    jmp .Lendif{id}");
+                        _asm.AppendLine($".Lelse{id}:");
+                        CompileBlock(ifStmt.ElseBlock);
+                        _asm.AppendLine($".Lendif{id}:");
+                    }
+                    else
+                    {
+                        _asm.AppendLine($"    je .Lendif{id}");
+                        CompileBlock(ifStmt.ThenBlock);
+                        _asm.AppendLine($".Lendif{id}:");
+                    }
+                    break;
+                }
+
+            case WhileStatement whileStmt:
+                {
+                    int id = _labelCounter++;
+                    string start = $".Lloopstart{id}";
+                    string end = $".Lloopend{id}";
+                    _loopLabels.Push((start, end));
+                    _asm.AppendLine($"{start}:");
+                    CompileExpression(whileStmt.Condition);
+                    _asm.AppendLine("    cmp $0, %eax");
+                    _asm.AppendLine($"    je {end}");
+                    CompileBlock(whileStmt.Body);
+                    _asm.AppendLine($"    jmp {start}");
+                    _asm.AppendLine($"{end}:");
+                    _loopLabels.Pop();
+                    break;
+                }
+
+            case BreakStatement:
+                if (_loopLabels.Count == 0)
+                {
+                    throw new Exception("native codegen: break поза циклом");
+                }
+                _asm.AppendLine($"    jmp {_loopLabels.Peek().End}");
+                break;
+
+            case ContinueStatement:
+                if (_loopLabels.Count == 0)
+                {
+                    throw new Exception("native codegen: continue поза циклом");
+                }
+                _asm.AppendLine($"    jmp {_loopLabels.Peek().Start}");
+                break;
+
+            case BlockStatement block:
+                CompileBlock(block);
+                break;
+
             default:
-                throw new Exception($"native codegen (Фаза N1): непідтримуваний вираз/оператор - {stmt.GetType().Name} (підмножина мови ще МІНІМАЛЬНА, дивись NATIVE_ROADMAP.md)");
+                throw new Exception($"native codegen (Фаза N1-N2): непідтримуваний оператор - {stmt.GetType().Name} (підмножина мови ще МІНІМАЛЬНА, дивись NATIVE_ROADMAP.md)");
         }
     }
 
@@ -111,13 +219,84 @@ public class NativeCodegen
                 _asm.AppendLine($"    mov ${(int) d}, %eax");
                 break;
 
+            // РЕАЛЬНА ПОМИЛКА, знайдена живим тестом: `true`/`false` -
+            // ОКРЕМИЙ тип значення в AST (bool), НЕ double, як усі
+            // числа - "while true {...}" падав на невловленому case.
+            case LiteralExpression { Value: bool boolVal }:
+                _asm.AppendLine($"    mov ${(boolVal ? 1 : 0)}, %eax");
+                break;
+
             case VariableExpression varExpr:
                 if (!_varOffsets.TryGetValue(varExpr.Name, out int offset))
                 {
-                    throw new Exception($"native codegen (Фаза N1): змінна '{varExpr.Name}' використана до оголошення (чи не var, а щось складніше - функції з параметрами - наступна фаза)");
+                    throw new Exception($"native codegen (Фаза N1-N2): змінна '{varExpr.Name}' використана до оголошення (чи не var, а щось складніше - функції з параметрами - наступна фаза)");
                 }
                 _asm.AppendLine($"    mov {offset}(%ebp), %eax");
                 break;
+
+            case UnaryExpression { Operator: "-" } unaryNeg:
+                CompileExpression(unaryNeg.Operand);
+                _asm.AppendLine("    neg %eax");
+                break;
+
+            case UnaryExpression { Operator: "!" } unaryNot:
+                CompileExpression(unaryNot.Operand);
+                _asm.AppendLine("    cmp $0, %eax");
+                _asm.AppendLine("    sete %al");
+                _asm.AppendLine("    movzbl %al, %eax");
+                break;
+
+            case BinaryExpression { Operator: "=" } assign:
+                {
+                    if (assign.Left is not VariableExpression target)
+                    {
+                        throw new Exception("native codegen (Фаза N1-N2): присвоєння підтримується лише у звичайну змінну (масиви/структури - наступна фаза)");
+                    }
+                    if (!_varOffsets.TryGetValue(target.Name, out int targetOffset))
+                    {
+                        throw new Exception($"native codegen: змінна '{target.Name}' не оголошена");
+                    }
+                    CompileExpression(assign.Right); // -> %eax
+                    _asm.AppendLine($"    mov %eax, {targetOffset}(%ebp)");
+                    // "=" - теж ВИРАЗ (не лише statement) - лишає присвоєне
+                    // значення в %eax, як і в самій мові (той самий
+                    // контракт, що C-подібні мови).
+                    break;
+                }
+
+            case BinaryExpression { Operator: "&&" } andExpr:
+                {
+                    int id = _labelCounter++;
+                    CompileExpression(andExpr.Left);
+                    _asm.AppendLine("    cmp $0, %eax");
+                    _asm.AppendLine($"    je .Lfalse{id}");
+                    CompileExpression(andExpr.Right);
+                    _asm.AppendLine("    cmp $0, %eax");
+                    _asm.AppendLine($"    je .Lfalse{id}");
+                    _asm.AppendLine("    mov $1, %eax");
+                    _asm.AppendLine($"    jmp .Lend{id}");
+                    _asm.AppendLine($".Lfalse{id}:");
+                    _asm.AppendLine("    mov $0, %eax");
+                    _asm.AppendLine($".Lend{id}:");
+                    break;
+                }
+
+            case BinaryExpression { Operator: "||" } orExpr:
+                {
+                    int id = _labelCounter++;
+                    CompileExpression(orExpr.Left);
+                    _asm.AppendLine("    cmp $0, %eax");
+                    _asm.AppendLine($"    jne .Ltrue{id}");
+                    CompileExpression(orExpr.Right);
+                    _asm.AppendLine("    cmp $0, %eax");
+                    _asm.AppendLine($"    jne .Ltrue{id}");
+                    _asm.AppendLine("    mov $0, %eax");
+                    _asm.AppendLine($"    jmp .Lend{id}");
+                    _asm.AppendLine($".Ltrue{id}:");
+                    _asm.AppendLine("    mov $1, %eax");
+                    _asm.AppendLine($".Lend{id}:");
+                    break;
+                }
 
             case BinaryExpression bin:
                 CompileExpression(bin.Left);
@@ -134,13 +313,28 @@ public class NativeCodegen
                         _asm.AppendLine("    cdq"); // знакове розширення eax->edx:eax, ОБОВ'ЯЗКОВО перед idiv
                         _asm.AppendLine("    idiv %ebx");
                         break;
+                    case "%":
+                        _asm.AppendLine("    cdq");
+                        _asm.AppendLine("    idiv %ebx");
+                        _asm.AppendLine("    mov %edx, %eax"); // остача (edx) - результат %, а не частка
+                        break;
+                    // Порівняння - cmp + setCC (запис 0/1 у молодший байт
+                    // %al) + movzbl (обнулити решту %eax - setCC ЧІПАЄ
+                    // ЛИШЕ %al, вищі 24 біти лишились би СМІТТЯМ від
+                    // попередньої операції без цього).
+                    case "==": _asm.AppendLine("    cmp %ebx, %eax"); _asm.AppendLine("    sete %al"); _asm.AppendLine("    movzbl %al, %eax"); break;
+                    case "!=": _asm.AppendLine("    cmp %ebx, %eax"); _asm.AppendLine("    setne %al"); _asm.AppendLine("    movzbl %al, %eax"); break;
+                    case "<": _asm.AppendLine("    cmp %ebx, %eax"); _asm.AppendLine("    setl %al"); _asm.AppendLine("    movzbl %al, %eax"); break;
+                    case "<=": _asm.AppendLine("    cmp %ebx, %eax"); _asm.AppendLine("    setle %al"); _asm.AppendLine("    movzbl %al, %eax"); break;
+                    case ">": _asm.AppendLine("    cmp %ebx, %eax"); _asm.AppendLine("    setg %al"); _asm.AppendLine("    movzbl %al, %eax"); break;
+                    case ">=": _asm.AppendLine("    cmp %ebx, %eax"); _asm.AppendLine("    setge %al"); _asm.AppendLine("    movzbl %al, %eax"); break;
                     default:
-                        throw new Exception($"native codegen (Фаза N1): оператор '{bin.Operator}' ще не підтримується (лише + - * /)");
+                        throw new Exception($"native codegen (Фаза N1-N2): оператор '{bin.Operator}' ще не підтримується");
                 }
                 break;
 
             default:
-                throw new Exception($"native codegen (Фаза N1): непідтримуваний вираз - {expr.GetType().Name}");
+                throw new Exception($"native codegen (Фаза N1-N2): непідтримуваний вираз - {expr.GetType().Name}");
         }
     }
 
