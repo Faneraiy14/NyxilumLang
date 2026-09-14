@@ -14,9 +14,12 @@ public enum NativeTarget { Linux, NyxOS }
 
 // Статичний тип виразу, визначений НА ЕТАПІ КОМПІЛЯЦІЇ (без цього
 // компілятор не знав би, у якому регістрі шукати результат виразу -
-// %xmm0 для чисел чи %eax для bool - і які інструкції генерувати).
-// Рядки НЕ значення тут - підтримано лише прямий літерал print("...").
-enum ValType { Number, Bool }
+// %xmm0 для чисел, %eax для bool/рядка - і які інструкції генерувати).
+// String (Фаза N3, друга частина) - вказівник (32-біт, як і Bool) на
+// NUL-термінований UTF-8 буфер: або статичний .rodata-літерал, або
+// (наступний крок) купа - для ЦЬОГО кроку досить статичних літералів,
+// присвоєних змінній, - купа/розподілювач пам'яті ще НЕ потрібні.
+enum ValType { Number, Bool, String }
 
 // NativeCodegen — Фази N1-N3 (NATIVE_ROADMAP.md): справжня x86-компіляція
 // NyxilumLang, БЕЗ жодної VM під час виконання (на відміну від
@@ -95,6 +98,7 @@ public class NativeCodegen
 
         EmitPrintCharHelper();
         EmitPrintDoubleHelper();
+        EmitPrintStringValueHelper();
 
         if (_rodata.Length > 0)
         {
@@ -213,8 +217,7 @@ public class NativeCodegen
     {
         LiteralExpression { Value: double } => ValType.Number,
         LiteralExpression { Value: bool } => ValType.Bool,
-        LiteralExpression { Value: string } =>
-            throw new Exception("native codegen (Фаза N3): рядок як значення виразу (не прямий літерал у print(\"...\")) ще не підтримується - потрібне повноцінне представлення значень"),
+        LiteralExpression { Value: string } => ValType.String,
         VariableExpression v => _varTypes.TryGetValue(v.Name, out var t)
             ? t
             : throw new Exception($"native codegen: змінна '{v.Name}' використана до оголошення"),
@@ -258,51 +261,6 @@ public class NativeCodegen
                     break;
                 }
 
-            case PrintStatement { Expression: LiteralExpression { Value: string strVal } }:
-                {
-                    // РЕАЛЬНА ПРОГАЛИНА, знайдена живим тестом: НАВІТЬ
-                    // "print("hello")" не компілювався - жодної підтримки
-                    // рядків не було взагалі, хоча print() з числом уже
-                    // працював. Прямий рядковий ЛІТЕРАЛ - НАЙПРОСТІШИЙ
-                    // випадок (адреса й довжина відомі ще на етапі
-                    // компіляції) - рядкові ЗМІННІ (var s = "..."; print(s))
-                    // потребують повноцінного представлення значень
-                    // (Фаза N4+) і навмисно ще НЕ тут.
-                    if (_target == NativeTarget.Linux)
-                    {
-                        string label = EmitStringLiteral(strVal);
-                        byte[] utf8 = Encoding.UTF8.GetBytes(strVal);
-                        _asm.AppendLine("    mov $4, %eax");      // syscall write
-                        _asm.AppendLine("    mov $1, %ebx");      // fd = stdout
-                        _asm.AppendLine($"    mov ${label}, %ecx");
-                        _asm.AppendLine($"    mov ${utf8.Length}, %edx");
-                        _asm.AppendLine("    int $0x80");
-                        // print завжди додає перенесення рядка (той самий
-                        // контракт, що print_double - і що Console.WriteLine у VM).
-                        _asm.AppendLine("    mov $4, %eax");
-                        _asm.AppendLine("    mov $1, %ebx");
-                        _asm.AppendLine("    mov $print_newline, %ecx");
-                        _asm.AppendLine("    mov $1, %edx");
-                        _asm.AppendLine("    int $0x80");
-                    }
-                    else
-                    {
-                        // NyxOS syscall #2 (print_string, usermode.c) сама
-                        // йде через vga_print() - НЕ потребує довжини,
-                        // чекає NUL-термінований UTF-8 вказівник, і сама
-                        // декодує кирилицю - ідентичний контракт до
-                        // programs/libnyx.h::nyx_print() у репозиторії
-                        // NyxOS. Перенесення рядка ВБУДОВУЄМО В ДАНІ
-                        // (перед NUL), а не окремим syscall - vga_print
-                        // сам коректно обробляє '\n' усередині рядка.
-                        string label = EmitStringLiteral(strVal + "\n", nullTerminate: true);
-                        _asm.AppendLine("    mov $2, %eax");      // syscall print_string
-                        _asm.AppendLine($"    mov ${label}, %ebx");
-                        _asm.AppendLine("    int $0x80");
-                    }
-                    break;
-                }
-
             case PrintStatement printStmt:
                 {
                     // РЕАЛЬНА ПОМИЛКА Фази N1: `print(x)` у NyxilumLang НЕ
@@ -310,27 +268,42 @@ public class NativeCodegen
                     // його як ОКРЕМИЙ вузол AST, PrintStatement.
                     var t = InferExprType(printStmt.Expression);
                     CompileExpression(printStmt.Expression);
-                    if (t == ValType.Number)
+                    switch (t)
                     {
-                        _asm.AppendLine("    call print_double");
-                    }
-                    else
-                    {
-                        // Bool - друкуємо ТЕКСТОМ "True"/"False" - РЕАЛЬНА
-                        // невідповідність, знайдена живим тестом: VM
-                        // друкує bool через C#-типове object.ToString()
-                        // (boxed bool), яке дає "True"/"False" з великої
-                        // літери, НЕ "true"/"false" - перша версія цього
-                        // коду мовчки не збігалась із VM, поки не
-                        // звірено побайтово.
-                        int id = _labelCounter++;
-                        _asm.AppendLine("    cmp $0, %eax");
-                        _asm.AppendLine($"    je .Lpfalse{id}");
-                        EmitPrintStringLiteral("True\n");
-                        _asm.AppendLine($"    jmp .Lpdone{id}");
-                        _asm.AppendLine($".Lpfalse{id}:");
-                        EmitPrintStringLiteral("False\n");
-                        _asm.AppendLine($".Lpdone{id}:");
+                        case ValType.Number:
+                            _asm.AppendLine("    call print_double");
+                            break;
+
+                        case ValType.String:
+                            // Рядковий ЛІТЕРАЛ і рядкова ЗМІННА йдуть ТЕПЕР
+                            // ОДНИМ шляхом (Фаза N3, друга частина) -
+                            // раніше прямий print("...") мав окремий
+                            // спецвипадок тут (адреса й довжина відомі на
+                            // етапі компіляції) - усунено, бо для
+                            // print(рядкова_змінна) довжина ЗАЗДАЛЕГІДЬ НЕ
+                            // відома (значення могло змінитись через
+                            // присвоєння) і все одно вираховується в
+                            // print_string_value у рантаймі.
+                            _asm.AppendLine("    call print_string_value");
+                            break;
+
+                        default: // Bool
+                            // Друкуємо ТЕКСТОМ "True"/"False" - РЕАЛЬНА
+                            // невідповідність, знайдена живим тестом: VM
+                            // друкує bool через C#-типове object.ToString()
+                            // (boxed bool), яке дає "True"/"False" з великої
+                            // літери, НЕ "true"/"false" - перша версія цього
+                            // коду мовчки не збігалась із VM, поки не
+                            // звірено побайтово.
+                            int id = _labelCounter++;
+                            _asm.AppendLine("    cmp $0, %eax");
+                            _asm.AppendLine($"    je .Lpfalse{id}");
+                            EmitPrintStringLiteral("True\n");
+                            _asm.AppendLine($"    jmp .Lpdone{id}");
+                            _asm.AppendLine($".Lpfalse{id}:");
+                            EmitPrintStringLiteral("False\n");
+                            _asm.AppendLine($".Lpdone{id}:");
+                            break;
                     }
                     break;
                 }
@@ -469,6 +442,18 @@ public class NativeCodegen
                 _asm.AppendLine($"    mov ${(boolVal ? 1 : 0)}, %eax");
                 break;
 
+            case LiteralExpression { Value: string strVal }:
+                {
+                    // Рядок-ЗНАЧЕННЯ (Фаза N3, друга частина) - вказівник
+                    // (32-біт, як Bool) на NUL-термінований .rodata-буфер.
+                    // Лише СТАТИЧНІ літерали поки що - купа/розподілювач
+                    // пам'яті (для рантайм-побудованих рядків) - наступний
+                    // крок (Фаза N4+).
+                    string label = EmitStringLiteral(strVal, nullTerminate: true);
+                    _asm.AppendLine($"    mov ${label}, %eax");
+                    break;
+                }
+
             case VariableExpression varExpr:
                 {
                     if (!_varOffsets.TryGetValue(varExpr.Name, out int offset))
@@ -592,11 +577,29 @@ public class NativeCodegen
                 }
 
             case BinaryExpression bin:
-                if (InferExprType(bin.Left) == ValType.Number)
-                    CompileNumberBinary(bin);
-                else
-                    CompileBoolBinary(bin);
-                break;
+                {
+                    var leftType = InferExprType(bin.Left);
+                    if (leftType == ValType.Number)
+                    {
+                        CompileNumberBinary(bin);
+                    }
+                    else if (leftType == ValType.String)
+                    {
+                        // ЖОДНИХ операцій над рядками ще не підтримуємо -
+                        // навіть ==/!= НЕ додаємо тут: CompileBoolBinary
+                        // порівняв би просто АДРЕСИ (identity), а НЕ ЗМІСТ
+                        // (потрібен strcmp), і незрозуміло, чи це взагалі
+                        // збігається з тим, як порівнює рядки VM - чесна
+                        // помилка компіляції краща за неперевірену,
+                        // можливо хибну поведінку (Фаза N4+).
+                        throw new Exception($"native codegen (Фаза N3): оператор '{bin.Operator}' для рядків ще не підтримується (потрібне порівняння ЗМІСТУ/strcmp - Фаза N4+)");
+                    }
+                    else
+                    {
+                        CompileBoolBinary(bin);
+                    }
+                    break;
+                }
 
             default:
                 throw new Exception($"native codegen: непідтримуваний вираз - {expr.GetType().Name}");
@@ -811,6 +814,69 @@ public class NativeCodegen
             .Lpd_fracdone:
             .Lpd_nofrac:
                 movb $10, %al               # '\n' - той самий контракт, що print(рядок)/старий print_int
+                call print_char
+
+                pop %edi
+                pop %esi
+                pop %edx
+                pop %ecx
+                pop %ebx
+                pop %ebp
+                ret
+            """);
+    }
+
+    // print_string_value(вказівник у %eax) - друкує NUL-термінований
+    // рядок-ЗНАЧЕННЯ (Фаза N3, друга частина - рядкові ЗМІННІ, не лише
+    // прямий літерал). Довжина рядка НЕ відома на етапі компіляції
+    // (змінна могла бути перевизначена іншим рядком іншої довжини),
+    // тому Linux-ціль вираховує її В РАНТАЙМІ (strlen-цикл) перед
+    // write() - на відміну від старого спецвипадку для прямого
+    // print("літерал"), де довжина була відома заздалегідь. NyxOS-ціль
+    // (syscall #2) довжини взагалі не потребує - сканує до NUL сама.
+    // Перенесення рядка ТЕПЕР окремим print_char('\n') для ОБОХ цілей
+    // (раніше NyxOS-шлях вбудовував "\n" у САМІ байти літералу - не
+    // підходить для змінної, що може вказувати на РІЗНІ рядки).
+    private void EmitPrintStringValueHelper()
+    {
+        string tail = _target == NativeTarget.Linux
+            ? """
+                    mov %esi, %edi           # зберігаємо початок буфера
+                    mov %esi, %ecx           # курсор для strlen-циклу
+                .Lpsv_strlen:
+                    cmpb $0, (%ecx)
+                    je .Lpsv_strlen_done
+                    inc %ecx
+                    jmp .Lpsv_strlen
+                .Lpsv_strlen_done:
+                    mov %ecx, %edx
+                    sub %edi, %edx           # довжина = курсор - початок
+
+                    mov $4, %eax             # syscall write
+                    mov $1, %ebx             # fd = stdout
+                    mov %edi, %ecx           # buf
+                    int $0x80
+            """
+            : """
+                    mov $2, %eax             # syscall print_string (NyxOS, usermode.c) - сама сканує до NUL
+                    mov %esi, %ebx
+                    int $0x80
+            """;
+
+        _asm.AppendLine($$"""
+            print_string_value:
+                push %ebp
+                mov %esp, %ebp
+                push %ebx
+                push %ecx
+                push %edx
+                push %esi
+                push %edi
+
+                mov %eax, %esi
+            {{tail}}
+
+                movb $10, %al
                 call print_char
 
                 pop %edi
