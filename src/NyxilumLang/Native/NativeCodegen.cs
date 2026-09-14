@@ -8,13 +8,13 @@ namespace NyxilumLang.Native;
 // лише в байткод для VM (VirtualMachine.cs), якій самій потрібна повна
 // ОС/.NET під собою.
 //
-// Підмножина мови зараз: func main() без параметрів, var з цілими
-// числами/арифметикою (+ - * / %), if/else, while, break/continue,
-// присвоєння (x = ...), порівняння (== != < <= > >=), логічні (&& || !),
-// print() з ОДНИМ цілим аргументом. Усі числові літерали в AST -
-// `double` (Parser.cs: `double.Parse`), тут свідомо ЗРІЗАЄМО до
-// 32-бітного цілого - плаваюча кома, функції з параметрами, рядки,
-// масиви, структури - НАСТУПНІ фази, не ця.
+// Підмножина мови зараз: КІЛЬКА функцій (не лише main) з параметрами й
+// return, var з цілими числами/арифметикою (+ - * / %), if/else, while,
+// break/continue, присвоєння (x = ...), порівняння (== != < <= > >=),
+// логічні (&& || !), print() з ОДНИМ цілим аргументом. Усі числові
+// літерали в AST - `double` (Parser.cs: `double.Parse`), тут свідомо
+// ЗРІЗАЄМО до 32-бітного цілого - плаваюча кома, рядки, масиви,
+// структури, замикання - НАСТУПНІ фази, не ця.
 //
 // Виводить ТЕКСТ GAS-асемблера (AT&T-синтаксис, 32-біт) - той самий
 // інструментарій (`as`/`ld`), що вже збирає ЦІЛЕ ядро NyxOS - жодного
@@ -22,61 +22,103 @@ namespace NyxilumLang.Native;
 public class NativeCodegen
 {
     private readonly StringBuilder _asm = new();
-    private readonly Dictionary<string, int> _varOffsets = new();
-    private int _nextLocalOffset; // зростає на 4 з кожною НОВОЮ змінною; offset(%ebp) - ЗАВЖДИ від'ємний
+
+    // Кожна функція компілюється ОКРЕМО зі СВОЄЮ картою змінних (локальні
+    // змінні однієї функції НЕ мають бачити слоти іншої) - ці три поля
+    // скидаються на початку CompileFunction() для КОЖНОЇ функції.
+    private Dictionary<string, int> _varOffsets = new();
+    private int _nextLocalOffset;
+    private string _epilogueLabel = "";
+    private bool _isMain;
+
     private int _labelCounter;
-    // (стартова мітка, кінцева мітка) НАЙБЛИЖЧОГО активного циклу - break
-    // стрибає на кінець, continue - на старт (перевірку умови). Стек, а
-    // не одна змінна - цикли можуть бути ВКЛАДЕНІ.
     private readonly Stack<(string Start, string End)> _loopLabels = new();
+    private HashSet<string> _knownFunctions = new();
 
     public string Compile(ProgramNode program)
     {
-        var mainFunc = program.Statements
-            .OfType<FunctionDeclaration>()
-            .FirstOrDefault(f => f.Name == "main")
-            ?? throw new Exception("native codegen (Фаза N1): у файлі немає func main()");
-
-        // РЕАЛЬНА ПОМИЛКА Фази N1, виправлена в N2: перший прохід рахував
-        // ЛИШЕ ПРЯМІ var у тілі main - щойно з'явились if/while (Фаза N2),
-        // var усередині ЇХНІХ блоків не отримували слот на стеку ВЗАГАЛІ
-        // (компілятор впав би з KeyNotFoundException на першому ж
-        // "if (x) { var y = 1 }"). Тепер збираємо імена РЕКУРСИВНО з
-        // УСІХ вкладених блоків - той самий підхід, яким "справжні"
-        // компілятори роблять hoisting локальних змінних.
-        var allVarNames = new List<string>();
-        CollectVarNames(mainFunc.Body, allVarNames);
-        foreach (var name in allVarNames.Distinct())
-        {
-            _nextLocalOffset -= 4;
-            _varOffsets[name] = _nextLocalOffset;
-        }
+        var allFuncs = program.Statements.OfType<FunctionDeclaration>().ToList();
+        var mainFunc = allFuncs.FirstOrDefault(f => f.Name == "main")
+            ?? throw new Exception("native codegen (Фаза N1-N2): у файлі немає func main()");
+        _knownFunctions = allFuncs.Select(f => f.Name).ToHashSet();
 
         _asm.AppendLine("# Згенеровано NativeCodegen.cs (NyxilumLang, Фаза N1-N2) - НЕ редагувати вручну.");
         _asm.AppendLine(".section .text");
         _asm.AppendLine(".global _start");
-        _asm.AppendLine("_start:");
-        _asm.AppendLine("    push %ebp");
-        _asm.AppendLine("    mov %esp, %ebp");
-        if (allVarNames.Count > 0)
-        {
-            _asm.AppendLine($"    sub ${allVarNames.Distinct().Count() * 4}, %esp");
-        }
 
-        foreach (var stmt in mainFunc.Body.Statements)
-        {
-            CompileStatement(stmt);
-        }
+        // main - ОСОБЛИВИЙ випадок: НЕ звичайна функція, викликана через
+        // `call` (нікому й нема куди "повертатись" - вона ЄДИНА точка
+        // входу всієї програми) - її епілог РОБИТЬ САМ SYSCALL exit(),
+        // а НЕ `ret`, на відміну від УСІХ інших функцій нижче.
+        CompileFunction(mainFunc, isMain: true);
 
-        // exit(0) - syscall 1 (Linux 32-біт, int 0x80), ebx=код виходу.
-        _asm.AppendLine("    mov $1, %eax");
-        _asm.AppendLine("    xor %ebx, %ebx");
-        _asm.AppendLine("    int $0x80");
+        foreach (var func in allFuncs.Where(f => f.Name != "main"))
+        {
+            CompileFunction(func, isMain: false);
+        }
 
         EmitPrintIntHelper();
         EmitBssSection();
 
         return _asm.ToString();
+    }
+
+    private void CompileFunction(FunctionDeclaration func, bool isMain)
+    {
+        _varOffsets = new Dictionary<string, int>();
+        _nextLocalOffset = 0;
+        _isMain = isMain;
+
+        // Параметри - ПОЗИТИВНІ зсуви від %ebp (за return-адресою й
+        // збереженим %ebp викликаючої функції - той самий стандартний
+        // cdecl-макет, яким користується GCC/будь-який x86-компілятор).
+        for (int i = 0; i < func.Parameters.Count; i++)
+        {
+            _varOffsets[func.Parameters[i].Name] = 8 + i * 4;
+        }
+
+        var allVarNames = new List<string>();
+        CollectVarNames(func.Body, allVarNames);
+        foreach (var name in allVarNames.Distinct())
+        {
+            if (_varOffsets.ContainsKey(name)) continue; // ім'я параметра - НЕ заводимо ще й локальний слот
+            _nextLocalOffset -= 4;
+            _varOffsets[name] = _nextLocalOffset;
+        }
+
+        _epilogueLabel = isMain ? ".Lmain_exit" : $".L{func.Name}_epilogue";
+
+        _asm.AppendLine(isMain ? "_start:" : $"{func.Name}:");
+        _asm.AppendLine("    push %ebp");
+        _asm.AppendLine("    mov %esp, %ebp");
+        int localBytes = -_nextLocalOffset;
+        if (localBytes > 0)
+        {
+            _asm.AppendLine($"    sub ${localBytes}, %esp");
+        }
+
+        foreach (var stmt in func.Body.Statements)
+        {
+            CompileStatement(stmt);
+        }
+
+        // Якщо тіло "провалилось" за кінець без явного return - main
+        // виходить з кодом 0, звичайна функція повертає 0 (той самий
+        // дефолт, що C - "falling off the end" неявно означає return 0).
+        _asm.AppendLine("    mov $0, %eax");
+        _asm.AppendLine($"{_epilogueLabel}:");
+        if (isMain)
+        {
+            _asm.AppendLine("    mov %eax, %ebx"); // код виходу = те, що лишив return (чи 0)
+            _asm.AppendLine("    mov $1, %eax");   // syscall exit
+            _asm.AppendLine("    int $0x80");
+        }
+        else
+        {
+            _asm.AppendLine("    mov %ebp, %esp");
+            _asm.AppendLine("    pop %ebp");
+            _asm.AppendLine("    ret");
+        }
     }
 
     private static void CollectVarNames(BlockStatement block, List<string> names)
@@ -116,7 +158,7 @@ public class NativeCodegen
         {
             case VariableDeclaration varDecl:
                 {
-                    // Слот УЖЕ виділено в Compile() (CollectVarNames) -
+                    // Слот УЖЕ виділено в CompileFunction() (CollectVarNames) -
                     // тут лише записуємо ПОЧАТКОВЕ значення, якщо воно є.
                     if (varDecl.Initializer != null)
                     {
@@ -137,9 +179,23 @@ public class NativeCodegen
                     break;
                 }
 
+            case ReturnStatement returnStmt:
+                {
+                    if (returnStmt.Value != null)
+                    {
+                        CompileExpression(returnStmt.Value);
+                    }
+                    else
+                    {
+                        _asm.AppendLine("    mov $0, %eax");
+                    }
+                    _asm.AppendLine($"    jmp {_epilogueLabel}");
+                    break;
+                }
+
             case ExpressionStatement exprStmt:
-                // Напр. "x = x + 1" як самостійний рядок - результат
-                // виразу (значення присвоєння) просто відкидаємо.
+                // Напр. "x = x + 1" чи виклик функції як самостійний рядок -
+                // результат виразу просто відкидаємо.
                 CompileExpression(exprStmt.Expression);
                 break;
 
@@ -229,7 +285,7 @@ public class NativeCodegen
             case VariableExpression varExpr:
                 if (!_varOffsets.TryGetValue(varExpr.Name, out int offset))
                 {
-                    throw new Exception($"native codegen (Фаза N1-N2): змінна '{varExpr.Name}' використана до оголошення (чи не var, а щось складніше - функції з параметрами - наступна фаза)");
+                    throw new Exception($"native codegen (Фаза N1-N2): змінна '{varExpr.Name}' використана до оголошення (масиви/структури - наступна фаза)");
                 }
                 _asm.AppendLine($"    mov {offset}(%ebp), %eax");
                 break;
@@ -246,6 +302,30 @@ public class NativeCodegen
                 _asm.AppendLine("    movzbl %al, %eax");
                 break;
 
+            case CallExpression call:
+                {
+                    if (!_knownFunctions.Contains(call.FunctionName))
+                    {
+                        throw new Exception($"native codegen (Фаза N1-N2): невідома функція '{call.FunctionName}' (лише вбудований print() і функції з ЦЬОГО Ж файлу - стандартна бібліотека/імпорти - значно пізніша фаза)");
+                    }
+                    // cdecl: аргументи - СПРАВА НАЛІВО (останній - першим),
+                    // тому після всіх push'ів ПЕРШИЙ аргумент лежить
+                    // НАЙБЛИЖЧЕ до вершини стека - callee побачить його
+                    // РІВНО за 8(%ebp) (одразу за return-адресою й
+                    // збереженим %ebp) - той самий макет, що GCC генерує.
+                    for (int i = call.Arguments.Count - 1; i >= 0; i--)
+                    {
+                        CompileExpression(call.Arguments[i]);
+                        _asm.AppendLine("    push %eax");
+                    }
+                    _asm.AppendLine($"    call {call.FunctionName}");
+                    if (call.Arguments.Count > 0)
+                    {
+                        _asm.AppendLine($"    add ${call.Arguments.Count * 4}, %esp"); // ВИКЛИКАЧ прибирає аргументи (cdecl, не stdcall)
+                    }
+                    break;
+                }
+
             case BinaryExpression { Operator: "=" } assign:
                 {
                     if (assign.Left is not VariableExpression target)
@@ -258,9 +338,6 @@ public class NativeCodegen
                     }
                     CompileExpression(assign.Right); // -> %eax
                     _asm.AppendLine($"    mov %eax, {targetOffset}(%ebp)");
-                    // "=" - теж ВИРАЗ (не лише statement) - лишає присвоєне
-                    // значення в %eax, як і в самій мові (той самий
-                    // контракт, що C-подібні мови).
                     break;
                 }
 
@@ -318,10 +395,6 @@ public class NativeCodegen
                         _asm.AppendLine("    idiv %ebx");
                         _asm.AppendLine("    mov %edx, %eax"); // остача (edx) - результат %, а не частка
                         break;
-                    // Порівняння - cmp + setCC (запис 0/1 у молодший байт
-                    // %al) + movzbl (обнулити решту %eax - setCC ЧІПАЄ
-                    // ЛИШЕ %al, вищі 24 біти лишились би СМІТТЯМ від
-                    // попередньої операції без цього).
                     case "==": _asm.AppendLine("    cmp %ebx, %eax"); _asm.AppendLine("    sete %al"); _asm.AppendLine("    movzbl %al, %eax"); break;
                     case "!=": _asm.AppendLine("    cmp %ebx, %eax"); _asm.AppendLine("    setne %al"); _asm.AppendLine("    movzbl %al, %eax"); break;
                     case "<": _asm.AppendLine("    cmp %ebx, %eax"); _asm.AppendLine("    setl %al"); _asm.AppendLine("    movzbl %al, %eax"); break;
