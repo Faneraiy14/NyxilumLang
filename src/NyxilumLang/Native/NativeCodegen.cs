@@ -24,7 +24,12 @@ public enum NativeTarget { Linux, NyxOS }
 // дивись коментар над HeapAlloc нижче): [довжина:4 байти][padding:4
 // байти][елементи - по 8 байтів, СПРОЩЕННЯ - лише Number, не змішані
 // типи, бо немає повноцінного tagged union].
-enum ValType { Number, Bool, String, Array }
+// Struct (Фаза N3, четверта частина) - вказівник на купу: поля по 8
+// байтів кожне, offset = індекс поля в StructDeclaration.Fields * 8
+// (обчислюється ОДИН РАЗ на весь файл у Compile()). СПРОЩЕННЯ (як і в
+// Array) - лише Number-поля; методи/успадкування (extends) - ЩЕ НЕ
+// підтримуються цим бекендом (Фаза N4+).
+enum ValType { Number, Bool, String, Array, Struct }
 
 // NativeCodegen — Фази N1-N3 (NATIVE_ROADMAP.md): справжня x86-компіляція
 // NyxilumLang, БЕЗ жодної VM під час виконання (на відміну від
@@ -62,9 +67,18 @@ public class NativeCodegen
     // скидаються на початку CompileFunction() для КОЖНОЇ функції.
     private Dictionary<string, int> _varOffsets = new();
     private Dictionary<string, ValType> _varTypes = new();
+    // ЛИШЕ для ValType.Struct - яка САМЕ структура (StructDeclaration.Name),
+    // щоб знати offset'и полів при member-доступі. НЕ скидається між
+    // функціями окремо (скидається разом із _varTypes в CompileFunction).
+    private Dictionary<string, string> _varStructName = new();
     private int _nextLocalOffset;
     private string _epilogueLabel = "";
     private bool _isMain;
+
+    // Заповнюється ОДИН РАЗ на весь файл у Compile() (НЕ скидається між
+    // функціями, на відміну від _varOffsets/_varTypes) - структури
+    // оголошуються на верхньому рівні, доступні звідусіль.
+    private Dictionary<string, Dictionary<string, int>> _structFieldOffsets = new();
 
     private int _labelCounter;
     private readonly Stack<(string Start, string End)> _loopLabels = new();
@@ -85,6 +99,21 @@ public class NativeCodegen
         var mainFunc = allFuncs.FirstOrDefault(f => f.Name == "main")
             ?? throw new Exception("native codegen: у файлі немає func main()");
         _knownFunctions = allFuncs.Select(f => f.Name).ToHashSet();
+
+        // Offset'и полів структур - ОДИН РАЗ на весь файл (структури
+        // оголошуються на верхньому рівні, а не всередині функцій).
+        // СПРОЩЕННЯ: методи (StructDeclaration.Methods) ігноруються тут
+        // повністю - виклик struct.method() ще не підтримується цим
+        // бекендом (Фаза N4+); успадковані (extends) поля батька теж НЕ
+        // додаються - спроба ініціалізувати успадковане поле дасть чесну
+        // (хай і не найточнішу) помилку "структура не має поля".
+        foreach (var s in program.Statements.OfType<StructDeclaration>())
+        {
+            var offsets = new Dictionary<string, int>();
+            for (int i = 0; i < s.Fields.Count; i++)
+                offsets[s.Fields[i].Name] = i * 8;
+            _structFieldOffsets[s.Name] = offsets;
+        }
 
         _asm.AppendLine("# Згенеровано NativeCodegen.cs (NyxilumLang, Фаза N1-N3) - НЕ редагувати вручну.");
         _asm.AppendLine(".section .text");
@@ -122,6 +151,7 @@ public class NativeCodegen
     {
         _varOffsets = new Dictionary<string, int>();
         _varTypes = new Dictionary<string, ValType>();
+        _varStructName = new Dictionary<string, string>();
         _nextLocalOffset = 0;
         _isMain = isMain;
 
@@ -193,6 +223,10 @@ public class NativeCodegen
                     {
                         var type = v.Initializer != null ? InferExprType(v.Initializer) : ValType.Number;
                         _varTypes[v.Name] = type;
+                        if (type == ValType.Struct && v.Initializer is StructInitExpression si)
+                        {
+                            _varStructName[v.Name] = si.StructName;
+                        }
                         if (!_varOffsets.ContainsKey(v.Name)) // ім'я параметра - НЕ заводимо ще й локальний слот
                         {
                             _nextLocalOffset -= 8;
@@ -241,7 +275,25 @@ public class NativeCodegen
         // довелось би вирішувати проблему змішаних типів без
         // повноцінного tagged union.
         IndexExpression => ValType.Number,
+        StructInitExpression => ValType.Struct,
+        // СПРОЩЕННЯ: поля структур лише Number (як і елементи масивів).
+        MemberAccessExpression => ValType.Number,
         _ => throw new Exception($"native codegen: неможливо визначити тип виразу - {expr.GetType().Name}")
+    };
+
+    // Яка САМЕ структура (StructDeclaration.Name) стоїть за виразом -
+    // потрібно окремо від InferExprType (яка каже лише "це Struct",
+    // без деталей), щоб знайти offset потрібного поля. СПРОЩЕННЯ:
+    // підтримано лише звичайну змінну й прямий StructName{...} -
+    // ланцюжки (obj.inner.field) чи повернення структури з функції -
+    // Фаза N4+.
+    private string ResolveStructName(ExpressionNode expr) => expr switch
+    {
+        VariableExpression v => _varStructName.TryGetValue(v.Name, out var sn)
+            ? sn
+            : throw new Exception($"native codegen: '{v.Name}' не є структурою"),
+        StructInitExpression si => si.StructName,
+        _ => throw new Exception($"native codegen (Фаза N3): доступ до поля підтримується лише через змінну чи StructName{{...}} напряму, не через {expr.GetType().Name} (Фаза N4+)")
     };
 
     private void CompileBlock(BlockStatement block)
@@ -305,6 +357,9 @@ public class NativeCodegen
                             // число) - неправильно й тихо, тому чесна
                             // відмова замість цього.
                             throw new Exception("native codegen (Фаза N3): print() масиву напряму ще не підтримується - друкуйте елементи через arr[i] у циклі");
+
+                        case ValType.Struct:
+                            throw new Exception("native codegen (Фаза N3): print() структури напряму ще не підтримується - друкуйте поля через obj.field");
 
                         default: // Bool
                             // Друкуємо ТЕКСТОМ "True"/"False" - РЕАЛЬНА
@@ -522,6 +577,51 @@ public class NativeCodegen
                     break;
                 }
 
+            case StructInitExpression structInit:
+                {
+                    // Структура - вказівник на купу: поля по 8 байтів,
+                    // offset = індекс поля в StructDeclaration.Fields*8
+                    // (обчислено один раз у Compile()). СПРОЩЕННЯ: лише
+                    // Number-поля, ВСІ поля мають бути ініціалізовані
+                    // явно (без значень за замовчуванням) - інакше решта
+                    // блоку лишилась би непроініціалізованим сміттям.
+                    if (_target != NativeTarget.Linux)
+                        throw new Exception("native codegen (Фаза N3): структури поки підтримуються лише для --target linux - потрібен syscall виділення пам'яті, якого ще немає в ABI NyxOS");
+                    if (!_structFieldOffsets.TryGetValue(structInit.StructName, out var fieldOffsets))
+                        throw new Exception($"native codegen: невідома структура '{structInit.StructName}'");
+                    if (structInit.Fields.Count != fieldOffsets.Count)
+                        throw new Exception($"native codegen (Фаза N3): усі поля структури '{structInit.StructName}' мають бути ініціалізовані явно (часткова ініціалізація/значення за замовчуванням - Фаза N4+)");
+                    foreach (var f in structInit.Fields)
+                    {
+                        if (!fieldOffsets.ContainsKey(f.Name))
+                            throw new Exception($"native codegen: структура '{structInit.StructName}' не має поля '{f.Name}'");
+                        if (InferExprType(f.Value) != ValType.Number)
+                            throw new Exception("native codegen (Фаза N3): поля структур підтримуються лише числові (Number)");
+                    }
+                    int totalBytes = fieldOffsets.Count * 8;
+                    _asm.AppendLine($"    mov ${totalBytes}, %eax");
+                    _asm.AppendLine("    call heap_alloc");
+                    _asm.AppendLine("    push %eax");
+                    foreach (var f in structInit.Fields)
+                    {
+                        CompileExpression(f.Value);                     // -> %xmm0
+                        _asm.AppendLine("    mov (%esp), %eax");        // вказівник - підглядаємо, НЕ знімаючи
+                        _asm.AppendLine($"    movsd %xmm0, {fieldOffsets[f.Name]}(%eax)");
+                    }
+                    _asm.AppendLine("    pop %eax");
+                    break;
+                }
+
+            case MemberAccessExpression member:
+                {
+                    string structName = ResolveStructName(member.Object);
+                    if (!_structFieldOffsets.TryGetValue(structName, out var fieldOffsets) || !fieldOffsets.TryGetValue(member.Member, out int fieldOffset))
+                        throw new Exception($"native codegen: структура '{structName}' не має поля '{member.Member}'");
+                    CompileExpression(member.Object);        // -> %eax (вказівник)
+                    _asm.AppendLine($"    movsd {fieldOffset}(%eax), %xmm0");
+                    break;
+                }
+
             case VariableExpression varExpr:
                 {
                     if (!_varOffsets.TryGetValue(varExpr.Name, out int offset))
@@ -619,9 +719,26 @@ public class NativeCodegen
                         _asm.AppendLine("    movsd %xmm0, 8(%eax,%ecx,8)");
                         break;
                     }
+                    if (assign.Left is MemberAccessExpression memberTarget)
+                    {
+                        // obj.field = значення - той самий LIFO-підхід, що
+                        // arr[i] = ... вище.
+                        string structName = ResolveStructName(memberTarget.Object);
+                        if (!_structFieldOffsets.TryGetValue(structName, out var fieldOffsets) || !fieldOffsets.TryGetValue(memberTarget.Member, out int fieldOffset))
+                            throw new Exception($"native codegen: структура '{structName}' не має поля '{memberTarget.Member}'");
+                        if (InferExprType(assign.Right) != ValType.Number)
+                            throw new Exception("native codegen (Фаза N3): поля структур підтримуються лише числові (Number)");
+
+                        CompileExpression(memberTarget.Object);      // -> %eax (вказівник)
+                        _asm.AppendLine("    push %eax");
+                        CompileExpression(assign.Right);             // -> %xmm0
+                        _asm.AppendLine("    pop %eax");
+                        _asm.AppendLine($"    movsd %xmm0, {fieldOffset}(%eax)");
+                        break;
+                    }
                     if (assign.Left is not VariableExpression target)
                     {
-                        throw new Exception("native codegen: присвоєння підтримується лише у звичайну змінну чи arr[i] (структури - наступна фаза)");
+                        throw new Exception("native codegen: присвоєння підтримується лише у звичайну змінну, arr[i] чи obj.field");
                     }
                     if (!_varOffsets.TryGetValue(target.Name, out int targetOffset))
                     {
@@ -690,6 +807,10 @@ public class NativeCodegen
                     else if (leftType == ValType.Array)
                     {
                         throw new Exception($"native codegen (Фаза N3): оператор '{bin.Operator}' для масивів не підтримується (індексуйте arr[i] замість порівняння/арифметики над самим масивом)");
+                    }
+                    else if (leftType == ValType.Struct)
+                    {
+                        throw new Exception($"native codegen (Фаза N3): оператор '{bin.Operator}' для структур не підтримується (звертайтесь до полів obj.field замість порівняння/арифметики над самою структурою)");
                     }
                     else
                     {
