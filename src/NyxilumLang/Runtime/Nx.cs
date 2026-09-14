@@ -65,6 +65,17 @@ public class Nx
             return;
         }
 
+        if (command == "compile-native" && args.Length > 1)
+        {
+            string? outPath = null;
+            for (int i = 2; i < args.Length - 1; i++)
+            {
+                if (args[i] == "-o") outPath = args[i + 1];
+            }
+            RunCompileNative(args[1], outPath);
+            return;
+        }
+
         if (command == "install")
         {
             RunInstall(args.Length > 1 ? args[1] : null);
@@ -232,6 +243,64 @@ public class Nx
         {
             Console.WriteLine($"Parse Error: {ex.Message}");
             Environment.Exit(1);
+        }
+    }
+
+    // "nx compile-native <file.nx> [-o output]" — Фаза N1 (NATIVE_ROADMAP.md):
+    // компілює МІНІМАЛЬНУ підмножину мови (func main, var з цілими
+    // числами/арифметикою, print з одним аргументом) у СПРАВЖНІЙ x86
+    // (32-біт) ELF-бінарник через NativeCodegen.cs + `as`/`ld` (той самий
+    // інструментарій, що збирає NyxOS) - НЕ через VirtualMachine.cs.
+    private static void RunCompileNative(string path, string? outPath)
+    {
+        if (!File.Exists(path))
+        {
+            Console.WriteLine($"Error: Cannot find file '{path}'");
+            Environment.Exit(1);
+            return;
+        }
+        outPath ??= Path.GetFileNameWithoutExtension(path);
+        string asmPath = outPath + ".s";
+        string objPath = outPath + ".o";
+
+        try
+        {
+            string code = File.ReadAllText(path, Encoding.UTF8);
+            var lexer = new Lexer(code);
+            var tokens = lexer.Tokenize();
+            var parser = new Parser(tokens);
+            var program = parser.ParseProgram();
+
+            var codegen = new NyxilumLang.Native.NativeCodegen();
+            string asmText = codegen.Compile(program);
+            File.WriteAllText(asmPath, asmText);
+            Console.WriteLine($"Асемблер записано: {asmPath}");
+
+            RunShell("as", $"--32 {asmPath} -o {objPath}");
+            RunShell("ld", $"-m elf_i386 {objPath} -o {outPath}");
+            Console.WriteLine($"✅ Скомпільовано в СПРАВЖНІЙ ELF-бінарник: {outPath}");
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Native compile error: {ex.Message}");
+            Environment.Exit(1);
+        }
+    }
+
+    private static void RunShell(string cmd, string args)
+    {
+        var psi = new System.Diagnostics.ProcessStartInfo(cmd, args)
+        {
+            RedirectStandardError = true,
+            RedirectStandardOutput = true,
+            UseShellExecute = false,
+        };
+        using var proc = System.Diagnostics.Process.Start(psi)!;
+        string stderr = proc.StandardError.ReadToEnd();
+        proc.WaitForExit();
+        if (proc.ExitCode != 0)
+        {
+            throw new Exception($"{cmd} {args} -> код {proc.ExitCode}\n{stderr}");
         }
     }
 
