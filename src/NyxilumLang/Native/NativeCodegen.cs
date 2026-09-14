@@ -35,6 +35,12 @@ public class NativeCodegen
     private readonly Stack<(string Start, string End)> _loopLabels = new();
     private HashSet<string> _knownFunctions = new();
 
+    // Рядкові літерали - у .rodata, кожен під СВОЄЮ міткою (.Lstr0,
+    // .Lstr1, ...) - записуємо в НАКОПИЧЕНУ секцію одразу, коли
+    // зустрічаємо (не окремий прохід по AST заздалегідь).
+    private readonly StringBuilder _rodata = new();
+    private int _stringLabelCounter;
+
     public string Compile(ProgramNode program)
     {
         var allFuncs = program.Statements.OfType<FunctionDeclaration>().ToList();
@@ -58,6 +64,14 @@ public class NativeCodegen
         }
 
         EmitPrintIntHelper();
+
+        if (_rodata.Length > 0)
+        {
+            _asm.AppendLine(".section .rodata");
+            _asm.AppendLine("print_newline: .byte 10");
+            _asm.Append(_rodata);
+        }
+
         EmitBssSection();
 
         return _asm.ToString();
@@ -166,6 +180,33 @@ public class NativeCodegen
                         CompileExpression(varDecl.Initializer); // результат -> %eax
                         _asm.AppendLine($"    mov %eax, {offset}(%ebp)");
                     }
+                    break;
+                }
+
+            case PrintStatement { Expression: LiteralExpression { Value: string strVal } }:
+                {
+                    // РЕАЛЬНА ПРОГАЛИНА, знайдена живим тестом: НАВІТЬ
+                    // "print("hello")" не компілювався - жодної підтримки
+                    // рядків не було взагалі, хоча print() з числом уже
+                    // працював. Прямий рядковий ЛІТЕРАЛ - НАЙПРОСТІШИЙ
+                    // випадок (адреса й довжина відомі ще на етапі
+                    // компіляції) - рядкові ЗМІННІ (var s = "..."; print(s))
+                    // потребують повноцінного представлення значень
+                    // (Фаза N3) і навмисно ще НЕ тут.
+                    string label = EmitStringLiteral(strVal);
+                    byte[] utf8 = Encoding.UTF8.GetBytes(strVal);
+                    _asm.AppendLine("    mov $4, %eax");      // syscall write
+                    _asm.AppendLine("    mov $1, %ebx");      // fd = stdout
+                    _asm.AppendLine($"    mov ${label}, %ecx");
+                    _asm.AppendLine($"    mov ${utf8.Length}, %edx");
+                    _asm.AppendLine("    int $0x80");
+                    // print завжди додає перенесення рядка (той самий
+                    // контракт, що print_int - і що Console.WriteLine у VM).
+                    _asm.AppendLine("    mov $4, %eax");
+                    _asm.AppendLine("    mov $1, %ebx");
+                    _asm.AppendLine("    mov $print_newline, %ecx");
+                    _asm.AppendLine("    mov $1, %edx");
+                    _asm.AppendLine("    int $0x80");
                     break;
                 }
 
@@ -486,5 +527,21 @@ public class NativeCodegen
     {
         _asm.AppendLine(".section .bss");
         _asm.AppendLine(".lcomm print_buf, 12"); // макс. 32-бітне signed int - до 11 цифр+знак, +1 \n
+    }
+
+    // Записує UTF-8-байти рядка в .rodata як `.byte` (НЕ `.ascii "..."` -
+    // уникаємо будь-яких проблем з екрануванням лапок/спецсимволів
+    // ВСЕРЕДИНІ .s-файлу, і коректно обробляємо кирилицю - UTF-8 напряму
+    // з C#-рядка, а не текстовий escape). Повертає МІТКУ для звернення.
+    private string EmitStringLiteral(string value)
+    {
+        string label = $".Lstr{_stringLabelCounter++}";
+        byte[] utf8 = Encoding.UTF8.GetBytes(value);
+        _rodata.AppendLine($"{label}:");
+        if (utf8.Length > 0)
+        {
+            _rodata.AppendLine("    .byte " + string.Join(", ", utf8.Select(b => b.ToString())));
+        }
+        return label;
     }
 }
