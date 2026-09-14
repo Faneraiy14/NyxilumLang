@@ -3,6 +3,15 @@ using NyxilumLang.AST;
 
 namespace NyxilumLang.Native;
 
+// Куди компілюємо - ОБИДВІ цілі використовують ТОЙ САМИЙ механізм
+// (int 0x80), різні лише НОМЕРИ й КОНВЕНЦІЯ системних викликів:
+//   Linux: exit=1(ebx=код), write=4(ebx=fd,ecx=buf,edx=len)
+//   NyxOS: exit=0, putc=1(ebx=символ), print_string=2(ebx=NUL-
+//          термінований UTF-8 вказівник), draw_pixel=3, get_ticks=4
+//          (див. src/usermode.c у репозиторії NyxOS - той самий
+//          контракт, що вже використовує programs/libnyx.h там).
+public enum NativeTarget { Linux, NyxOS }
+
 // NativeCodegen — Фаза N1-N2 (NATIVE_ROADMAP.md): НАЙМЕНШИЙ можливий доказ,
 // що NyxilumLang здатна компілюватись у СПРАВЖНІЙ x86 машинний код, а не
 // лише в байткод для VM (VirtualMachine.cs), якій самій потрібна повна
@@ -40,9 +49,11 @@ public class NativeCodegen
     // зустрічаємо (не окремий прохід по AST заздалегідь).
     private readonly StringBuilder _rodata = new();
     private int _stringLabelCounter;
+    private NativeTarget _target;
 
-    public string Compile(ProgramNode program)
+    public string Compile(ProgramNode program, NativeTarget target = NativeTarget.Linux)
     {
+        _target = target;
         var allFuncs = program.Statements.OfType<FunctionDeclaration>().ToList();
         var mainFunc = allFuncs.FirstOrDefault(f => f.Name == "main")
             ?? throw new Exception("native codegen (Фаза N1-N2): у файлі немає func main()");
@@ -124,7 +135,7 @@ public class NativeCodegen
         if (isMain)
         {
             _asm.AppendLine("    mov %eax, %ebx"); // код виходу = те, що лишив return (чи 0)
-            _asm.AppendLine("    mov $1, %eax");   // syscall exit
+            _asm.AppendLine($"    mov ${(_target == NativeTarget.Linux ? 1 : 0)}, %eax"); // syscall exit: Linux=1, NyxOS=0
             _asm.AppendLine("    int $0x80");
         }
         else
@@ -193,20 +204,38 @@ public class NativeCodegen
                     // компіляції) - рядкові ЗМІННІ (var s = "..."; print(s))
                     // потребують повноцінного представлення значень
                     // (Фаза N3) і навмисно ще НЕ тут.
-                    string label = EmitStringLiteral(strVal);
-                    byte[] utf8 = Encoding.UTF8.GetBytes(strVal);
-                    _asm.AppendLine("    mov $4, %eax");      // syscall write
-                    _asm.AppendLine("    mov $1, %ebx");      // fd = stdout
-                    _asm.AppendLine($"    mov ${label}, %ecx");
-                    _asm.AppendLine($"    mov ${utf8.Length}, %edx");
-                    _asm.AppendLine("    int $0x80");
-                    // print завжди додає перенесення рядка (той самий
-                    // контракт, що print_int - і що Console.WriteLine у VM).
-                    _asm.AppendLine("    mov $4, %eax");
-                    _asm.AppendLine("    mov $1, %ebx");
-                    _asm.AppendLine("    mov $print_newline, %ecx");
-                    _asm.AppendLine("    mov $1, %edx");
-                    _asm.AppendLine("    int $0x80");
+                    if (_target == NativeTarget.Linux)
+                    {
+                        string label = EmitStringLiteral(strVal);
+                        byte[] utf8 = Encoding.UTF8.GetBytes(strVal);
+                        _asm.AppendLine("    mov $4, %eax");      // syscall write
+                        _asm.AppendLine("    mov $1, %ebx");      // fd = stdout
+                        _asm.AppendLine($"    mov ${label}, %ecx");
+                        _asm.AppendLine($"    mov ${utf8.Length}, %edx");
+                        _asm.AppendLine("    int $0x80");
+                        // print завжди додає перенесення рядка (той самий
+                        // контракт, що print_int - і що Console.WriteLine у VM).
+                        _asm.AppendLine("    mov $4, %eax");
+                        _asm.AppendLine("    mov $1, %ebx");
+                        _asm.AppendLine("    mov $print_newline, %ecx");
+                        _asm.AppendLine("    mov $1, %edx");
+                        _asm.AppendLine("    int $0x80");
+                    }
+                    else
+                    {
+                        // NyxOS syscall #2 (print_string, usermode.c) сама
+                        // йде через vga_print() - НЕ потребує довжини,
+                        // чекає NUL-термінований UTF-8 вказівник, і сама
+                        // декодує кирилицю - ідентичний контракт до
+                        // programs/libnyx.h::nyx_print() у репозиторії
+                        // NyxOS. Перенесення рядка ВБУДОВУЄМО В ДАНІ
+                        // (перед NUL), а не окремим syscall - vga_print
+                        // сам коректно обробляє '\n' усередині рядка.
+                        string label = EmitStringLiteral(strVal + "\n", nullTerminate: true);
+                        _asm.AppendLine("    mov $2, %eax");      // syscall print_string
+                        _asm.AppendLine($"    mov ${label}, %ebx");
+                        _asm.AppendLine("    int $0x80");
+                    }
                     break;
                 }
 
@@ -471,7 +500,30 @@ public class NativeCodegen
     // write(1, buf, len) напряму, БЕЗ libc/printf.
     private void EmitPrintIntHelper()
     {
-        _asm.AppendLine("""
+        // print_buf - 13 байтів: до 11 цифр(+знак) + '\n' на позиції 11
+        // + БАЙТ 12 НІКОЛИ не чіпається - `.bss`/`.lcomm` гарантовано
+        // нуль-ініціалізована пам'ять (частина формату ELF) - цей
+        // "безкоштовний" 0 у кінці й слугує NUL-термінатором для NyxOS
+        // syscall #2 (print_string, читає C-рядок до NUL) - Linux-шлях
+        // його просто ігнорує (передає ДОВЖИНУ явно, не сканує NUL).
+        string tail = _target == NativeTarget.Linux
+            ? """
+                    mov $print_buf+12, %eax
+                    sub %edi, %eax           # довжина = (кінець буфера) - (початок реального тексту)
+                    mov %eax, %edx           # довжина - третій аргумент write()
+
+                    mov $4, %eax             # syscall write
+                    mov $1, %ebx             # fd = stdout
+                    mov %edi, %ecx           # buf
+                    int $0x80
+            """
+            : """
+                    mov $2, %eax             # syscall print_string (NyxOS, usermode.c)
+                    mov %edi, %ebx           # NUL-термінований буфер (bss - гарантовано 0 на позиції 12)
+                    int $0x80
+            """;
+
+        _asm.AppendLine($$"""
             print_int:
                 push %ebp
                 mov %esp, %ebp
@@ -505,14 +557,7 @@ public class NativeCodegen
                 dec %edi
             3:
                 inc %edi                # %edi зараз на 1 позицію РАНІШЕ першого записаного байта
-                mov $print_buf+12, %eax
-                sub %edi, %eax           # довжина = (кінець буфера) - (початок реального тексту)
-                mov %eax, %edx           # довжина - третій аргумент write()
-
-                mov $4, %eax             # syscall write
-                mov $1, %ebx             # fd = stdout
-                mov %edi, %ecx           # buf
-                int $0x80
+            {{tail}}
 
                 pop %esi
                 pop %edx
@@ -526,21 +571,26 @@ public class NativeCodegen
     private void EmitBssSection()
     {
         _asm.AppendLine(".section .bss");
-        _asm.AppendLine(".lcomm print_buf, 12"); // макс. 32-бітне signed int - до 11 цифр+знак, +1 \n
+        _asm.AppendLine(".lcomm print_buf, 13"); // макс. 32-бітне signed int - до 11 цифр+знак, +1 \n, +1 гарантований 0 (NUL для NyxOS-цілі)
     }
 
     // Записує UTF-8-байти рядка в .rodata як `.byte` (НЕ `.ascii "..."` -
     // уникаємо будь-яких проблем з екрануванням лапок/спецсимволів
     // ВСЕРЕДИНІ .s-файлу, і коректно обробляємо кирилицю - UTF-8 напряму
     // з C#-рядка, а не текстовий escape). Повертає МІТКУ для звернення.
-    private string EmitStringLiteral(string value)
+    private string EmitStringLiteral(string value, bool nullTerminate = false)
     {
         string label = $".Lstr{_stringLabelCounter++}";
         byte[] utf8 = Encoding.UTF8.GetBytes(value);
         _rodata.AppendLine($"{label}:");
-        if (utf8.Length > 0)
+        var byteList = utf8.Select(b => b.ToString()).ToList();
+        if (nullTerminate)
         {
-            _rodata.AppendLine("    .byte " + string.Join(", ", utf8.Select(b => b.ToString())));
+            byteList.Add("0"); // NyxOS syscall #2 (vga_print) читає C-рядок до NUL - без цього читало б за межі рядка (сміття)
+        }
+        if (byteList.Count > 0)
+        {
+            _rodata.AppendLine("    .byte " + string.Join(", ", byteList));
         }
         return label;
     }

@@ -68,11 +68,13 @@ public class Nx
         if (command == "compile-native" && args.Length > 1)
         {
             string? outPath = null;
-            for (int i = 2; i < args.Length - 1; i++)
+            var target = NyxilumLang.Native.NativeTarget.Linux;
+            for (int i = 2; i < args.Length; i++)
             {
-                if (args[i] == "-o") outPath = args[i + 1];
+                if (args[i] == "-o" && i + 1 < args.Length) outPath = args[++i];
+                else if (args[i] == "--target" && i + 1 < args.Length) target = args[++i] == "nyxos" ? NyxilumLang.Native.NativeTarget.NyxOS : NyxilumLang.Native.NativeTarget.Linux;
             }
-            RunCompileNative(args[1], outPath);
+            RunCompileNative(args[1], outPath, target);
             return;
         }
 
@@ -246,12 +248,20 @@ public class Nx
         }
     }
 
-    // "nx compile-native <file.nx> [-o output]" — Фаза N1 (NATIVE_ROADMAP.md):
-    // компілює МІНІМАЛЬНУ підмножину мови (func main, var з цілими
-    // числами/арифметикою, print з одним аргументом) у СПРАВЖНІЙ x86
-    // (32-біт) ELF-бінарник через NativeCodegen.cs + `as`/`ld` (той самий
-    // інструментарій, що збирає NyxOS) - НЕ через VirtualMachine.cs.
-    private static void RunCompileNative(string path, string? outPath)
+    // "nx compile-native <file.nx> [-o output] [--target linux|nyxos]" —
+    // Фаза N1-N2 (NATIVE_ROADMAP.md): компілює підмножину мови у СПРАВЖНІЙ
+    // x86 (32-біт) машинний код через NativeCodegen.cs + `as`/`ld` (той
+    // самий інструментарій, що збирає NyxOS) - НЕ через VirtualMachine.cs.
+    //
+    // --target linux (типово) - звичайний ELF, запускається напряму з
+    // Linux-термінала (`./output`), сирі Linux-syscall'и (int 0x80), БЕЗ
+    // libc.
+    // --target nyxos - ПЛАСКИЙ бінарник (objcopy -O binary, БЕЗ ELF-
+    // заголовків узагалі) за адресою 0xC00000 (PROC_CODE_BASE в
+    // src/process.c репозиторію NyxOS) - готовий для NyxOS-команди
+    // "install"/"run" (той самий формат, що programs/hello.c там),
+    // NyxOS-syscall'и замість Linux.
+    private static void RunCompileNative(string path, string? outPath, NyxilumLang.Native.NativeTarget target)
     {
         if (!File.Exists(path))
         {
@@ -272,13 +282,43 @@ public class Nx
             var program = parser.ParseProgram();
 
             var codegen = new NyxilumLang.Native.NativeCodegen();
-            string asmText = codegen.Compile(program);
+            string asmText = codegen.Compile(program, target);
             File.WriteAllText(asmPath, asmText);
             Console.WriteLine($"Асемблер записано: {asmPath}");
 
             RunShell("as", $"--32 {asmPath} -o {objPath}");
-            RunShell("ld", $"-m elf_i386 {objPath} -o {outPath}");
-            Console.WriteLine($"✅ Скомпільовано в СПРАВЖНІЙ ELF-бінарник: {outPath}");
+
+            if (target == NyxilumLang.Native.NativeTarget.Linux)
+            {
+                RunShell("ld", $"-m elf_i386 {objPath} -o {outPath}");
+                Console.WriteLine($"✅ Скомпільовано в СПРАВЖНІЙ ELF-бінарник: {outPath}");
+            }
+            else
+            {
+                // Той самий підхід, що programs/user.ld у репозиторії
+                // NyxOS - СЕКЦІЇ БЕЗ вирівнювання на межу сторінки
+                // (стандартне `-Ttext=...` роздуло б файл нулями між
+                // .text/.rodata/.bss - РЕАЛЬНИЙ БАГ, уже спійманий раніше
+                // ЦІЄЮ сесією саме на programs/hello.c в NyxOS - hello.bin
+                // тоді вийшов 4360 байтів замість 472 з тієї самої причини).
+                string ldScriptPath = outPath + ".nyxos.ld";
+                File.WriteAllText(ldScriptPath, """
+                    ENTRY(_start)
+                    SECTIONS
+                    {
+                        . = 0xC00000;
+                        .text : { *(.text) }
+                        .rodata : { *(.rodata*) }
+                        .data : { *(.data) }
+                        .bss : { *(.bss) }
+                    }
+                    """);
+                string elfPath = outPath + ".elf";
+                RunShell("ld", $"-m elf_i386 -T {ldScriptPath} -o {elfPath} {objPath}");
+                RunShell("objcopy", $"-O binary {elfPath} {outPath}.bin");
+                Console.WriteLine($"✅ Скомпільовано в ПЛАСКИЙ бінарник для NyxOS: {outPath}.bin");
+                Console.WriteLine("   Встанови на NyxOS через пакетний менеджер (make-pkg.py у репозиторії NyxOS) чи install-hello-стиль вбудовування, потім \"run <файл>.bin\".");
+            }
         }
         catch (Exception ex)
         {
