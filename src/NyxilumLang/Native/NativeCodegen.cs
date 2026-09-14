@@ -12,18 +12,35 @@ namespace NyxilumLang.Native;
 //          контракт, що вже використовує programs/libnyx.h там).
 public enum NativeTarget { Linux, NyxOS }
 
-// NativeCodegen — Фаза N1-N2 (NATIVE_ROADMAP.md): НАЙМЕНШИЙ можливий доказ,
-// що NyxilumLang здатна компілюватись у СПРАВЖНІЙ x86 машинний код, а не
-// лише в байткод для VM (VirtualMachine.cs), якій самій потрібна повна
-// ОС/.NET під собою.
+// Статичний тип виразу, визначений НА ЕТАПІ КОМПІЛЯЦІЇ (без цього
+// компілятор не знав би, у якому регістрі шукати результат виразу -
+// %xmm0 для чисел чи %eax для bool - і які інструкції генерувати).
+// Рядки НЕ значення тут - підтримано лише прямий літерал print("...").
+enum ValType { Number, Bool }
+
+// NativeCodegen — Фази N1-N3 (NATIVE_ROADMAP.md): справжня x86-компіляція
+// NyxilumLang, БЕЗ жодної VM під час виконання (на відміну від
+// VirtualMachine.cs, якій самій потрібна повна ОС/.NET під собою).
 //
 // Підмножина мови зараз: КІЛЬКА функцій (не лише main) з параметрами й
-// return, var з цілими числами/арифметикою (+ - * / %), if/else, while,
-// break/continue, присвоєння (x = ...), порівняння (== != < <= > >=),
-// логічні (&& || !), print() з ОДНИМ цілим аргументом. Усі числові
-// літерали в AST - `double` (Parser.cs: `double.Parse`), тут свідомо
-// ЗРІЗАЄМО до 32-бітного цілого - плаваюча кома, рядки, масиви,
-// структури, замикання - НАСТУПНІ фази, не ця.
+// return, var із ЧИСЛАМИ (тепер СПРАВЖНІ double, а не обрізані до int -
+// Фаза N3) і bool, арифметика (+ - * / %), if/else, while, break/continue,
+// присвоєння (x = ...), порівняння (== != < <= > >=), логічні (&& || !),
+// print() з числом/bool чи прямим рядковим ЛІТЕРАЛОМ. Рядки-як-змінні,
+// масиви, структури, замикання - НАСТУПНІ фази, не ця.
+//
+// Значення: ОБИДВА типи, що зараз підтримуються, мають ОКРЕМІ регістрові
+// конвенції (визначаються статично через InferExprType, а не через єдине
+// динамічне представлення на кшталт tagged union - той більший крок
+// свідомо відкладено, дивись NATIVE_ROADMAP.md item 8):
+//   - Number (усі числові літерали й арифметика) -> %xmm0 (SSE2,
+//     8-байтовий double - те саме двійкове представлення, що вже
+//     використовує сама мова: усі числові літерали в AST - double,
+//     Parser.cs::double.Parse).
+//   - Bool -> %eax (0/1), як і раніше у Фазах N1-N2.
+// Локальні змінні/параметри - УНІФІКОВАНО 8-байтові слоти на стеку
+// (навіть під bool - простіше й безпечніше єдиного правила зсувів, ніж
+// різна ширина слота залежно від типу).
 //
 // Виводить ТЕКСТ GAS-асемблера (AT&T-синтаксис, 32-біт) - той самий
 // інструментарій (`as`/`ld`), що вже збирає ЦІЛЕ ядро NyxOS - жодного
@@ -33,9 +50,10 @@ public class NativeCodegen
     private readonly StringBuilder _asm = new();
 
     // Кожна функція компілюється ОКРЕМО зі СВОЄЮ картою змінних (локальні
-    // змінні однієї функції НЕ мають бачити слоти іншої) - ці три поля
+    // змінні однієї функції НЕ мають бачити слоти іншої) - ці поля
     // скидаються на початку CompileFunction() для КОЖНОЇ функції.
     private Dictionary<string, int> _varOffsets = new();
+    private Dictionary<string, ValType> _varTypes = new();
     private int _nextLocalOffset;
     private string _epilogueLabel = "";
     private bool _isMain;
@@ -44,9 +62,10 @@ public class NativeCodegen
     private readonly Stack<(string Start, string End)> _loopLabels = new();
     private HashSet<string> _knownFunctions = new();
 
-    // Рядкові літерали - у .rodata, кожен під СВОЄЮ міткою (.Lstr0,
-    // .Lstr1, ...) - записуємо в НАКОПИЧЕНУ секцію одразу, коли
-    // зустрічаємо (не окремий прохід по AST заздалегідь).
+    // Рядкові й дробові літерали - у .rodata, кожен під СВОЄЮ міткою
+    // (.Lstr0/.Ldbl0, ...) - записуємо в НАКОПИЧЕНУ секцію одразу, коли
+    // зустрічаємо (не окремий прохід по AST заздалегідь). Спільний
+    // лічильник для обох - безпечно, бо повна мітка включає префікс.
     private readonly StringBuilder _rodata = new();
     private int _stringLabelCounter;
     private NativeTarget _target;
@@ -56,10 +75,10 @@ public class NativeCodegen
         _target = target;
         var allFuncs = program.Statements.OfType<FunctionDeclaration>().ToList();
         var mainFunc = allFuncs.FirstOrDefault(f => f.Name == "main")
-            ?? throw new Exception("native codegen (Фаза N1-N2): у файлі немає func main()");
+            ?? throw new Exception("native codegen: у файлі немає func main()");
         _knownFunctions = allFuncs.Select(f => f.Name).ToHashSet();
 
-        _asm.AppendLine("# Згенеровано NativeCodegen.cs (NyxilumLang, Фаза N1-N2) - НЕ редагувати вручну.");
+        _asm.AppendLine("# Згенеровано NativeCodegen.cs (NyxilumLang, Фаза N1-N3) - НЕ редагувати вручну.");
         _asm.AppendLine(".section .text");
         _asm.AppendLine(".global _start");
 
@@ -74,7 +93,8 @@ public class NativeCodegen
             CompileFunction(func, isMain: false);
         }
 
-        EmitPrintIntHelper();
+        EmitPrintCharHelper();
+        EmitPrintDoubleHelper();
 
         if (_rodata.Length > 0)
         {
@@ -91,25 +111,22 @@ public class NativeCodegen
     private void CompileFunction(FunctionDeclaration func, bool isMain)
     {
         _varOffsets = new Dictionary<string, int>();
+        _varTypes = new Dictionary<string, ValType>();
         _nextLocalOffset = 0;
         _isMain = isMain;
 
         // Параметри - ПОЗИТИВНІ зсуви від %ebp (за return-адресою й
         // збереженим %ebp викликаючої функції - той самий стандартний
-        // cdecl-макет, яким користується GCC/будь-який x86-компілятор).
+        // cdecl-макет, яким користується GCC/будь-який x86-компілятор),
+        // тепер із КРОКОМ 8 байтів (double) замість 4 - Bool-параметри
+        // поки НЕ підтримуються (див. CallExpression нижче).
         for (int i = 0; i < func.Parameters.Count; i++)
         {
-            _varOffsets[func.Parameters[i].Name] = 8 + i * 4;
+            _varOffsets[func.Parameters[i].Name] = 8 + i * 8;
+            _varTypes[func.Parameters[i].Name] = ValType.Number;
         }
 
-        var allVarNames = new List<string>();
-        CollectVarNames(func.Body, allVarNames);
-        foreach (var name in allVarNames.Distinct())
-        {
-            if (_varOffsets.ContainsKey(name)) continue; // ім'я параметра - НЕ заводимо ще й локальний слот
-            _nextLocalOffset -= 4;
-            _varOffsets[name] = _nextLocalOffset;
-        }
+        CollectVarsAndTypes(func.Body);
 
         _epilogueLabel = isMain ? ".Lmain_exit" : $".L{func.Name}_epilogue";
 
@@ -128,9 +145,15 @@ public class NativeCodegen
         }
 
         // Якщо тіло "провалилось" за кінець без явного return - main
-        // виходить з кодом 0, звичайна функція повертає 0 (той самий
-        // дефолт, що C - "falling off the end" неявно означає return 0).
+        // виходить з кодом 0, звичайна функція повертає 0.0 (той самий
+        // дефолт, що C - "falling off the end" неявно означає return 0);
+        // pxor лише для НЕ-main, бо main використовує %eax напряму як
+        // код виходу (дивись нижче), а не конвертує з %xmm0.
         _asm.AppendLine("    mov $0, %eax");
+        if (!isMain)
+        {
+            _asm.AppendLine("    pxor %xmm0, %xmm0");
+        }
         _asm.AppendLine($"{_epilogueLabel}:");
         if (isMain)
         {
@@ -146,28 +169,66 @@ public class NativeCodegen
         }
     }
 
-    private static void CollectVarNames(BlockStatement block, List<string> names)
+    // Виділяє слот КОЖНІЙ локальній змінній (8 байтів - Фаза N3) і
+    // ОДРАЗУ визначає її статичний тип із власного ініціалізатора -
+    // працює коректно, бо мова вимагає оголошення ЗМІННОЇ ДО
+    // використання, а обхід тут іде в тому ж порядку, що й виконання.
+    private void CollectVarsAndTypes(BlockStatement block)
     {
         foreach (var stmt in block.Statements)
         {
             switch (stmt)
             {
                 case VariableDeclaration v:
-                    names.Add(v.Name);
-                    break;
+                    {
+                        var type = v.Initializer != null ? InferExprType(v.Initializer) : ValType.Number;
+                        _varTypes[v.Name] = type;
+                        if (!_varOffsets.ContainsKey(v.Name)) // ім'я параметра - НЕ заводимо ще й локальний слот
+                        {
+                            _nextLocalOffset -= 8;
+                            _varOffsets[v.Name] = _nextLocalOffset;
+                        }
+                        break;
+                    }
                 case IfStatement ifs:
-                    CollectVarNames(ifs.ThenBlock, names);
-                    if (ifs.ElseBlock != null) CollectVarNames(ifs.ElseBlock, names);
+                    CollectVarsAndTypes(ifs.ThenBlock);
+                    if (ifs.ElseBlock != null) CollectVarsAndTypes(ifs.ElseBlock);
                     break;
                 case WhileStatement ws:
-                    CollectVarNames(ws.Body, names);
+                    CollectVarsAndTypes(ws.Body);
                     break;
                 case BlockStatement b:
-                    CollectVarNames(b, names);
+                    CollectVarsAndTypes(b);
                     break;
             }
         }
     }
+
+    // Статичний тип виразу - НАЙБІЛЬШЕ архітектурне рішення Фази N3
+    // (замість повноцінного динамічного представлення значень/tagged
+    // union, свідомо відкладеного - дивись NATIVE_ROADMAP.md item 8):
+    // визначаємо ЩЕ НА ЕТАПІ КОМПІЛЯЦІЇ, у якому регістрі шукати
+    // результат кожного виразу.
+    private ValType InferExprType(ExpressionNode expr) => expr switch
+    {
+        LiteralExpression { Value: double } => ValType.Number,
+        LiteralExpression { Value: bool } => ValType.Bool,
+        LiteralExpression { Value: string } =>
+            throw new Exception("native codegen (Фаза N3): рядок як значення виразу (не прямий літерал у print(\"...\")) ще не підтримується - потрібне повноцінне представлення значень"),
+        VariableExpression v => _varTypes.TryGetValue(v.Name, out var t)
+            ? t
+            : throw new Exception($"native codegen: змінна '{v.Name}' використана до оголошення"),
+        UnaryExpression { Operator: "-" } u => InferExprType(u.Operand),
+        UnaryExpression { Operator: "!" } => ValType.Bool,
+        // Спрощення Фази N3: УСІ функції вважаються Number-, bool-
+        // функції поки не підтримуються (дивись ReturnStatement нижче).
+        CallExpression => ValType.Number,
+        BinaryExpression { Operator: "=" } assign => InferExprType(assign.Right),
+        BinaryExpression { Operator: "&&" or "||" } => ValType.Bool,
+        BinaryExpression { Operator: "==" or "!=" or "<" or "<=" or ">" or ">=" } => ValType.Bool,
+        BinaryExpression => ValType.Number, // + - * %
+        _ => throw new Exception($"native codegen: неможливо визначити тип виразу - {expr.GetType().Name}")
+    };
 
     private void CompileBlock(BlockStatement block)
     {
@@ -183,13 +244,16 @@ public class NativeCodegen
         {
             case VariableDeclaration varDecl:
                 {
-                    // Слот УЖЕ виділено в CompileFunction() (CollectVarNames) -
+                    // Слот УЖЕ виділено в CompileFunction() (CollectVarsAndTypes) -
                     // тут лише записуємо ПОЧАТКОВЕ значення, якщо воно є.
                     if (varDecl.Initializer != null)
                     {
                         int offset = _varOffsets[varDecl.Name];
-                        CompileExpression(varDecl.Initializer); // результат -> %eax
-                        _asm.AppendLine($"    mov %eax, {offset}(%ebp)");
+                        CompileExpression(varDecl.Initializer);
+                        if (_varTypes[varDecl.Name] == ValType.Number)
+                            _asm.AppendLine($"    movsd %xmm0, {offset}(%ebp)");
+                        else
+                            _asm.AppendLine($"    mov %eax, {offset}(%ebp)");
                     }
                     break;
                 }
@@ -203,7 +267,7 @@ public class NativeCodegen
                     // випадок (адреса й довжина відомі ще на етапі
                     // компіляції) - рядкові ЗМІННІ (var s = "..."; print(s))
                     // потребують повноцінного представлення значень
-                    // (Фаза N3) і навмисно ще НЕ тут.
+                    // (Фаза N4+) і навмисно ще НЕ тут.
                     if (_target == NativeTarget.Linux)
                     {
                         string label = EmitStringLiteral(strVal);
@@ -214,7 +278,7 @@ public class NativeCodegen
                         _asm.AppendLine($"    mov ${utf8.Length}, %edx");
                         _asm.AppendLine("    int $0x80");
                         // print завжди додає перенесення рядка (той самий
-                        // контракт, що print_int - і що Console.WriteLine у VM).
+                        // контракт, що print_double - і що Console.WriteLine у VM).
                         _asm.AppendLine("    mov $4, %eax");
                         _asm.AppendLine("    mov $1, %ebx");
                         _asm.AppendLine("    mov $print_newline, %ecx");
@@ -244,8 +308,30 @@ public class NativeCodegen
                     // РЕАЛЬНА ПОМИЛКА Фази N1: `print(x)` у NyxilumLang НЕ
                     // виклик функції (CallExpression) - Parser.cs розбирає
                     // його як ОКРЕМИЙ вузол AST, PrintStatement.
-                    CompileExpression(printStmt.Expression); // -> %eax
-                    _asm.AppendLine("    call print_int");
+                    var t = InferExprType(printStmt.Expression);
+                    CompileExpression(printStmt.Expression);
+                    if (t == ValType.Number)
+                    {
+                        _asm.AppendLine("    call print_double");
+                    }
+                    else
+                    {
+                        // Bool - друкуємо ТЕКСТОМ "True"/"False" - РЕАЛЬНА
+                        // невідповідність, знайдена живим тестом: VM
+                        // друкує bool через C#-типове object.ToString()
+                        // (boxed bool), яке дає "True"/"False" з великої
+                        // літери, НЕ "true"/"false" - перша версія цього
+                        // коду мовчки не збігалась із VM, поки не
+                        // звірено побайтово.
+                        int id = _labelCounter++;
+                        _asm.AppendLine("    cmp $0, %eax");
+                        _asm.AppendLine($"    je .Lpfalse{id}");
+                        EmitPrintStringLiteral("True\n");
+                        _asm.AppendLine($"    jmp .Lpdone{id}");
+                        _asm.AppendLine($".Lpfalse{id}:");
+                        EmitPrintStringLiteral("False\n");
+                        _asm.AppendLine($".Lpdone{id}:");
+                    }
                     break;
                 }
 
@@ -253,11 +339,25 @@ public class NativeCodegen
                 {
                     if (returnStmt.Value != null)
                     {
-                        CompileExpression(returnStmt.Value);
+                        var t = InferExprType(returnStmt.Value);
+                        CompileExpression(returnStmt.Value); // -> %xmm0 (Number) чи %eax (Bool)
+                        if (_isMain)
+                        {
+                            // Код виходу ЗАВЖДИ ціле число (syscall exit
+                            // чекає його в %ebx) - Number-результат
+                            // конвертуємо, Bool - уже готовий int.
+                            if (t == ValType.Number)
+                                _asm.AppendLine("    cvttsd2si %xmm0, %eax");
+                        }
+                        else if (t != ValType.Number)
+                        {
+                            throw new Exception("native codegen (Фаза N3): звичайні функції можуть повертати лише число - bool-результат поки підтримано тільки для return у main() (як код виходу 0/1)");
+                        }
                     }
                     else
                     {
                         _asm.AppendLine("    mov $0, %eax");
+                        if (!_isMain) _asm.AppendLine("    pxor %xmm0, %xmm0");
                     }
                     _asm.AppendLine($"    jmp {_epilogueLabel}");
                     break;
@@ -271,6 +371,13 @@ public class NativeCodegen
 
             case IfStatement ifStmt:
                 {
+                    // РЕАЛЬНА небезпека Фази N3: якщо умова НЕ Bool, вона
+                    // прийде у %xmm0 (не %eax) - `cmp $0,%eax` нижче
+                    // порівняв би зі СТАРИМ сміттям у %eax і "працював"
+                    // би НЕПРАВИЛЬНО без жодної помилки - тому явна
+                    // перевірка типу тут, а не тихе хибне порівняння.
+                    if (InferExprType(ifStmt.Condition) != ValType.Bool)
+                        throw new Exception("native codegen: умова if має бути булевою (порівняння/&&/||/!) - число напряму як умова ще не підтримується");
                     int id = _labelCounter++;
                     CompileExpression(ifStmt.Condition);
                     _asm.AppendLine("    cmp $0, %eax");
@@ -294,6 +401,8 @@ public class NativeCodegen
 
             case WhileStatement whileStmt:
                 {
+                    if (InferExprType(whileStmt.Condition) != ValType.Bool)
+                        throw new Exception("native codegen: умова while має бути булевою (порівняння/&&/||/!) - число напряму як умова ще не підтримується");
                     int id = _labelCounter++;
                     string start = $".Lloopstart{id}";
                     string end = $".Lloopend{id}";
@@ -330,52 +439,68 @@ public class NativeCodegen
                 break;
 
             default:
-                throw new Exception($"native codegen (Фаза N1-N2): непідтримуваний оператор - {stmt.GetType().Name} (підмножина мови ще МІНІМАЛЬНА, дивись NATIVE_ROADMAP.md)");
+                throw new Exception($"native codegen: непідтримуваний оператор - {stmt.GetType().Name} (підмножина мови ще МІНІМАЛЬНА, дивись NATIVE_ROADMAP.md)");
         }
     }
 
-    // Результат УСІХ виразів - у %eax, за домовленістю (той самий підхід,
-    // що будь-який реальний компілятор - "де лежить результат" МАЄ бути
-    // однозначним правилом, а не вгадуватись з контексту).
+    // Результат виразу - у %xmm0 (Number) чи %eax (Bool), залежно від
+    // статичного типу (InferExprType) - ДВІ окремі конвенції замість
+    // єдиної "все в %eax" з Фаз N1-N2, бо double тепер СПРАВЖНІЙ, а не
+    // обрізаний до 32-бітного цілого.
     private void CompileExpression(ExpressionNode expr)
     {
         switch (expr)
         {
             case LiteralExpression { Value: double d }:
-                // РЕАЛЬНА ПОМИЛКА, знайдена живим тестом: попередня версія
-                // мовчки ОБРІЗАЛА дробову частину ((int)3.5 == 3) замість
-                // чесної відмови - НЕПРАВИЛЬНИЙ результат без жодного
-                // попередження гірший за явну помилку компіляції.
-                // Плаваюча кома - окрема, значно більша Фаза N3
-                // (NATIVE_ROADMAP.md - потрібні SSE2-інструкції/XMM-
-                // регістри, окреме представлення значень) - навмисно ще
-                // не тут.
-                if (d != Math.Truncate(d))
                 {
-                    throw new Exception($"native codegen (Фаза N1-N2): дробові числа ({d}) ще не підтримуються - лише цілі (Фаза N3, дивись NATIVE_ROADMAP.md)");
+                    // РЕАЛЬНА ПОМИЛКА Фази N1-N2, ВИПРАВЛЕНА у Фазі N3:
+                    // попередня версія мовчки ОБРІЗАЛА дробову частину
+                    // ((int)3.5 == 3) - тепер double зберігається ТОЧНО,
+                    // через SSE2/%xmm0 (те саме 8-байтове представлення,
+                    // що вже використовує сама мова - Parser.cs::double.Parse).
+                    string label = EmitDoubleLiteral(d);
+                    _asm.AppendLine($"    movsd {label}, %xmm0");
+                    break;
                 }
-                _asm.AppendLine($"    mov ${(int) d}, %eax");
-                break;
 
-            // РЕАЛЬНА ПОМИЛКА, знайдена живим тестом: `true`/`false` -
-            // ОКРЕМИЙ тип значення в AST (bool), НЕ double, як усі
-            // числа - "while true {...}" падав на невловленому case.
+            // `true`/`false` - ОКРЕМИЙ тип значення в AST (bool), НЕ double,
+            // як усі числа - лишається в %eax (Bool-конвенція).
             case LiteralExpression { Value: bool boolVal }:
                 _asm.AppendLine($"    mov ${(boolVal ? 1 : 0)}, %eax");
                 break;
 
             case VariableExpression varExpr:
-                if (!_varOffsets.TryGetValue(varExpr.Name, out int offset))
                 {
-                    throw new Exception($"native codegen (Фаза N1-N2): змінна '{varExpr.Name}' використана до оголошення (масиви/структури - наступна фаза)");
+                    if (!_varOffsets.TryGetValue(varExpr.Name, out int offset))
+                    {
+                        throw new Exception($"native codegen: змінна '{varExpr.Name}' використана до оголошення (масиви/структури - наступна фаза)");
+                    }
+                    if (_varTypes[varExpr.Name] == ValType.Number)
+                        _asm.AppendLine($"    movsd {offset}(%ebp), %xmm0");
+                    else
+                        _asm.AppendLine($"    mov {offset}(%ebp), %eax");
+                    break;
                 }
-                _asm.AppendLine($"    mov {offset}(%ebp), %eax");
-                break;
 
             case UnaryExpression { Operator: "-" } unaryNeg:
-                CompileExpression(unaryNeg.Operand);
-                _asm.AppendLine("    neg %eax");
-                break;
+                {
+                    var t = InferExprType(unaryNeg.Operand);
+                    CompileExpression(unaryNeg.Operand);
+                    if (t == ValType.Number)
+                    {
+                        // -x через SSE2: немає прямої "negate" інструкції
+                        // для XMM без sign-mask константи - простіше й
+                        // так само коректно порахувати 0.0 - x.
+                        _asm.AppendLine("    movsd %xmm0, %xmm1");
+                        _asm.AppendLine("    pxor %xmm0, %xmm0");
+                        _asm.AppendLine("    subsd %xmm1, %xmm0");
+                    }
+                    else
+                    {
+                        _asm.AppendLine("    neg %eax");
+                    }
+                    break;
+                }
 
             case UnaryExpression { Operator: "!" } unaryNot:
                 CompileExpression(unaryNot.Operand);
@@ -388,23 +513,29 @@ public class NativeCodegen
                 {
                     if (!_knownFunctions.Contains(call.FunctionName))
                     {
-                        throw new Exception($"native codegen (Фаза N1-N2): невідома функція '{call.FunctionName}' (лише вбудований print() і функції з ЦЬОГО Ж файлу - стандартна бібліотека/імпорти - значно пізніша фаза)");
+                        throw new Exception($"native codegen: невідома функція '{call.FunctionName}' (лише вбудований print() і функції з ЦЬОГО Ж файлу - стандартна бібліотека/імпорти - значно пізніша фаза)");
                     }
                     // cdecl: аргументи - СПРАВА НАЛІВО (останній - першим),
                     // тому після всіх push'ів ПЕРШИЙ аргумент лежить
                     // НАЙБЛИЖЧЕ до вершини стека - callee побачить його
                     // РІВНО за 8(%ebp) (одразу за return-адресою й
-                    // збереженим %ebp) - той самий макет, що GCC генерує.
+                    // збереженим %ebp) - той самий макет, що GCC генерує,
+                    // тепер із КРОКОМ 8 байтів (double) замість 4.
                     for (int i = call.Arguments.Count - 1; i >= 0; i--)
                     {
-                        CompileExpression(call.Arguments[i]);
-                        _asm.AppendLine("    push %eax");
+                        if (InferExprType(call.Arguments[i]) != ValType.Number)
+                            throw new Exception("native codegen (Фаза N3): аргументи функцій підтримуються лише числові - bool-параметри ще не підтримуються");
+                        CompileExpression(call.Arguments[i]); // -> %xmm0
+                        _asm.AppendLine("    sub $8, %esp");
+                        _asm.AppendLine("    movsd %xmm0, (%esp)");
                     }
                     _asm.AppendLine($"    call {call.FunctionName}");
                     if (call.Arguments.Count > 0)
                     {
-                        _asm.AppendLine($"    add ${call.Arguments.Count * 4}, %esp"); // ВИКЛИКАЧ прибирає аргументи (cdecl, не stdcall)
+                        _asm.AppendLine($"    add ${call.Arguments.Count * 8}, %esp"); // ВИКЛИКАЧ прибирає аргументи (cdecl, не stdcall)
                     }
+                    // Результат - уже в %xmm0 (усі функції Number-, за
+                    // конвенцією ReturnStatement/InferExprType вище).
                     break;
                 }
 
@@ -412,14 +543,17 @@ public class NativeCodegen
                 {
                     if (assign.Left is not VariableExpression target)
                     {
-                        throw new Exception("native codegen (Фаза N1-N2): присвоєння підтримується лише у звичайну змінну (масиви/структури - наступна фаза)");
+                        throw new Exception("native codegen: присвоєння підтримується лише у звичайну змінну (масиви/структури - наступна фаза)");
                     }
                     if (!_varOffsets.TryGetValue(target.Name, out int targetOffset))
                     {
                         throw new Exception($"native codegen: змінна '{target.Name}' не оголошена");
                     }
-                    CompileExpression(assign.Right); // -> %eax
-                    _asm.AppendLine($"    mov %eax, {targetOffset}(%ebp)");
+                    CompileExpression(assign.Right);
+                    if (_varTypes[target.Name] == ValType.Number)
+                        _asm.AppendLine($"    movsd %xmm0, {targetOffset}(%ebp)");
+                    else
+                        _asm.AppendLine($"    mov %eax, {targetOffset}(%ebp)");
                     break;
                 }
 
@@ -458,107 +592,228 @@ public class NativeCodegen
                 }
 
             case BinaryExpression bin:
-                CompileExpression(bin.Left);
-                _asm.AppendLine("    push %eax");
-                CompileExpression(bin.Right);
-                _asm.AppendLine("    mov %eax, %ebx"); // праве значення -> ebx
-                _asm.AppendLine("    pop %eax");        // ліве значення назад -> eax
-                switch (bin.Operator)
-                {
-                    case "+": _asm.AppendLine("    add %ebx, %eax"); break;
-                    case "-": _asm.AppendLine("    sub %ebx, %eax"); break;
-                    case "*": _asm.AppendLine("    imul %ebx, %eax"); break;
-                    case "/":
-                        _asm.AppendLine("    cdq"); // знакове розширення eax->edx:eax, ОБОВ'ЯЗКОВО перед idiv
-                        _asm.AppendLine("    idiv %ebx");
-                        break;
-                    case "%":
-                        _asm.AppendLine("    cdq");
-                        _asm.AppendLine("    idiv %ebx");
-                        _asm.AppendLine("    mov %edx, %eax"); // остача (edx) - результат %, а не частка
-                        break;
-                    case "==": _asm.AppendLine("    cmp %ebx, %eax"); _asm.AppendLine("    sete %al"); _asm.AppendLine("    movzbl %al, %eax"); break;
-                    case "!=": _asm.AppendLine("    cmp %ebx, %eax"); _asm.AppendLine("    setne %al"); _asm.AppendLine("    movzbl %al, %eax"); break;
-                    case "<": _asm.AppendLine("    cmp %ebx, %eax"); _asm.AppendLine("    setl %al"); _asm.AppendLine("    movzbl %al, %eax"); break;
-                    case "<=": _asm.AppendLine("    cmp %ebx, %eax"); _asm.AppendLine("    setle %al"); _asm.AppendLine("    movzbl %al, %eax"); break;
-                    case ">": _asm.AppendLine("    cmp %ebx, %eax"); _asm.AppendLine("    setg %al"); _asm.AppendLine("    movzbl %al, %eax"); break;
-                    case ">=": _asm.AppendLine("    cmp %ebx, %eax"); _asm.AppendLine("    setge %al"); _asm.AppendLine("    movzbl %al, %eax"); break;
-                    default:
-                        throw new Exception($"native codegen (Фаза N1-N2): оператор '{bin.Operator}' ще не підтримується");
-                }
+                if (InferExprType(bin.Left) == ValType.Number)
+                    CompileNumberBinary(bin);
+                else
+                    CompileBoolBinary(bin);
                 break;
 
             default:
-                throw new Exception($"native codegen (Фаза N1-N2): непідтримуваний вираз - {expr.GetType().Name}");
+                throw new Exception($"native codegen: непідтримуваний вираз - {expr.GetType().Name}");
         }
     }
 
-    // print_int(value у %eax) - НАПИСАНО ВРУЧНУ асемблером (не C-функція,
-    // яку компілятор десь бере готовою) - конвертує ЗНАКОВЕ 32-бітне ціле
-    // в десяткові ASCII-цифри (в БУФЕРІ, задом наперед, бо цифри виходять
-    // у зворотньому порядку - молодша спершу), потім пише через syscall
-    // write(1, buf, len) напряму, БЕЗ libc/printf.
-    private void EmitPrintIntHelper()
+    // Арифметика/порівняння над Number (Фаза N3, SSE2/%xmm0-%xmm1) -
+    // ліве значення тимчасово ЗБЕРІГАЄМО НА СТЕКУ (8 байтів), поки
+    // рахуємо праве - той самий підхід, що push/pop %eax у
+    // CompileBoolBinary нижче, лише подвоєний під double.
+    private void CompileNumberBinary(BinaryExpression bin)
     {
-        // print_buf - 13 байтів: до 11 цифр(+знак) + '\n' на позиції 11
-        // + БАЙТ 12 НІКОЛИ не чіпається - `.bss`/`.lcomm` гарантовано
-        // нуль-ініціалізована пам'ять (частина формату ELF) - цей
-        // "безкоштовний" 0 у кінці й слугує NUL-термінатором для NyxOS
-        // syscall #2 (print_string, читає C-рядок до NUL) - Linux-шлях
-        // його просто ігнорує (передає ДОВЖИНУ явно, не сканує NUL).
+        CompileExpression(bin.Left);           // -> %xmm0
+        _asm.AppendLine("    sub $8, %esp");
+        _asm.AppendLine("    movsd %xmm0, (%esp)");
+        CompileExpression(bin.Right);           // -> %xmm0 (праве)
+        _asm.AppendLine("    movsd %xmm0, %xmm1");
+        _asm.AppendLine("    movsd (%esp), %xmm0");
+        _asm.AppendLine("    add $8, %esp");
+        switch (bin.Operator)
+        {
+            case "+": _asm.AppendLine("    addsd %xmm1, %xmm0"); break;
+            case "-": _asm.AppendLine("    subsd %xmm1, %xmm0"); break;
+            case "*": _asm.AppendLine("    mulsd %xmm1, %xmm0"); break;
+            case "/": _asm.AppendLine("    divsd %xmm1, %xmm0"); break;
+            case "%":
+                // fmod через a - b*trunc(a/b) - та сама "обрізана до
+                // нуля" семантика, що вже дає idiv у CompileBoolBinary
+                // (узгоджено з цілочисельною поведінкою Фази N2).
+                _asm.AppendLine("    movsd %xmm0, %xmm2");   // a
+                _asm.AppendLine("    movsd %xmm1, %xmm3");   // b
+                _asm.AppendLine("    divsd %xmm1, %xmm0");   // a/b
+                _asm.AppendLine("    cvttsd2si %xmm0, %eax");
+                _asm.AppendLine("    cvtsi2sd %eax, %xmm0"); // trunc(a/b)
+                _asm.AppendLine("    mulsd %xmm3, %xmm0");   // b*trunc(a/b)
+                _asm.AppendLine("    movsd %xmm2, %xmm1");
+                _asm.AppendLine("    subsd %xmm0, %xmm1");   // a - b*trunc(a/b)
+                _asm.AppendLine("    movsd %xmm1, %xmm0");
+                break;
+            // Порівняння - результат BOOL, тому в %eax (не %xmm0), як і
+            // всюди в решті компілятора. ucomisd НЕ обробляє NaN
+            // коректно тут (PF-прапорець ігнорується) - відоме,
+            // задокументоване обмеження цієї фази.
+            case "==": _asm.AppendLine("    ucomisd %xmm1, %xmm0"); _asm.AppendLine("    sete %al"); _asm.AppendLine("    movzbl %al, %eax"); break;
+            case "!=": _asm.AppendLine("    ucomisd %xmm1, %xmm0"); _asm.AppendLine("    setne %al"); _asm.AppendLine("    movzbl %al, %eax"); break;
+            case "<": _asm.AppendLine("    ucomisd %xmm1, %xmm0"); _asm.AppendLine("    setb %al"); _asm.AppendLine("    movzbl %al, %eax"); break;
+            case "<=": _asm.AppendLine("    ucomisd %xmm1, %xmm0"); _asm.AppendLine("    setbe %al"); _asm.AppendLine("    movzbl %al, %eax"); break;
+            case ">": _asm.AppendLine("    ucomisd %xmm1, %xmm0"); _asm.AppendLine("    seta %al"); _asm.AppendLine("    movzbl %al, %eax"); break;
+            case ">=": _asm.AppendLine("    ucomisd %xmm1, %xmm0"); _asm.AppendLine("    setae %al"); _asm.AppendLine("    movzbl %al, %eax"); break;
+            default:
+                throw new Exception($"native codegen (Фаза N3): оператор '{bin.Operator}' для чисел ще не підтримується");
+        }
+    }
+
+    // Той самий цілочисельний шлях, що Фази N1-N2 (%eax/%ebx) - тепер
+    // застосовується лише коли ЛІВИЙ операнд статично Bool (напр.
+    // true == false) - для чисел використовується CompileNumberBinary вище.
+    private void CompileBoolBinary(BinaryExpression bin)
+    {
+        CompileExpression(bin.Left);
+        _asm.AppendLine("    push %eax");
+        CompileExpression(bin.Right);
+        _asm.AppendLine("    mov %eax, %ebx"); // праве значення -> ebx
+        _asm.AppendLine("    pop %eax");        // ліве значення назад -> eax
+        switch (bin.Operator)
+        {
+            case "+": _asm.AppendLine("    add %ebx, %eax"); break;
+            case "-": _asm.AppendLine("    sub %ebx, %eax"); break;
+            case "*": _asm.AppendLine("    imul %ebx, %eax"); break;
+            case "/":
+                _asm.AppendLine("    cdq"); // знакове розширення eax->edx:eax, ОБОВ'ЯЗКОВО перед idiv
+                _asm.AppendLine("    idiv %ebx");
+                break;
+            case "%":
+                _asm.AppendLine("    cdq");
+                _asm.AppendLine("    idiv %ebx");
+                _asm.AppendLine("    mov %edx, %eax"); // остача (edx) - результат %, а не частка
+                break;
+            case "==": _asm.AppendLine("    cmp %ebx, %eax"); _asm.AppendLine("    sete %al"); _asm.AppendLine("    movzbl %al, %eax"); break;
+            case "!=": _asm.AppendLine("    cmp %ebx, %eax"); _asm.AppendLine("    setne %al"); _asm.AppendLine("    movzbl %al, %eax"); break;
+            case "<": _asm.AppendLine("    cmp %ebx, %eax"); _asm.AppendLine("    setl %al"); _asm.AppendLine("    movzbl %al, %eax"); break;
+            case "<=": _asm.AppendLine("    cmp %ebx, %eax"); _asm.AppendLine("    setle %al"); _asm.AppendLine("    movzbl %al, %eax"); break;
+            case ">": _asm.AppendLine("    cmp %ebx, %eax"); _asm.AppendLine("    setg %al"); _asm.AppendLine("    movzbl %al, %eax"); break;
+            case ">=": _asm.AppendLine("    cmp %ebx, %eax"); _asm.AppendLine("    setge %al"); _asm.AppendLine("    movzbl %al, %eax"); break;
+            default:
+                throw new Exception($"native codegen: оператор '{bin.Operator}' для bool ще не підтримується");
+        }
+    }
+
+    // print_char(символ у %al) - ОДИН байт за раз, НАПИСАНО ВРУЧНУ -
+    // допоміжна підпрограма для print_double нижче (цифри й крапка
+    // друкуються по одному символу, а не єдиним буфером, як print_int
+    // робив раніше - простіше, коли кількість символів наперед невідома).
+    // Зберігає %ebx/%ecx/%edx (лише %eax руйнується, як завжди з
+    // "чужими" підпрограмами) - виклики з print_double покладаються на це.
+    private void EmitPrintCharHelper()
+    {
         string tail = _target == NativeTarget.Linux
             ? """
-                    mov $print_buf+12, %eax
-                    sub %edi, %eax           # довжина = (кінець буфера) - (початок реального тексту)
-                    mov %eax, %edx           # довжина - третій аргумент write()
-
+                    movb %al, char_buf
                     mov $4, %eax             # syscall write
                     mov $1, %ebx             # fd = stdout
-                    mov %edi, %ecx           # buf
+                    mov $char_buf, %ecx
+                    mov $1, %edx
                     int $0x80
             """
             : """
-                    mov $2, %eax             # syscall print_string (NyxOS, usermode.c)
-                    mov %edi, %ebx           # NUL-термінований буфер (bss - гарантовано 0 на позиції 12)
+                    movzbl %al, %ebx         # syscall putc (NyxOS, usermode.c) - символ напряму в %ebx
+                    mov $1, %eax
                     int $0x80
             """;
 
         _asm.AppendLine($$"""
-            print_int:
+            print_char:
+                push %ebp
+                mov %esp, %ebp
+                push %ebx
+                push %ecx
+                push %edx
+            {{tail}}
+                pop %edx
+                pop %ecx
+                pop %ebx
+                pop %ebp
+                ret
+            """);
+    }
+
+    // print_double(значення у %xmm0) - НАПИСАНО ВРУЧНУ, конвертує
+    // ЗНАКОВИЙ double у десятковий ASCII-текст: ціла частина - тим
+    // самим "буфер із кінця" трюком, що print_int мав у Фазах N1-N2
+    // (лише без вбудованого переносу рядка - друкуємо ЧЕРЕЗ print_char),
+    // дробова - НАЇВНИМ множенням на 10 (коректно й ТОЧНО для дробів,
+    // що рівно закінчуються у двійковому вигляді - 3.5, 1.25 і т.п.,
+    // САМЕ ЦЕ живцем перевірено). ВІДОМЕ обмеження (задокументовано,
+    // не приховано): для дробів БЕЗ точного двійкового представлення
+    // (напр. 0.1) це НЕ дає короткий round-trip запис, який видає
+    // C#/VM (Grisu/Ryu-подібні алгоритми - значно більша окрема
+    // задача) - обрізаємо на 15 знаках як запобіжник, а не тихо
+    // видаємо хибний результат без обмеження.
+    private void EmitPrintDoubleHelper()
+    {
+        _asm.AppendLine("""
+            print_double:
                 push %ebp
                 mov %esp, %ebp
                 push %ebx
                 push %ecx
                 push %edx
                 push %esi
+                push %edi
 
-                mov %eax, %esi          # зберегти оригінал (треба знати знак)
-                mov $print_buf+11, %edi # писати цифри з КІНЦЯ буфера до початку
-                movb $10, (%edi)        # символ переносу рядка - в самому кінці виводу
+                pxor %xmm2, %xmm2
+                ucomisd %xmm2, %xmm0
+                jae .Lpd_nonneg
+                mov $'-', %al
+                call print_char
+                movsd %xmm0, %xmm1
+                pxor %xmm0, %xmm0
+                subsd %xmm1, %xmm0          # xmm0 = |xmm0|
+            .Lpd_nonneg:
+                cvttsd2si %xmm0, %esi       # ціла частина (обрізана до нуля) - зберігаємо, знадобиться двічі
+
+                mov %esi, %eax
+                mov $print_buf+11, %edi
                 dec %edi
-
-                cmp $0, %esi
-                jge 1f
-                neg %eax                # |value| для ділення - знак додамо окремо в кінці
-            1:
                 mov $10, %ecx
-            2:                          # цикл: eax / 10, остача - чергова цифра (з кінця)
+            .Lpd_intloop:
                 xor %edx, %edx
                 div %ecx
                 add $'0', %edx
                 movb %dl, (%edi)
                 dec %edi
                 cmp $0, %eax
-                jnz 2b
+                jnz .Lpd_intloop
+                inc %edi                    # %edi -> перший записаний байт цілої частини
+            .Lpd_printintloop:
+                cmp $print_buf+11, %edi
+                jae .Lpd_printintdone
+                movb (%edi), %al
+                call print_char
+                inc %edi
+                jmp .Lpd_printintloop
+            .Lpd_printintdone:
 
-                cmp $0, %esi
-                jge 3f
-                movb $'-', (%edi)
-                dec %edi
-            3:
-                inc %edi                # %edi зараз на 1 позицію РАНІШЕ першого записаного байта
-            {{tail}}
+                cvtsi2sd %esi, %xmm1
+                subsd %xmm1, %xmm0          # xmm0 = дробова частина (0 <= x < 1)
 
+                pxor %xmm2, %xmm2
+                ucomisd %xmm2, %xmm0
+                je .Lpd_nofrac              # дробова частина точно 0 - крапку НЕ друкуємо (4.0 -> "4", як C# double.ToString())
+
+                mov $'.', %al
+                call print_char
+
+                mov $10, %eax
+                cvtsi2sd %eax, %xmm3        # xmm3 = 10.0
+                mov $15, %ecx               # запобіжник - максимум 15 знаків (дивись коментар над функцією)
+            .Lpd_fracloop:
+                mulsd %xmm3, %xmm0
+                cvttsd2si %xmm0, %edx       # чергова цифра (0-9)
+                cvtsi2sd %edx, %xmm1
+                subsd %xmm1, %xmm0          # залишок дробової частини
+                mov %edx, %eax
+                add $'0', %eax
+                call print_char
+                pxor %xmm2, %xmm2
+                ucomisd %xmm2, %xmm0
+                je .Lpd_fracdone            # залишок точно 0 - решта цифр однаково були б нулями
+                dec %ecx
+                jnz .Lpd_fracloop
+            .Lpd_fracdone:
+            .Lpd_nofrac:
+                movb $10, %al               # '\n' - той самий контракт, що print(рядок)/старий print_int
+                call print_char
+
+                pop %edi
                 pop %esi
                 pop %edx
                 pop %ecx
@@ -568,10 +823,36 @@ public class NativeCodegen
             """);
     }
 
+    // Друкує ВЖЕ ВІДОМИЙ на етапі компіляції рядок (напр. "true\n") -
+    // той самий цільово-залежний механізм, що прямий рядковий літерал
+    // у CompileStatement вище, винесений сюди окремо для повторного
+    // використання з print(bool).
+    private void EmitPrintStringLiteral(string text)
+    {
+        if (_target == NativeTarget.Linux)
+        {
+            string label = EmitStringLiteral(text);
+            byte[] utf8 = Encoding.UTF8.GetBytes(text);
+            _asm.AppendLine("    mov $4, %eax");
+            _asm.AppendLine("    mov $1, %ebx");
+            _asm.AppendLine($"    mov ${label}, %ecx");
+            _asm.AppendLine($"    mov ${utf8.Length}, %edx");
+            _asm.AppendLine("    int $0x80");
+        }
+        else
+        {
+            string label = EmitStringLiteral(text, nullTerminate: true);
+            _asm.AppendLine("    mov $2, %eax");
+            _asm.AppendLine($"    mov ${label}, %ebx");
+            _asm.AppendLine("    int $0x80");
+        }
+    }
+
     private void EmitBssSection()
     {
         _asm.AppendLine(".section .bss");
-        _asm.AppendLine(".lcomm print_buf, 13"); // макс. 32-бітне signed int - до 11 цифр+знак, +1 \n, +1 гарантований 0 (NUL для NyxOS-цілі)
+        _asm.AppendLine(".lcomm print_buf, 13"); // макс. 32-бітна ціла частина (обрізана з double) - до 11 цифр+знак
+        _asm.AppendLine(".lcomm char_buf, 1");   // скретч-байт для print_char (лише Linux-ціль пише через нього)
     }
 
     // Записує UTF-8-байти рядка в .rodata як `.byte` (НЕ `.ascii "..."` -
@@ -592,6 +873,20 @@ public class NativeCodegen
         {
             _rodata.AppendLine("    .byte " + string.Join(", ", byteList));
         }
+        return label;
+    }
+
+    // Записує 8-байтовий double як `.double` (GAS сам конвертує
+    // десятковий текст у IEEE-754 біти - не робимо це вручну, як
+    // довелось для рядків). G17 - ГАРАНТОВАНО round-trip-точний
+    // десятковий запис будь-якого double (.NET-документація), інакше
+    // ризикуємо втратити точність ще ДО того, як число потрапить у
+    // згенерований асемблер.
+    private string EmitDoubleLiteral(double value)
+    {
+        string label = $".Ldbl{_stringLabelCounter++}";
+        _rodata.AppendLine($"{label}:");
+        _rodata.AppendLine($"    .double {value.ToString("G17", System.Globalization.CultureInfo.InvariantCulture)}");
         return label;
     }
 }
