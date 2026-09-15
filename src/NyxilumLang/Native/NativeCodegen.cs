@@ -392,7 +392,7 @@ public class NativeCodegen
             }
             else
             {
-                if (param.Type is not ("any" or "i32" or "f64" or "int" or "number"))
+                if (param.Type is not ("any" or "i32" or "f64" or "int" or "number" or "size_t" or "u32" or "usize"))
                     throw new Exception($"native codegen (Фаза N7): kernel-параметр '{param.Name}' типу '{param.Type}' не підтримується - лише string чи числові типи");
                 numericParams.Add((param.Name, cabiOffset));
                 _nextLocalOffset -= 8;
@@ -854,9 +854,12 @@ public class NativeCodegen
                             // звичайний C-return), НЕ %xmm0. Рядок - уже
                             // коректний покажчик у %eax, конвертація не
                             // потрібна (String завжди char*-сумісний).
+                            // Bool - УЖЕ 0/1 у %eax (setCC-результат
+                            // порівняння) - той самий формат, що C int
+                            // (напр. "return a[i] == b[i]" у k_streq).
                             if (t == ValType.Number)
                                 _asm.AppendLine("    cvttsd2si %xmm0, %eax");
-                            else if (t != ValType.String)
+                            else if (t != ValType.String && t != ValType.Bool)
                                 throw new Exception("native codegen (Фаза N7): kernel-функції можуть повертати лише число (як C int) чи рядок (як char*)");
                         }
                         else if (_isMain)
@@ -1401,27 +1404,50 @@ public class NativeCodegen
                 {
                     if (assign.Left is IndexExpression idxTarget)
                     {
-                        // arr[i] = значення - на відміну від присвоєння
-                        // звичайній змінній (нижче), тут ОБИДВА - і масив,
-                        // і індекс - самі є виразами, що можуть клáсти
-                        // будь-що в %eax/%xmm0, тому зберігаємо їх на
-                        // стеку (LIFO), поки рахуємо RHS.
-                        if (InferExprType(idxTarget.Array) != ValType.Array)
-                            throw new Exception("native codegen: індексоване присвоєння arr[i] = ... підтримується лише для масивів");
+                        // arr[i]/s[i] = значення - на відміну від присвоєння
+                        // звичайній змінній (нижче), тут ОБИДВА - і
+                        // контейнер, і індекс - самі є виразами, що можуть
+                        // клáсти будь-що в %eax/%xmm0, тому зберігаємо їх
+                        // на стеку (LIFO), поки рахуємо RHS.
+                        var containerType = InferExprType(idxTarget.Array);
+                        if (containerType != ValType.Array && containerType != ValType.String)
+                            throw new Exception("native codegen: індексоване присвоєння підтримується лише для масивів чи рядків");
                         if (InferExprType(idxTarget.Index) != ValType.Number)
-                            throw new Exception("native codegen: індекс масиву має бути числом");
+                            throw new Exception("native codegen: індекс має бути числом");
                         if (InferExprType(assign.Right) != ValType.Number)
-                            throw new Exception("native codegen (Фаза N3): елементи масиву підтримуються лише числові (Number)");
+                            throw new Exception("native codegen (Фаза N3): елементи масиву/рядка підтримуються лише числові (Number)");
 
                         CompileExpression(idxTarget.Array);          // -> %eax
-                        _asm.AppendLine("    push %eax");            // [array ptr]
+                        _asm.AppendLine("    push %eax");            // [ptr]
                         CompileExpression(idxTarget.Index);          // -> %xmm0
                         _asm.AppendLine("    cvttsd2si %xmm0, %ecx");
-                        _asm.AppendLine("    push %ecx");            // [array ptr, index]
+                        _asm.AppendLine("    push %ecx");            // [ptr, index]
                         CompileExpression(assign.Right);             // -> %xmm0
                         _asm.AppendLine("    pop %ecx");             // індекс
-                        _asm.AppendLine("    pop %eax");             // вказівник масиву
-                        _asm.AppendLine("    movsd %xmm0, 8(%eax,%ecx,8)");
+                        _asm.AppendLine("    pop %eax");             // вказівник
+                        if (containerType == ValType.Array)
+                        {
+                            _asm.AppendLine("    movsd %xmm0, 8(%eax,%ecx,8)");
+                        }
+                        else
+                        {
+                            // s[i] = значення (Фаза N7, потрібно для
+                            // k_strcpy-подібної логіки) - ЗАПИС ОДНОГО
+                            // байта (0-255). ЛИШЕ для kernel-цілі: там
+                            // String-параметр - СПРАВЖНІЙ, ПИСАБЕЛЬНИЙ
+                            // буфер від виклику (як char* dst у C). Для
+                            // Linux/NyxOS-userspace String - ЗАВЖДИ
+                            // вказівник на .rodata (лише літерали чи
+                            // змінні з літералів - functions там НЕ
+                            // приймають String-параметрів) - запис туди
+                            // гарантовано впав би (сегфолт на read-only
+                            // сторінці), тому чесна заборона замість
+                            // "працює, поки не спробуєш".
+                            if (_target != NativeTarget.NyxOSKernel)
+                                throw new Exception("native codegen (Фаза N7): запис у рядок s[i]=... підтримується лише для --target nyxos-kernel (рядки в інших цілях - завжди .rodata, лише для читання)");
+                            _asm.AppendLine("    cvttsd2si %xmm0, %edx");
+                            _asm.AppendLine("    movb %dl, (%eax,%ecx,1)");
+                        }
                         break;
                     }
                     if (assign.Left is MemberAccessExpression memberTarget)
