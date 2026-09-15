@@ -27,9 +27,26 @@ public enum NativeTarget { Linux, NyxOS }
 // Struct (Фаза N3, четверта частина) - вказівник на купу: поля по 8
 // байтів кожне, offset = індекс поля в StructDeclaration.Fields * 8
 // (обчислюється ОДИН РАЗ на весь файл у Compile()). СПРОЩЕННЯ (як і в
-// Array) - лише Number-поля; методи/успадкування (extends) - ЩЕ НЕ
-// підтримуються цим бекендом (Фаза N4+).
-enum ValType { Number, Bool, String, Array, Struct }
+// Array) - лише Number-поля; успадкування (extends) - ЩЕ НЕ
+// підтримується цим бекендом; методи (func Struct.method) - ЗРОБЛЕНО
+// (Фаза N4).
+// Closure (Фаза N4) - вказівник на купу: заголовок {code_addr:4,
+// env_ptr:4}. Захоплення - ЗА ЗНАЧЕННЯМ, підтверджено живим тестом
+// проти VM (tests/test_closures.nx: зміна зовнішньої змінної ПІСЛЯ
+// створення замикання НЕ впливає на вже створене; власний тест -
+// зміна ВСЕРЕДИНІ тіла замикання теж НЕ зберігається між викликами й
+// НЕ впливає на зовнішню змінну) - тому реалізовано як "скопіювати
+// значення ОДИН РАЗ у момент СТВОРЕННЯ в env-блок на купі, а тоді на
+// ПОЧАТКУ КОЖНОГО виклику скопіювати з env у ЗВИЧАЙНІ локальні слоти
+// тіла замикання" - жодної непрямої адресації при кожному
+// читанні/записі не треба, захоплена змінна для решти тіла - просто
+// ще один локальний слот. СПРОЩЕННЯ: замикання можна СТВОРИТИ й
+// ВИКЛИКАТИ через локальну змінну (var f = func(...){...}; f(...)),
+// але НЕ передати як аргумент і НЕ повернути з функції - для цього
+// знадобився б статичний вивід типу РЕЗУЛЬТАТУ виклику будь-якої
+// функції, а не універсальне припущення "усі функції - Number", яке
+// InferExprType(CallExpression) досі робить (Фаза N4+, майбутнє).
+enum ValType { Number, Bool, String, Array, Struct, Closure }
 
 // NativeCodegen — Фази N1-N3 (NATIVE_ROADMAP.md): справжня x86-компіляція
 // NyxilumLang, БЕЗ жодної VM під час виконання (на відміну від
@@ -85,6 +102,15 @@ public class NativeCodegen
     // однойменними методами РІЗНИХ структур, напр. Dog.speak() і
     // Cat.speak()).
     private Dictionary<string, Dictionary<string, FunctionDeclaration>> _structMethods = new();
+
+    // Лямбди (Фаза N4) - виявляються ЛІНИВО, під час компіляції виразів
+    // (CompileExpression{FunctionExpression}), і ставляться в ЧЕРГУ на
+    // компіляцію тіла ПІЗНІШЕ (не можна компілювати тіло лямбди ПРЯМО
+    // ПОСЕРЕД тіла функції, що її створює - зламало б .text-структуру
+    // поточної функції, що компілюється). Черга, а не єдиний прохід,
+    // бо тіло ОДНІЄЇ лямбди може містити ЩЕ ОДНУ вкладену лямбду.
+    private readonly List<(string Label, FunctionExpression Expr, List<string> FreeVars)> _pendingLambdas = new();
+    private int _lambdaCounter;
 
     private int _labelCounter;
     private readonly Stack<(string Start, string End)> _loopLabels = new();
@@ -158,6 +184,17 @@ public class NativeCodegen
                 string bareName = m.Name.Contains('.') ? m.Name[(m.Name.LastIndexOf('.') + 1)..] : m.Name;
                 CompileFunction(m, isMain: false, labelOverride: $"{s.Name}__{bareName}");
             }
+        }
+
+        // Лямбди (Фаза N4) - чергу заповнюють CompileFunction() виклики
+        // вище (main/функції/методи), а КОЖНА скомпільована лямбда сама
+        // може додати в чергу ЩЕ - тому цикл, не один прохід, поки
+        // черга не спорожніє.
+        while (_pendingLambdas.Count > 0)
+        {
+            var (label, fnExpr, freeVars) = _pendingLambdas[0];
+            _pendingLambdas.RemoveAt(0);
+            CompileLambda(label, fnExpr, freeVars);
         }
 
         EmitPrintCharHelper();
@@ -292,6 +329,194 @@ public class NativeCodegen
         }
     }
 
+    // Компілює ТІЛО лямбди (Фаза N4) - викликається з черги
+    // _pendingLambdas у Compile(), НЕ напряму з CompileExpression (де
+    // лямбда лише СТВОРЮЄТЬСЯ, а не виконується). Неявний env-вказівник
+    // - ЗАВЖДИ перший параметр (16(%ebp) далі - явні параметри лямбди),
+    // навіть для лямбд БЕЗ захоплень (уніфікована конвенція виклику -
+    // виклик боку НЕ знає заздалегідь, чи ця КОНКРЕТНА лямбда щось
+    // захопила). Захоплені змінні копіюються З env У ЗВИЧАЙНІ локальні
+    // слоти ОДИН РАЗ на початку тіла (дивись коментар над
+    // ValType.Closure - чому це коректно відтворює by-value семантику
+    // VM) - решта тіла компілюється як завжди, без жодної спеціальної
+    // обробки captured-імен.
+    private void CompileLambda(string label, FunctionExpression fnExpr, List<string> freeVars)
+    {
+        _varOffsets = new Dictionary<string, int>();
+        _varTypes = new Dictionary<string, ValType>();
+        _varStructName = new Dictionary<string, string>();
+        _nextLocalOffset = 0;
+        _isMain = false;
+
+        for (int i = 0; i < fnExpr.Parameters.Count; i++)
+        {
+            _varOffsets[fnExpr.Parameters[i].Name] = 16 + i * 8; // +8 через неявний env-параметр
+            _varTypes[fnExpr.Parameters[i].Name] = ValType.Number; // СПРОЩЕННЯ: лише числові параметри лямбд
+        }
+
+        var capturedOffsets = new Dictionary<string, int>();
+        foreach (var fv in freeVars)
+        {
+            _nextLocalOffset -= 8;
+            _varOffsets[fv] = _nextLocalOffset;
+            _varTypes[fv] = ValType.Number;
+            capturedOffsets[fv] = _nextLocalOffset;
+        }
+
+        CollectVarsAndTypes(fnExpr.Body); // звичайні var-оголошення ВСЕРЕДИНІ тіла - слоти ПІСЛЯ захоплених
+
+        _epilogueLabel = $".L{label.TrimStart('.')}_epilogue";
+        _asm.AppendLine($"{label}:");
+        _asm.AppendLine("    push %ebp");
+        _asm.AppendLine("    mov %esp, %ebp");
+        int localBytes = -_nextLocalOffset;
+        if (localBytes > 0)
+        {
+            _asm.AppendLine($"    sub ${localBytes}, %esp");
+        }
+
+        if (freeVars.Count > 0)
+        {
+            _asm.AppendLine("    mov 8(%ebp), %eax"); // неявний env-вказівник
+            for (int i = 0; i < freeVars.Count; i++)
+            {
+                _asm.AppendLine($"    movsd {i * 8}(%eax), %xmm0");
+                _asm.AppendLine($"    movsd %xmm0, {capturedOffsets[freeVars[i]]}(%ebp)");
+            }
+        }
+
+        foreach (var stmt in fnExpr.Body.Statements)
+        {
+            CompileStatement(stmt);
+        }
+
+        _asm.AppendLine("    pxor %xmm0, %xmm0"); // дефолт при "провалі" за кінець - лямбди повертають лише Number
+        _asm.AppendLine($"{_epilogueLabel}:");
+        _asm.AppendLine("    mov %ebp, %esp");
+        _asm.AppendLine("    pop %ebp");
+        _asm.AppendLine("    ret");
+    }
+
+    // Вільні змінні лямбди - усі VariableExpression-посилання в тілі,
+    // що НЕ є ні власним параметром, ні власною локальною змінною
+    // (оголошеною ВСЕРЕДИНІ тіла). СПРОЩЕННЯ: НЕ рекурсує у тіло
+    // ВКЛАДЕНОЇ лямбди (її власні захоплення обробляються окремо, коли
+    // компілюється ВОНА САМА, використовуючи БЕЗПОСЕРЕДНЬО охоплюючий
+    // контекст, у якому і captured-змінні зовнішньої лямбди - на той
+    // момент уже ЗВИЧАЙНІ локальні слоти - дивись коментар над
+    // ValType.Closure) - багаторівневе вкладення тому "просто працює"
+    // без додаткового коду.
+    private List<string> FindFreeVars(FunctionExpression fn)
+    {
+        var bound = new HashSet<string>(fn.Parameters.Select(p => p.Name));
+        var free = new List<string>();
+        var seen = new HashSet<string>();
+        CollectFreeVarsInBlock(fn.Body, bound, free, seen);
+        return free;
+    }
+
+    private void CollectFreeVarsInBlock(BlockStatement block, HashSet<string> bound, List<string> free, HashSet<string> seen)
+    {
+        foreach (var stmt in block.Statements)
+        {
+            CollectFreeVarsInStmt(stmt, bound, free, seen);
+        }
+    }
+
+    private void CollectFreeVarsInStmt(StatementNode stmt, HashSet<string> bound, List<string> free, HashSet<string> seen)
+    {
+        switch (stmt)
+        {
+            case VariableDeclaration v:
+                if (v.Initializer != null) CollectFreeVarsInExpr(v.Initializer, bound, free, seen);
+                bound.Add(v.Name); // ПІСЛЯ ініціалізатора - "var x = x" мало б означати ЗОВНІШНІЙ x
+                break;
+            case PrintStatement p:
+                CollectFreeVarsInExpr(p.Expression, bound, free, seen);
+                break;
+            case ReturnStatement r:
+                if (r.Value != null) CollectFreeVarsInExpr(r.Value, bound, free, seen);
+                break;
+            case ExpressionStatement e:
+                CollectFreeVarsInExpr(e.Expression, bound, free, seen);
+                break;
+            case IfStatement ifs:
+                CollectFreeVarsInExpr(ifs.Condition, bound, free, seen);
+                CollectFreeVarsInBlock(ifs.ThenBlock, bound, free, seen);
+                if (ifs.ElseBlock != null) CollectFreeVarsInBlock(ifs.ElseBlock, bound, free, seen);
+                break;
+            case WhileStatement ws:
+                CollectFreeVarsInExpr(ws.Condition, bound, free, seen);
+                CollectFreeVarsInBlock(ws.Body, bound, free, seen);
+                break;
+            case BlockStatement b:
+                CollectFreeVarsInBlock(b, bound, free, seen);
+                break;
+        }
+    }
+
+    private void CollectFreeVarsInExpr(ExpressionNode expr, HashSet<string> bound, List<string> free, HashSet<string> seen)
+    {
+        switch (expr)
+        {
+            case VariableExpression v:
+                if (!bound.Contains(v.Name) && seen.Add(v.Name)) free.Add(v.Name);
+                break;
+            case BinaryExpression b:
+                CollectFreeVarsInExpr(b.Left, bound, free, seen);
+                CollectFreeVarsInExpr(b.Right, bound, free, seen);
+                break;
+            case UnaryExpression u:
+                CollectFreeVarsInExpr(u.Operand, bound, free, seen);
+                break;
+            case CallExpression c:
+                foreach (var a in c.Arguments) CollectFreeVarsInExpr(a, bound, free, seen);
+                break;
+            case CallValueExpression cv:
+                CollectFreeVarsInExpr(cv.Callee, bound, free, seen);
+                foreach (var a in cv.Arguments) CollectFreeVarsInExpr(a, bound, free, seen);
+                break;
+            case IndexExpression ix:
+                CollectFreeVarsInExpr(ix.Array, bound, free, seen);
+                CollectFreeVarsInExpr(ix.Index, bound, free, seen);
+                break;
+            case MemberAccessExpression m:
+                CollectFreeVarsInExpr(m.Object, bound, free, seen);
+                break;
+            case MethodCallExpression mc:
+                CollectFreeVarsInExpr(mc.Object, bound, free, seen);
+                foreach (var a in mc.Arguments) CollectFreeVarsInExpr(a, bound, free, seen);
+                break;
+            case ArrayLiteralExpression al:
+                foreach (var e in al.Elements) CollectFreeVarsInExpr(e, bound, free, seen);
+                break;
+            case StructInitExpression si:
+                foreach (var f in si.Fields) CollectFreeVarsInExpr(f.Value, bound, free, seen);
+                break;
+            case FunctionExpression nested:
+                {
+                    // РЕАЛЬНА ПОМИЛКА, знайдена живим тестом: вкладена
+                    // лямбда, якій потрібна змінна з "дідівської" (не
+                    // безпосередньо охоплюючої) області - ЗОВНІШНЯ
+                    // лямбда мусить ТЕЖ захопити цю змінну (щоб
+                    // передати її далі через звичайний локальний слот -
+                    // дивись коментар над ValType.Closure), інакше на
+                    // момент компіляції ВКЛАДЕНОЇ лямбди цієї змінної в
+                    // _varTypes просто НЕ буде. Тому - рекурсія в
+                    // ВЛАСНІ вільні змінні вкладеної лямбди (мінус те,
+                    // що вона сама зв'язує), а НЕ повний обхід її тіла -
+                    // стандартний алгоритм "closure conversion".
+                    var nestedFree = FindFreeVars(nested);
+                    foreach (var nf in nestedFree)
+                    {
+                        if (!bound.Contains(nf) && seen.Add(nf)) free.Add(nf);
+                    }
+                    break;
+                }
+            // LiteralExpression - немає вільних змінних.
+        }
+    }
+
     // Статичний тип виразу - НАЙБІЛЬШЕ архітектурне рішення Фази N3
     // (замість повноцінного динамічного представлення значень/tagged
     // union, свідомо відкладеного - дивись NATIVE_ROADMAP.md item 8):
@@ -324,6 +549,7 @@ public class NativeCodegen
         MemberAccessExpression => ValType.Number,
         // Методи (Фаза N4), як і звичайні функції, повертають лише Number.
         MethodCallExpression => ValType.Number,
+        FunctionExpression => ValType.Closure,
         _ => throw new Exception($"native codegen: неможливо визначити тип виразу - {expr.GetType().Name}")
     };
 
@@ -406,6 +632,9 @@ public class NativeCodegen
 
                         case ValType.Struct:
                             throw new Exception("native codegen (Фаза N3): print() структури напряму ще не підтримується - друкуйте поля через obj.field");
+
+                        case ValType.Closure:
+                            throw new Exception("native codegen (Фаза N4): print() замикання не підтримується");
 
                         default: // Bool
                             // Друкуємо ТЕКСТОМ "True"/"False" - РЕАЛЬНА
@@ -706,6 +935,53 @@ public class NativeCodegen
                     break;
                 }
 
+            case FunctionExpression fnExpr:
+                {
+                    // var f = func(...) {...} - СТВОРЕННЯ замикання
+                    // (Фаза N4). Саме тіло компілюється ПІЗНІШЕ (чергою
+                    // _pendingLambdas у Compile()) - тут лише генеруємо
+                    // код, що на цьому МІСЦІ виконання (!) знімає
+                    // "знімок" (за ЗНАЧЕННЯМ - дивись коментар над
+                    // ValType.Closure) поточних значень вільних змінних.
+                    if (_target != NativeTarget.Linux)
+                        throw new Exception("native codegen (Фаза N4): замикання поки підтримуються лише для --target linux");
+                    var freeVars = FindFreeVars(fnExpr);
+                    foreach (var fv in freeVars)
+                    {
+                        if (!_varTypes.TryGetValue(fv, out var fvType) || fvType != ValType.Number)
+                            throw new Exception($"native codegen (Фаза N4): замикання можуть захоплювати лише числові (Number) змінні - '{fv}' не підходить");
+                    }
+                    string label = $".Llambda{_lambdaCounter++}";
+                    _pendingLambdas.Add((label, fnExpr, freeVars));
+
+                    if (freeVars.Count > 0)
+                    {
+                        _asm.AppendLine($"    mov ${freeVars.Count * 8}, %eax");
+                        _asm.AppendLine("    call heap_alloc");
+                        _asm.AppendLine("    push %eax");                       // [envPtr]
+                        for (int i = 0; i < freeVars.Count; i++)
+                        {
+                            CompileExpression(new VariableExpression(freeVars[i])); // -> %xmm0 (ПОТОЧНЕ значення в ЦЬОМУ контексті)
+                            _asm.AppendLine("    mov (%esp), %eax");
+                            _asm.AppendLine($"    movsd %xmm0, {i * 8}(%eax)");
+                        }
+                    }
+                    else
+                    {
+                        _asm.AppendLine("    xor %eax, %eax");
+                        _asm.AppendLine("    push %eax");                       // [envPtr = NULL] - тіло лямбди його не читає
+                    }
+
+                    // Заголовок замикання {code_addr:4, env_ptr:4} - сам
+                    // вказівник на нього і є значенням виразу.
+                    _asm.AppendLine("    mov $8, %eax");
+                    _asm.AppendLine("    call heap_alloc");
+                    _asm.AppendLine("    pop %ecx");             // envPtr назад
+                    _asm.AppendLine($"    mov ${label}, (%eax)");
+                    _asm.AppendLine("    mov %ecx, 4(%eax)");
+                    break;
+                }
+
             case VariableExpression varExpr:
                 {
                     if (!_varOffsets.TryGetValue(varExpr.Name, out int offset))
@@ -748,9 +1024,19 @@ public class NativeCodegen
 
             case CallExpression call:
                 {
-                    if (!_knownFunctions.Contains(call.FunctionName))
+                    // f(args), де f - плоский ідентифікатор: АБО справжня
+                    // функція з ЦЬОГО Ж файлу (call.FunctionName в
+                    // _knownFunctions), АБО (Фаза N4) локальна змінна-
+                    // ЗАМИКАННЯ - Parser.cs генерує ОДИН і той самий
+                    // CallExpression-вузол для ОБОХ випадків, різницю
+                    // бачимо лише тут, за типом.
+                    bool isClosureVar = !_knownFunctions.Contains(call.FunctionName)
+                        && _varTypes.TryGetValue(call.FunctionName, out var calleeType)
+                        && calleeType == ValType.Closure;
+
+                    if (!_knownFunctions.Contains(call.FunctionName) && !isClosureVar)
                     {
-                        throw new Exception($"native codegen: невідома функція '{call.FunctionName}' (лише вбудований print() і функції з ЦЬОГО Ж файлу - стандартна бібліотека/імпорти - значно пізніша фаза)");
+                        throw new Exception($"native codegen: невідома функція '{call.FunctionName}' (лише вбудований print(), функції з ЦЬОГО Ж файлу чи локальна змінна-замикання - стандартна бібліотека/імпорти - значно пізніша фаза)");
                     }
                     // cdecl: аргументи - СПРАВА НАЛІВО (останній - першим),
                     // тому після всіх push'ів ПЕРШИЙ аргумент лежить
@@ -766,13 +1052,37 @@ public class NativeCodegen
                         _asm.AppendLine("    sub $8, %esp");
                         _asm.AppendLine("    movsd %xmm0, (%esp)");
                     }
-                    _asm.AppendLine($"    call {call.FunctionName}");
-                    if (call.Arguments.Count > 0)
+                    if (isClosureVar)
                     {
-                        _asm.AppendLine($"    add ${call.Arguments.Count * 8}, %esp"); // ВИКЛИКАЧ прибирає аргументи (cdecl, не stdcall)
+                        // НЕПРЯМИЙ виклик через заголовок замикання
+                        // {code_addr, env_ptr} - env передається як
+                        // НЕЯВНИЙ ОСТАННІЙ (найближчий до виклику) аргумент,
+                        // той самий підхід, що self у MethodCallExpression.
+                        CompileExpression(new VariableExpression(call.FunctionName)); // -> %eax (заголовок)
+                        _asm.AppendLine("    mov (%eax), %ecx");   // code_addr
+                        _asm.AppendLine("    mov 4(%eax), %eax");  // env_ptr (перезаписуємо заголовок - він більше не потрібен)
+                        // РЕАЛЬНА ПОМИЛКА, знайдена живим тестом: звичайний
+                        // `push %eax` кладе лише 4 байти, а ВСІ інші
+                        // аргументи (і сам callee) очікують УНІФІКОВАНИЙ
+                        // 8-байтовий слот на аргумент - зсунуло на 4 байти
+                        // ВСЕ, що вже лежало на стеку (параметр x читався
+                        // напівсмітям) - лише перший аргумент десь у
+                        // ланцюжку "просто пощастило" виявити одразу.
+                        _asm.AppendLine("    sub $8, %esp");
+                        _asm.AppendLine("    mov %eax, (%esp)");
+                        _asm.AppendLine("    call *%ecx");
+                        _asm.AppendLine($"    add ${(call.Arguments.Count + 1) * 8}, %esp");
                     }
-                    // Результат - уже в %xmm0 (усі функції Number-, за
-                    // конвенцією ReturnStatement/InferExprType вище).
+                    else
+                    {
+                        _asm.AppendLine($"    call {call.FunctionName}");
+                        if (call.Arguments.Count > 0)
+                        {
+                            _asm.AppendLine($"    add ${call.Arguments.Count * 8}, %esp"); // ВИКЛИКАЧ прибирає аргументи (cdecl, не stdcall)
+                        }
+                    }
+                    // Результат - уже в %xmm0 (усі функції/замикання
+                    // Number-, за конвенцією ReturnStatement/InferExprType вище).
                     break;
                 }
 
@@ -895,6 +1205,10 @@ public class NativeCodegen
                     else if (leftType == ValType.Struct)
                     {
                         throw new Exception($"native codegen (Фаза N3): оператор '{bin.Operator}' для структур не підтримується (звертайтесь до полів obj.field замість порівняння/арифметики над самою структурою)");
+                    }
+                    else if (leftType == ValType.Closure)
+                    {
+                        throw new Exception($"native codegen (Фаза N4): оператор '{bin.Operator}' для замикань не підтримується (викличте f(...) замість порівняння/арифметики над самим значенням-функцією)");
                     }
                     else
                     {
