@@ -80,6 +80,12 @@ public class NativeCodegen
     // оголошуються на верхньому рівні, доступні звідусіль.
     private Dictionary<string, Dictionary<string, int>> _structFieldOffsets = new();
 
+    // structName -> methodName -> оголошення (Фаза N4). Асемблерна мітка
+    // методу - завжди "{structName}__{methodName}" (уникає колізій між
+    // однойменними методами РІЗНИХ структур, напр. Dog.speak() і
+    // Cat.speak()).
+    private Dictionary<string, Dictionary<string, FunctionDeclaration>> _structMethods = new();
+
     private int _labelCounter;
     private readonly Stack<(string Start, string End)> _loopLabels = new();
     private HashSet<string> _knownFunctions = new();
@@ -100,22 +106,33 @@ public class NativeCodegen
             ?? throw new Exception("native codegen: у файлі немає func main()");
         _knownFunctions = allFuncs.Select(f => f.Name).ToHashSet();
 
-        // Offset'и полів структур - ОДИН РАЗ на весь файл (структури
-        // оголошуються на верхньому рівні, а не всередині функцій).
-        // СПРОЩЕННЯ: методи (StructDeclaration.Methods) ігноруються тут
-        // повністю - виклик struct.method() ще не підтримується цим
-        // бекендом (Фаза N4+); успадковані (extends) поля батька теж НЕ
-        // додаються - спроба ініціалізувати успадковане поле дасть чесну
-        // (хай і не найточнішу) помилку "структура не має поля".
+        // Offset'и полів структур і карта методів - ОДИН РАЗ на весь файл
+        // (структури оголошуються на верхньому рівні, а не всередині
+        // функцій). Успадковані (extends) поля/методи батька НЕ
+        // додаються сюди - спроба звернутись до успадкованого дасть
+        // чесну (хай і не найточнішу) помилку "структура не має поля/методу".
         foreach (var s in program.Statements.OfType<StructDeclaration>())
         {
             var offsets = new Dictionary<string, int>();
             for (int i = 0; i < s.Fields.Count; i++)
                 offsets[s.Fields[i].Name] = i * 8;
             _structFieldOffsets[s.Name] = offsets;
+
+            // РЕАЛЬНА ПОМИЛКА, знайдена живим тестом: Parser.cs зберігає
+            // ПОВНЕ ім'я методу як "StructName.methodName" (напр.
+            // "Point.length") у FunctionDeclaration.Name, а НЕ просто
+            // "length" - ключ у методMap мусить бути "голим" іменем
+            // (те, що прийде в MethodCallExpression.MethodName).
+            var methodMap = new Dictionary<string, FunctionDeclaration>();
+            foreach (var m in s.Methods)
+            {
+                string bareName = m.Name.Contains('.') ? m.Name[(m.Name.LastIndexOf('.') + 1)..] : m.Name;
+                methodMap[bareName] = m;
+            }
+            _structMethods[s.Name] = methodMap;
         }
 
-        _asm.AppendLine("# Згенеровано NativeCodegen.cs (NyxilumLang, Фаза N1-N3) - НЕ редагувати вручну.");
+        _asm.AppendLine("# Згенеровано NativeCodegen.cs (NyxilumLang, Фаза N1-N4) - НЕ редагувати вручну.");
         _asm.AppendLine(".section .text");
         _asm.AppendLine(".global _start");
 
@@ -128,6 +145,19 @@ public class NativeCodegen
         foreach (var func in allFuncs.Where(f => f.Name != "main"))
         {
             CompileFunction(func, isMain: false);
+        }
+
+        // Методи структур (Фаза N4) - КОЖЕН під власною, УНІКАЛЬНОЮ
+        // міткою "StructName__methodName" (labelOverride), інакше
+        // однойменні методи РІЗНИХ структур (напр. Dog.speak() і
+        // Cat.speak()) зіткнулися б в одній .text-мітці.
+        foreach (var s in program.Statements.OfType<StructDeclaration>())
+        {
+            foreach (var m in s.Methods)
+            {
+                string bareName = m.Name.Contains('.') ? m.Name[(m.Name.LastIndexOf('.') + 1)..] : m.Name;
+                CompileFunction(m, isMain: false, labelOverride: $"{s.Name}__{bareName}");
+            }
         }
 
         EmitPrintCharHelper();
@@ -147,7 +177,7 @@ public class NativeCodegen
         return _asm.ToString();
     }
 
-    private void CompileFunction(FunctionDeclaration func, bool isMain)
+    private void CompileFunction(FunctionDeclaration func, bool isMain, string? labelOverride = null)
     {
         _varOffsets = new Dictionary<string, int>();
         _varTypes = new Dictionary<string, ValType>();
@@ -159,18 +189,32 @@ public class NativeCodegen
         // збереженим %ebp викликаючої функції - той самий стандартний
         // cdecl-макет, яким користується GCC/будь-який x86-компілятор),
         // тепер із КРОКОМ 8 байтів (double) замість 4 - Bool-параметри
-        // поки НЕ підтримуються (див. CallExpression нижче).
+        // поки НЕ підтримуються (див. CallExpression нижче). Параметр
+        // (включно з неявним self у методах структур - Фаза N4) типу
+        // ВІДОМОЇ структури - ValType.Struct/вказівник, а не Number
+        // (передається так само, як self у MethodCallExpression нижче -
+        // сирий 32-бітний вказівник у нижніх 4 байтах 8-байтового слота).
         for (int i = 0; i < func.Parameters.Count; i++)
         {
-            _varOffsets[func.Parameters[i].Name] = 8 + i * 8;
-            _varTypes[func.Parameters[i].Name] = ValType.Number;
+            var param = func.Parameters[i];
+            _varOffsets[param.Name] = 8 + i * 8;
+            if (_structFieldOffsets.ContainsKey(param.Type))
+            {
+                _varTypes[param.Name] = ValType.Struct;
+                _varStructName[param.Name] = param.Type;
+            }
+            else
+            {
+                _varTypes[param.Name] = ValType.Number;
+            }
         }
 
         CollectVarsAndTypes(func.Body);
 
-        _epilogueLabel = isMain ? ".Lmain_exit" : $".L{func.Name}_epilogue";
+        string entryLabel = labelOverride ?? func.Name;
+        _epilogueLabel = isMain ? ".Lmain_exit" : $".L{entryLabel}_epilogue";
 
-        _asm.AppendLine(isMain ? "_start:" : $"{func.Name}:");
+        _asm.AppendLine(isMain ? "_start:" : $"{entryLabel}:");
         _asm.AppendLine("    push %ebp");
         _asm.AppendLine("    mov %esp, %ebp");
         int localBytes = -_nextLocalOffset;
@@ -278,6 +322,8 @@ public class NativeCodegen
         StructInitExpression => ValType.Struct,
         // СПРОЩЕННЯ: поля структур лише Number (як і елементи масивів).
         MemberAccessExpression => ValType.Number,
+        // Методи (Фаза N4), як і звичайні функції, повертають лише Number.
+        MethodCallExpression => ValType.Number,
         _ => throw new Exception($"native codegen: неможливо визначити тип виразу - {expr.GetType().Name}")
     };
 
@@ -619,6 +665,44 @@ public class NativeCodegen
                         throw new Exception($"native codegen: структура '{structName}' не має поля '{member.Member}'");
                     CompileExpression(member.Object);        // -> %eax (вказівник)
                     _asm.AppendLine($"    movsd {fieldOffset}(%eax), %xmm0");
+                    break;
+                }
+
+            case MethodCallExpression methodCall:
+                {
+                    // obj.method(args) - Фаза N4. Метод скомпільовано під
+                    // міткою "StructName__methodName" (Compile(),
+                    // labelOverride), з НЕЯВНИМ self ПЕРШИМ параметром
+                    // (сам Parser.cs так робить - self просто звичайний
+                    // FunctionParameter із Type = ім'я структури).
+                    string structName = ResolveStructName(methodCall.Object);
+                    if (!_structMethods.TryGetValue(structName, out var methods) || !methods.TryGetValue(methodCall.MethodName, out var methodDecl))
+                        throw new Exception($"native codegen: структура '{structName}' не має методу '{methodCall.MethodName}'");
+                    int expectedArgs = methodDecl.Parameters.Count - 1; // мінус self
+                    if (methodCall.Arguments.Count != expectedArgs)
+                        throw new Exception($"native codegen: метод '{structName}.{methodCall.MethodName}' очікує {expectedArgs} аргумент(и/ів), отримано {methodCall.Arguments.Count}");
+
+                    // cdecl, справа наліво, як і CallExpression - self
+                    // (перший ЛОГІЧНИЙ параметр) мусить лягти НАЙБЛИЖЧЕ
+                    // до вершини стека (тобто ОСТАННІМ push'ом), щоб
+                    // callee побачив його рівно за 8(%ebp).
+                    for (int i = methodCall.Arguments.Count - 1; i >= 0; i--)
+                    {
+                        if (InferExprType(methodCall.Arguments[i]) != ValType.Number)
+                            throw new Exception("native codegen (Фаза N4): аргументи методів підтримуються лише числові (Number)");
+                        CompileExpression(methodCall.Arguments[i]);    // -> %xmm0
+                        _asm.AppendLine("    sub $8, %esp");
+                        _asm.AppendLine("    movsd %xmm0, (%esp)");
+                    }
+                    if (InferExprType(methodCall.Object) != ValType.Struct)
+                        throw new Exception("native codegen: метод можна викликати лише на структурі");
+                    CompileExpression(methodCall.Object);              // -> %eax (self-вказівник)
+                    _asm.AppendLine("    sub $8, %esp");
+                    _asm.AppendLine("    mov %eax, (%esp)");           // self - ЦІЛИЙ вказівник (32-біт), НЕ double
+                    _asm.AppendLine($"    call {structName}__{methodCall.MethodName}");
+                    _asm.AppendLine($"    add ${(methodCall.Arguments.Count + 1) * 8}, %esp");
+                    // Результат - уже в %xmm0 (методи, як і звичайні
+                    // функції, повертають лише Number).
                     break;
                 }
 
