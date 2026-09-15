@@ -705,6 +705,10 @@ public class NativeCodegen
         UnaryExpression { Operator: "!" } => ValType.Bool,
         // Спрощення Фази N3: УСІ функції вважаються Number-, bool-
         // функції поки не підтримуються (дивись ReturnStatement нижче).
+        // ВИНЯТОК (Фаза N7): kmalloc() - зовнішній примітив ядра
+        // NyxOS (kheap.c, НЕ функція з ЦЬОГО файлу) - повертає
+        // ВКАЗІВНИК (void*), а не число.
+        CallExpression { FunctionName: "kmalloc" } => ValType.String,
         CallExpression => ValType.Number,
         BinaryExpression { Operator: "=" } assign => InferExprType(assign.Right),
         BinaryExpression { Operator: "&&" or "||" } => ValType.Bool,
@@ -1329,15 +1333,55 @@ public class NativeCodegen
 
             case CallExpression call:
                 {
-                    // Фаза N7, СПРОЩЕННЯ ПЕРШОГО кроку: kernel-функції
-                    // (C ABI, 4-байтові параметри) НЕ можуть викликати
-                    // одна одну ЧЕРЕЗ ЦЕЙ шлях - увесь виклик нижче
-                    // передбачає ЗВИЧАЙНУ 8-байтову Number-конвенцію
-                    // цього компілятора, а НЕ C-ABI - змішування дало б
-                    // тихо неправильний код (kstring.c й так не мав
-                    // внутрішніх викликів - не блокує поточну мету).
+                    // Фаза N7: kernel-функції (--target nyxos-kernel)
+                    // мають ЗОВСІМ ІНШУ конвенцію виклику - звичайний C
+                    // ABI (кожен аргумент - 4 байти, ЗАВЖДИ), а не
+                    // уніфікований 8-байтовий Number-слот, яким
+                    // користується РЕШТА цього компілятора - тому
+                    // окрема гілка, не спроба "втиснути" у код нижче.
                     if (_target == NativeTarget.NyxOSKernel)
-                        throw new Exception("native codegen (Фаза N7): виклики функцій усередині --target nyxos-kernel ще не підтримуються (різні calling convention)");
+                    {
+                        // kmalloc/kfree (Фаза N7) - НЕ функції з ЦЬОГО
+                        // файлу, а ЗОВНІШНІ символи з РЕАЛЬНОГО kheap.c
+                        // ядра NyxOS - лінкер (не цей компілятор)
+                        // резолвить `call kmalloc` у той .o, коли
+                        // результат влиється в реальну збірку ядра
+                        // поряд з рештою .o файлів.
+                        bool isExternalKernelPrimitive = call.FunctionName is "kmalloc" or "kfree";
+                        if (!_knownFunctions.Contains(call.FunctionName) && !isExternalKernelPrimitive)
+                            throw new Exception($"native codegen (Фаза N7): невідома функція '{call.FunctionName}' (лише функції з ЦЬОГО Ж файлу чи kmalloc/kfree з kheap.c ядра NyxOS)");
+
+                        int pushedBytes = 0;
+                        for (int i = call.Arguments.Count - 1; i >= 0; i--)
+                        {
+                            var argType = InferExprType(call.Arguments[i]);
+                            CompileExpression(call.Arguments[i]);
+                            if (argType == ValType.Number)
+                            {
+                                _asm.AppendLine("    cvttsd2si %xmm0, %eax"); // C int - 4 байти, НЕ 8-байтовий Number-слот
+                                _asm.AppendLine("    push %eax");
+                            }
+                            else if (argType == ValType.String)
+                            {
+                                _asm.AppendLine("    push %eax"); // вже 4-байтовий вказівник
+                            }
+                            else
+                            {
+                                throw new Exception("native codegen (Фаза N7): аргументи kernel-функцій підтримуються лише числові чи рядкові (вказівники)");
+                            }
+                            pushedBytes += 4;
+                        }
+                        _asm.AppendLine($"    call {call.FunctionName}");
+                        if (pushedBytes > 0)
+                            _asm.AppendLine($"    add ${pushedBytes}, %esp");
+                        // Результат callee - у %eax (C ABI). Конвертуємо
+                        // до конвенції ВИРАЗУ цього компілятора: kmalloc
+                        // повертає вказівник (String - УЖЕ %eax, нічого
+                        // робити не треба), решта - Number (%xmm0).
+                        if (call.FunctionName != "kmalloc")
+                            _asm.AppendLine("    cvtsi2sd %eax, %xmm0");
+                        break;
+                    }
                     // f(args), де f - плоский ідентифікатор: АБО справжня
                     // функція з ЦЬОГО Ж файлу (call.FunctionName в
                     // _knownFunctions), АБО (Фаза N4) локальна змінна-
