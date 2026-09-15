@@ -112,6 +112,15 @@ public class NativeCodegen
     // xmm0/exit-syscall) у ReturnStatement нижче.
     private bool _isKernelExport;
 
+    // Глобальні змінні верхнього рівня (Фаза N7, лише --target
+    // nyxos-kernel - справжні kernel-модулі, як gconsole.c, тримають
+    // стан МІЖ викликами функцій - той самий сенс, що static-змінні в
+    // C). ІМ'Я -> тип; мітка в асемблері - завжди "__g_{ім'я}". НЕ
+    // скидається між функціями (на відміну від _varOffsets) -
+    // заповнюється ОДИН РАЗ у CompileKernelObject.
+    private readonly Dictionary<string, ValType> _globalVars = new();
+    private readonly StringBuilder _globalData = new();
+
     // Заповнюється ОДИН РАЗ на весь файл у Compile() (НЕ скидається між
     // функціями, на відміну від _varOffsets/_varTypes) - структури
     // оголошуються на верхньому рівні, доступні звідусіль.
@@ -156,7 +165,7 @@ public class NativeCodegen
         // виконуваний файл з main()".
         if (target == NativeTarget.NyxOSKernel)
         {
-            return CompileKernelObject(allFuncs);
+            return CompileKernelObject(program, allFuncs);
         }
 
         var mainFunc = allFuncs.FirstOrDefault(f => f.Name == "main")
@@ -334,10 +343,59 @@ public class NativeCodegen
     // "неперехопленого throw" робить syscall exit(), що в Ring0
     // взагалі не має сенсу - тому й try/catch поки що виключено, а не
     // лише heap-залежні речі.
-    private string CompileKernelObject(List<FunctionDeclaration> allFuncs)
+    private string CompileKernelObject(ProgramNode program, List<FunctionDeclaration> allFuncs)
     {
         if (allFuncs.Count == 0)
             throw new Exception("native codegen (Фаза N7): у файлі немає жодної функції для --target nyxos-kernel");
+
+        // Глобальні змінні верхнього рівня (потрібно для модулів зі
+        // станом, напр. gconsole.c - grid/col/row/fg_color/bg_color
+        // живуть МІЖ викликами функцій, той самий сенс, що C static).
+        // СПРОЩЕННЯ: ініціалізатор (якщо є) МАЄ бути сталим літералом -
+        // kernel-ціль НЕ має "точки входу", що виконала б довільний
+        // код ІНІЦІАЛІЗАЦІЇ перед першим викликом будь-якої функції
+        // (на відміну від main()-цілей) - складніша логіка (виклик
+        // функції як ініціалізатор тощо) МАЄ жити У ЗВИЧАЙНІЙ функції,
+        // як і в самому gconsole.c (fg_color присвоюється ВСЕРЕДИНІ
+        // gconsole_init(), а НЕ в оголошенні).
+        foreach (var v in program.Statements.OfType<VariableDeclaration>())
+        {
+            ValType type;
+            if (v.Initializer == null)
+            {
+                type = ValType.Number;
+            }
+            else if (v.Initializer is LiteralExpression { Value: double or bool or string })
+            {
+                type = InferExprType(v.Initializer);
+            }
+            else
+            {
+                throw new Exception($"native codegen (Фаза N7): ініціалізатор глобальної '{v.Name}' має бути сталим літералом (число/bool/рядок) - складнішу логіку виконайте ВСЕРЕДИНІ якоїсь функції, не в оголошенні (kernel-ціль не має точки входу)");
+            }
+            _globalVars[v.Name] = type;
+
+            string label = $"__g_{v.Name}";
+            _globalData.AppendLine($"{label}:");
+            switch (type)
+            {
+                case ValType.Number:
+                    double dv = v.Initializer is LiteralExpression { Value: double d } ? d : 0.0;
+                    _globalData.AppendLine($"    .double {dv.ToString("G17", System.Globalization.CultureInfo.InvariantCulture)}");
+                    break;
+                case ValType.Bool:
+                    bool bv = v.Initializer is LiteralExpression { Value: bool b } && b;
+                    _globalData.AppendLine($"    .long {(bv ? 1 : 0)}");
+                    break;
+                case ValType.String:
+                    string sv = v.Initializer is LiteralExpression { Value: string s } ? s : "";
+                    string strLabel = EmitStringLiteral(sv, nullTerminate: true);
+                    _globalData.AppendLine($"    .long {strLabel}");
+                    break;
+                default:
+                    throw new Exception($"native codegen (Фаза N7): непідтримуваний тип глобальної '{v.Name}'");
+            }
+        }
 
         _asm.AppendLine("# Згенеровано NativeCodegen.cs (NyxilumLang, Фаза N7 - C-ABI kernel-об'єкт) - НЕ редагувати вручну.");
         _asm.AppendLine(".section .text");
@@ -350,6 +408,12 @@ public class NativeCodegen
         {
             _asm.AppendLine(".section .rodata");
             _asm.Append(_rodata);
+        }
+
+        if (_globalData.Length > 0)
+        {
+            _asm.AppendLine(".section .data");
+            _asm.Append(_globalData);
         }
 
         return _asm.ToString();
@@ -700,7 +764,9 @@ public class NativeCodegen
         LiteralExpression { Value: string } => ValType.String,
         VariableExpression v => _varTypes.TryGetValue(v.Name, out var t)
             ? t
-            : throw new Exception($"native codegen: змінна '{v.Name}' використана до оголошення"),
+            : _globalVars.TryGetValue(v.Name, out var gt)
+                ? gt // Фаза N7: глобальна (лише --target nyxos-kernel) - локальна/параметр ЗАВЖДИ затіняє
+                : throw new Exception($"native codegen: змінна '{v.Name}' використана до оголошення"),
         UnaryExpression { Operator: "-" } u => InferExprType(u.Operand),
         UnaryExpression { Operator: "!" } => ValType.Bool,
         // Спрощення Фази N3: УСІ функції вважаються Number-, bool-
@@ -1293,15 +1359,29 @@ public class NativeCodegen
 
             case VariableExpression varExpr:
                 {
-                    if (!_varOffsets.TryGetValue(varExpr.Name, out int offset))
+                    if (_varOffsets.TryGetValue(varExpr.Name, out int offset))
                     {
-                        throw new Exception($"native codegen: змінна '{varExpr.Name}' використана до оголошення (масиви/структури - наступна фаза)");
+                        if (_varTypes[varExpr.Name] == ValType.Number)
+                            _asm.AppendLine($"    movsd {offset}(%ebp), %xmm0");
+                        else
+                            _asm.AppendLine($"    mov {offset}(%ebp), %eax");
+                        break;
                     }
-                    if (_varTypes[varExpr.Name] == ValType.Number)
-                        _asm.AppendLine($"    movsd {offset}(%ebp), %xmm0");
-                    else
-                        _asm.AppendLine($"    mov {offset}(%ebp), %eax");
-                    break;
+                    // Глобальна (Фаза N7, лише --target nyxos-kernel) -
+                    // локальна/параметр ЗАВЖДИ затіняє однойменну
+                    // глобальну (перевіряємо ТУТ, ПІСЛЯ невдалого
+                    // пошуку в _varOffsets вище - узгоджено з тим, як
+                    // мова взагалі поводиться, tests/test_globals.nx).
+                    if (_globalVars.TryGetValue(varExpr.Name, out var globalType))
+                    {
+                        string label = $"__g_{varExpr.Name}";
+                        if (globalType == ValType.Number)
+                            _asm.AppendLine($"    movsd {label}, %xmm0");
+                        else
+                            _asm.AppendLine($"    mov {label}, %eax");
+                        break;
+                    }
+                    throw new Exception($"native codegen: змінна '{varExpr.Name}' використана до оголошення (масиви/структури - наступна фаза)");
                 }
 
             case UnaryExpression { Operator: "-" } unaryNeg:
@@ -1515,16 +1595,28 @@ public class NativeCodegen
                     {
                         throw new Exception("native codegen: присвоєння підтримується лише у звичайну змінну, arr[i] чи obj.field");
                     }
-                    if (!_varOffsets.TryGetValue(target.Name, out int targetOffset))
+                    if (_varOffsets.TryGetValue(target.Name, out int targetOffset))
                     {
-                        throw new Exception($"native codegen: змінна '{target.Name}' не оголошена");
+                        CompileExpression(assign.Right);
+                        if (_varTypes[target.Name] == ValType.Number)
+                            _asm.AppendLine($"    movsd %xmm0, {targetOffset}(%ebp)");
+                        else
+                            _asm.AppendLine($"    mov %eax, {targetOffset}(%ebp)");
+                        break;
                     }
-                    CompileExpression(assign.Right);
-                    if (_varTypes[target.Name] == ValType.Number)
-                        _asm.AppendLine($"    movsd %xmm0, {targetOffset}(%ebp)");
-                    else
-                        _asm.AppendLine($"    mov %eax, {targetOffset}(%ebp)");
-                    break;
+                    // Глобальна (Фаза N7) - той самий "локальна затіняє
+                    // глобальну" порядок пошуку, що VariableExpression вище.
+                    if (_globalVars.TryGetValue(target.Name, out var globalType))
+                    {
+                        CompileExpression(assign.Right);
+                        string label = $"__g_{target.Name}";
+                        if (globalType == ValType.Number)
+                            _asm.AppendLine($"    movsd %xmm0, {label}");
+                        else
+                            _asm.AppendLine($"    mov %eax, {label}");
+                        break;
+                    }
+                    throw new Exception($"native codegen: змінна '{target.Name}' не оголошена");
                 }
 
             case BinaryExpression { Operator: "&&" } andExpr:
