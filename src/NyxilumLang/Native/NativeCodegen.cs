@@ -88,6 +88,14 @@ public class NativeCodegen
     // щоб знати offset'и полів при member-доступі. НЕ скидається між
     // функціями окремо (скидається разом із _varTypes в CompileFunction).
     private Dictionary<string, string> _varStructName = new();
+    // try/catch (Фаза N4) - для КОЖНОГО TryStatement-вузла в ЦІЙ функції
+    // (за посиланням на сам AST-вузол, не за іменем - їх немає) offset
+    // 16-байтового "кадру обробника" (setjmp/longjmp-стиль, дивись
+    // коментар над CompileTryStatement). _tryDepth - чи компілюємо
+    // ЗАРАЗ щось УСЕРЕДИНІ try/catch-блоку (для чесної заборони
+    // return/break/continue звідти - дивись коментар нижче).
+    private Dictionary<TryStatement, int> _tryFrameOffsets = new();
+    private int _tryDepth;
     private int _nextLocalOffset;
     private string _epilogueLabel = "";
     private bool _isMain;
@@ -201,6 +209,7 @@ public class NativeCodegen
         EmitPrintDoubleHelper();
         EmitPrintStringValueHelper();
         EmitHeapAllocHelper();
+        EmitUnhandledThrowHelper();
 
         if (_rodata.Length > 0)
         {
@@ -219,6 +228,8 @@ public class NativeCodegen
         _varOffsets = new Dictionary<string, int>();
         _varTypes = new Dictionary<string, ValType>();
         _varStructName = new Dictionary<string, string>();
+        _tryFrameOffsets = new Dictionary<TryStatement, int>();
+        _tryDepth = 0;
         _nextLocalOffset = 0;
         _isMain = isMain;
 
@@ -322,6 +333,28 @@ public class NativeCodegen
                 case WhileStatement ws:
                     CollectVarsAndTypes(ws.Body);
                     break;
+                case TryStatement ts:
+                    {
+                        // Кадр обробника (Фаза N4, setjmp/longjmp-стиль) -
+                        // 16 анонімних байтів на КОЖЕН try (не за іменем -
+                        // за самим AST-вузлом, дивись _tryFrameOffsets).
+                        _nextLocalOffset -= 16;
+                        _tryFrameOffsets[ts] = _nextLocalOffset;
+
+                        // catch-змінна - СПРОЩЕННЯ: завжди Number (throw
+                        // підтримує лише числові значення - дивись
+                        // ThrowStatement нижче).
+                        if (!_varOffsets.ContainsKey(ts.CatchVariableName))
+                        {
+                            _nextLocalOffset -= 8;
+                            _varOffsets[ts.CatchVariableName] = _nextLocalOffset;
+                        }
+                        _varTypes[ts.CatchVariableName] = ValType.Number;
+
+                        CollectVarsAndTypes(ts.TryBlock);
+                        CollectVarsAndTypes(ts.CatchBlock);
+                        break;
+                    }
                 case BlockStatement b:
                     CollectVarsAndTypes(b);
                     break;
@@ -345,6 +378,8 @@ public class NativeCodegen
         _varOffsets = new Dictionary<string, int>();
         _varTypes = new Dictionary<string, ValType>();
         _varStructName = new Dictionary<string, string>();
+        _tryFrameOffsets = new Dictionary<TryStatement, int>();
+        _tryDepth = 0;
         _nextLocalOffset = 0;
         _isMain = false;
 
@@ -659,6 +694,13 @@ public class NativeCodegen
 
             case ReturnStatement returnStmt:
                 {
+                    // ВІДОМЕ, свідомо НЕ обійдене обмеження Фази N4:
+                    // return з СЕРЕДИНИ try/catch стрибнув би повз код,
+                    // що деактивує кадр обробника (exc_top лишився б
+                    // "висіти" на вже недійсному кадрі стека) - чесна
+                    // помилка компіляції краща за тихий крах пізніше.
+                    if (_tryDepth > 0)
+                        throw new Exception("native codegen (Фаза N4): return усередині try/catch ще не підтримується (обробник не деактивувався б коректно) - винесіть return за межі блоку");
                     if (returnStmt.Value != null)
                     {
                         var t = InferExprType(returnStmt.Value);
@@ -745,6 +787,8 @@ public class NativeCodegen
                 {
                     throw new Exception("native codegen: break поза циклом");
                 }
+                if (_tryDepth > 0)
+                    throw new Exception("native codegen (Фаза N4): break усередині try/catch ще не підтримується (обробник не деактивувався б коректно)");
                 _asm.AppendLine($"    jmp {_loopLabels.Peek().End}");
                 break;
 
@@ -753,8 +797,87 @@ public class NativeCodegen
                 {
                     throw new Exception("native codegen: continue поза циклом");
                 }
+                if (_tryDepth > 0)
+                    throw new Exception("native codegen (Фаза N4): continue усередині try/catch ще не підтримується (обробник не деактивувався б коректно)");
                 _asm.AppendLine($"    jmp {_loopLabels.Peek().Start}");
                 break;
+
+            case TryStatement ts:
+                {
+                    // setjmp/longjmp-стиль (Фаза N4): "кадр обробника" -
+                    // 16 анонімних байтів на СТЕКУ ЦІЄЇ функції (offset
+                    // обчислено заздалегідь у CollectVarsAndTypes,
+                    // дивись _tryFrameOffsets): [saved_esp:4][saved_ebp:4]
+                    // [catch_label:4][prev_handler_ptr:4]. Глобальний
+                    // exc_top (.bss) - вказівник на НАЙБЛИЖЧИЙ активний
+                    // кадр - throw (нижче) просто читає його й стрибає,
+                    // не знаючи НІЧОГО про те, скільки функцій було
+                    // викликано між try і throw (той самий трюк, що
+                    // реальний C setjmp/longjmp).
+                    int id = _labelCounter++;
+                    int frameOffset = _tryFrameOffsets[ts];
+                    string catchLabel = $".Ltry{id}_catch";
+                    string endLabel = $".Ltry{id}_end";
+
+                    _asm.AppendLine($"    mov %esp, {frameOffset}(%ebp)");
+                    _asm.AppendLine($"    mov %ebp, {frameOffset + 4}(%ebp)");
+                    _asm.AppendLine($"    mov ${catchLabel}, {frameOffset + 8}(%ebp)");
+                    _asm.AppendLine("    mov exc_top, %eax");
+                    _asm.AppendLine($"    mov %eax, {frameOffset + 12}(%ebp)"); // prev = старий top
+                    _asm.AppendLine($"    lea {frameOffset}(%ebp), %eax");
+                    _asm.AppendLine("    mov %eax, exc_top");                   // активуємо ЦЕЙ обробник
+
+                    _tryDepth++;
+                    CompileBlock(ts.TryBlock);
+                    _tryDepth--;
+
+                    // Нормальне завершення try (БЕЗ throw) - деактивуємо
+                    // обробник (повертаємо exc_top до prev) і пропускаємо
+                    // catch-блок повністю.
+                    _asm.AppendLine($"    mov {frameOffset + 12}(%ebp), %eax");
+                    _asm.AppendLine("    mov %eax, exc_top");
+                    _asm.AppendLine($"    jmp {endLabel}");
+
+                    _asm.AppendLine($"{catchLabel}:");
+                    // Сюди стрибаємо З throw - %esp/%ebp вже ВІДНОВЛЕНІ
+                    // (throw сам це зробив перед jmp), тож frameOffset(%ebp)
+                    // і далі коректно вказує на ЦЕЙ САМИЙ кадр.
+                    _asm.AppendLine($"    mov {frameOffset + 12}(%ebp), %eax");
+                    _asm.AppendLine("    mov %eax, exc_top"); // деактивуємо ЦЕЙ обробник і для catch-блоку теж
+                    int catchVarOffset = _varOffsets[ts.CatchVariableName];
+                    _asm.AppendLine("    movsd exc_value, %xmm0");
+                    _asm.AppendLine($"    movsd %xmm0, {catchVarOffset}(%ebp)");
+
+                    _tryDepth++;
+                    CompileBlock(ts.CatchBlock);
+                    _tryDepth--;
+
+                    _asm.AppendLine($"{endLabel}:");
+                    break;
+                }
+
+            case ThrowStatement throwStmt:
+                {
+                    // СПРОЩЕННЯ: throw підтримує лише числові (Number)
+                    // значення - catch-змінна статично типізована як
+                    // Number завжди (дивись CollectVarsAndTypes вище) -
+                    // не можна було б коректно вивести тип для будь-якого
+                    // значення без повноцінного tagged union.
+                    if (InferExprType(throwStmt.Value) != ValType.Number)
+                        throw new Exception("native codegen (Фаза N4): throw підтримує лише числові (Number) значення");
+                    CompileExpression(throwStmt.Value); // -> %xmm0
+                    _asm.AppendLine("    movsd %xmm0, exc_value");
+                    _asm.AppendLine("    mov exc_top, %eax");
+                    _asm.AppendLine("    cmp $0, %eax");
+                    _asm.AppendLine("    je .Lunhandled_throw"); // немає активного try - чесний аварійний вихід, а НЕ спроба продовжити ніби нічого не сталось
+                    _asm.AppendLine("    mov (%eax), %ecx");     // saved_esp
+                    _asm.AppendLine("    mov 4(%eax), %edx");    // saved_ebp
+                    _asm.AppendLine("    mov 8(%eax), %eax");    // catch_label (перезаписуємо вказівник кадру - він уже прочитаний)
+                    _asm.AppendLine("    mov %ecx, %esp");
+                    _asm.AppendLine("    mov %edx, %ebp");
+                    _asm.AppendLine("    jmp *%eax");
+                    break;
+                }
 
             case BlockStatement block:
                 CompileBlock(block);
@@ -1537,6 +1660,21 @@ public class NativeCodegen
         _asm.AppendLine(".lcomm char_buf, 1");   // скретч-байт для print_char (лише Linux-ціль пише через нього)
         _asm.AppendLine(".lcomm heap_ptr, 4");   // поточний bump-покажчик heap_alloc (0 = ще не ініціалізовано)
         _asm.AppendLine(".lcomm heap_end, 4");   // поточна межа (brk) виділеної області
+        _asm.AppendLine(".lcomm exc_top, 4");    // вказівник на НАЙБЛИЖЧИЙ активний try-обробник (0 = немає)
+        _asm.AppendLine(".lcomm exc_value, 8");  // значення останнього throw (Number - double)
+    }
+
+    // Аварійне завершення при throw БЕЗ жодного активного try/catch -
+    // Фаза N4, спільна мітка (емітується ЗАВЖДИ, як і решта хелперів -
+    // мертвий код, якщо throw у файлі взагалі немає). Свідомо НЕ
+    // намагаємось "продовжити ніби нічого не сталось" - неперехоплений
+    // виняток чесно завершує процес, як throw/uncaught у самій VM.
+    private void EmitUnhandledThrowHelper()
+    {
+        _asm.AppendLine(".Lunhandled_throw:");
+        _asm.AppendLine("    mov $1, %ebx");
+        _asm.AppendLine($"    mov ${(_target == NativeTarget.Linux ? 1 : 0)}, %eax");
+        _asm.AppendLine("    int $0x80");
     }
 
     // heap_alloc(розмір у %eax) -> %eax = вказівник на новий блок.
