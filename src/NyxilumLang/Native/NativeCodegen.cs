@@ -3,14 +3,22 @@ using NyxilumLang.AST;
 
 namespace NyxilumLang.Native;
 
-// Куди компілюємо - ОБИДВІ цілі використовують ТОЙ САМИЙ механізм
+// Куди компілюємо - Linux/NyxOS використовують ТОЙ САМИЙ механізм
 // (int 0x80), різні лише НОМЕРИ й КОНВЕНЦІЯ системних викликів:
 //   Linux: exit=1(ebx=код), write=4(ebx=fd,ecx=buf,edx=len)
 //   NyxOS: exit=0, putc=1(ebx=символ), print_string=2(ebx=NUL-
 //          термінований UTF-8 вказівник), draw_pixel=3, get_ticks=4
 //          (див. src/usermode.c у репозиторії NyxOS - той самий
 //          контракт, що вже використовує programs/libnyx.h там).
-public enum NativeTarget { Linux, NyxOS }
+// NyxOSKernel (Фаза N7, 15.09.2026) - ЗОВСІМ ІНША модель: НЕ самостійний
+// виконуваний файл (немає main/_start, немає syscall'ів - Ring0-код не
+// робить syscall сам на себе), а звичайний РЕЛОКОВАНИЙ .o-об'єкт із
+// C-ABI-сумісними символами (як gcc -ffreestanding компілює реальне
+// ядро NyxOS - дивись NATIVE_ROADMAP.md, дослідження build.sh/kstring.c)
+// - кожна функція верхнього рівня стає незалежним, викликаним ІЗ C
+// символом, готовим додати до `ld`-виклику збірки ядра поряд з рештою
+// `.o`.
+public enum NativeTarget { Linux, NyxOS, NyxOSKernel }
 
 // Статичний тип виразу, визначений НА ЕТАПІ КОМПІЛЯЦІЇ (без цього
 // компілятор не знав би, у якому регістрі шукати результат виразу -
@@ -99,6 +107,10 @@ public class NativeCodegen
     private int _nextLocalOffset;
     private string _epilogueLabel = "";
     private bool _isMain;
+    // Чи компілюємо ЗАРАЗ функцію для --target nyxos-kernel (Фаза N7) -
+    // впливає на конвенцію return (int у %eax через C ABI, а не
+    // xmm0/exit-syscall) у ReturnStatement нижче.
+    private bool _isKernelExport;
 
     // Заповнюється ОДИН РАЗ на весь файл у Compile() (НЕ скидається між
     // функціями, на відміну від _varOffsets/_varTypes) - структури
@@ -136,9 +148,19 @@ public class NativeCodegen
     {
         _target = target;
         var allFuncs = program.Statements.OfType<FunctionDeclaration>().ToList();
+        _knownFunctions = allFuncs.Select(f => f.Name).ToHashSet();
+
+        // Фаза N7: --target nyxos-kernel - ЗОВСІМ ІНША модель (немає
+        // main/_start, немає syscall'ів) - повністю окрема гілка, а не
+        // ще один if усередині коду нижче, розрахованого на "один
+        // виконуваний файл з main()".
+        if (target == NativeTarget.NyxOSKernel)
+        {
+            return CompileKernelObject(allFuncs);
+        }
+
         var mainFunc = allFuncs.FirstOrDefault(f => f.Name == "main")
             ?? throw new Exception("native codegen: у файлі немає func main()");
-        _knownFunctions = allFuncs.Select(f => f.Name).ToHashSet();
 
         // Offset'и полів структур і карта методів - ОДИН РАЗ на весь файл
         // (структури оголошуються на верхньому рівні, а не всередині
@@ -299,6 +321,120 @@ public class NativeCodegen
             _asm.AppendLine("    pop %ebp");
             _asm.AppendLine("    ret");
         }
+    }
+
+    // Фаза N7 (--target nyxos-kernel): весь файл - ОДИН релокований
+    // .o з C-ABI-сумісними символами, БЕЗ main/_start, БЕЗ syscall'ів.
+    // СПРОЩЕННЯ ПЕРШОГО кроку (доказ концепції на kstring.c-подібних
+    // модулях - лише чиста логіка з покажчиками): жодних структур/
+    // масивів/замикань/try-catch/print() тут - усі вони або
+    // потребували б heap_alloc чи syscall'ів (яких немає сенсу
+    // включати в об'єкт, призначений влитись у РЕАЛЬНЕ ядро), або
+    // (try/catch) самі по собі безпечні, але їхній helper
+    // "неперехопленого throw" робить syscall exit(), що в Ring0
+    // взагалі не має сенсу - тому й try/catch поки що виключено, а не
+    // лише heap-залежні речі.
+    private string CompileKernelObject(List<FunctionDeclaration> allFuncs)
+    {
+        if (allFuncs.Count == 0)
+            throw new Exception("native codegen (Фаза N7): у файлі немає жодної функції для --target nyxos-kernel");
+
+        _asm.AppendLine("# Згенеровано NativeCodegen.cs (NyxilumLang, Фаза N7 - C-ABI kernel-об'єкт) - НЕ редагувати вручну.");
+        _asm.AppendLine(".section .text");
+        foreach (var func in allFuncs)
+        {
+            CompileKernelFunction(func);
+        }
+
+        if (_rodata.Length > 0)
+        {
+            _asm.AppendLine(".section .rodata");
+            _asm.Append(_rodata);
+        }
+
+        return _asm.ToString();
+    }
+
+    // Компілює ОДНУ функцію верхнього рівня як незалежний, C-ABI-
+    // сумісний символ - той самий макет, що GCC генерує для
+    // `size_t k_strlen(const char* s)` тощо. КЛЮЧОВА відмінність від
+    // CompileFunction/CompileLambda: параметри - 4-БАЙТОВІ cdecl-слоти
+    // (НЕ 8-байтові Number-слоти, якими компілятор користується
+    // всюди-інде), а результат - ЦІЛЕ ЧИСЛО в %eax (НЕ %xmm0), як і
+    // очікує звичайний C-виклик. Рядкові параметри - вже готовий
+    // покажчик (String і так завжди char*-сумісний, конвертація не
+    // потрібна). Числові параметри КОНВЕРТУЮТЬСЯ з C int у Number/
+    // double РІВНО ОДИН РАЗ на вході (і назад - у ReturnStatement) -
+    // РЕШТА ТІЛА далі компілюється ЗВИЧАЙНИМ, уже перевіреним шляхом
+    // без жодного нового коду (той самий "перетворити на межі, а
+    // всередині - як завжди" підхід, що self/env-вказівник в
+    // методах/замиканнях).
+    private void CompileKernelFunction(FunctionDeclaration func)
+    {
+        _varOffsets = new Dictionary<string, int>();
+        _varTypes = new Dictionary<string, ValType>();
+        _varStructName = new Dictionary<string, string>();
+        _tryFrameOffsets = new Dictionary<TryStatement, int>();
+        _tryDepth = 0;
+        _nextLocalOffset = 0;
+        _isMain = false;
+        _isKernelExport = true;
+
+        var numericParams = new List<(string Name, int CabiOffset)>();
+        for (int i = 0; i < func.Parameters.Count; i++)
+        {
+            var param = func.Parameters[i];
+            int cabiOffset = 8 + i * 4; // C ABI: 4 байти на параметр, НЕ 8
+            if (param.Type == "string")
+            {
+                _varOffsets[param.Name] = cabiOffset; // сирий покажчик - без конвертації
+                _varTypes[param.Name] = ValType.String;
+            }
+            else
+            {
+                if (param.Type is not ("any" or "i32" or "f64" or "int" or "number"))
+                    throw new Exception($"native codegen (Фаза N7): kernel-параметр '{param.Name}' типу '{param.Type}' не підтримується - лише string чи числові типи");
+                numericParams.Add((param.Name, cabiOffset));
+                _nextLocalOffset -= 8;
+                _varOffsets[param.Name] = _nextLocalOffset;
+                _varTypes[param.Name] = ValType.Number;
+            }
+        }
+
+        CollectVarsAndTypes(func.Body);
+
+        _epilogueLabel = $".L{func.Name}_epilogue";
+        _asm.AppendLine($".global {func.Name}");
+        _asm.AppendLine($"{func.Name}:");
+        _asm.AppendLine("    push %ebp");
+        _asm.AppendLine("    mov %esp, %ebp");
+        int localBytes = -_nextLocalOffset;
+        if (localBytes > 0)
+        {
+            _asm.AppendLine($"    sub ${localBytes}, %esp");
+        }
+
+        // Числові C-ABI параметри (4-байтовий int) -> звичайні Number-
+        // локалі (8-байтовий double) - ОДИН РАЗ на вході.
+        foreach (var (name, cabiOffset) in numericParams)
+        {
+            _asm.AppendLine($"    mov {cabiOffset}(%ebp), %eax");
+            _asm.AppendLine("    cvtsi2sd %eax, %xmm0");
+            _asm.AppendLine($"    movsd %xmm0, {_varOffsets[name]}(%ebp)");
+        }
+
+        foreach (var stmt in func.Body.Statements)
+        {
+            CompileStatement(stmt);
+        }
+
+        _asm.AppendLine("    mov $0, %eax"); // дефолт при "провалі" за кінець без явного return (як C - falling off the end)
+        _asm.AppendLine($"{_epilogueLabel}:");
+        _asm.AppendLine("    mov %ebp, %esp");
+        _asm.AppendLine("    pop %ebp");
+        _asm.AppendLine("    ret");
+
+        _isKernelExport = false;
     }
 
     // Виділяє слот КОЖНІЙ локальній змінній (8 байтів - Фаза N3) і
@@ -633,6 +769,13 @@ public class NativeCodegen
 
             case PrintStatement printStmt:
                 {
+                    // Фаза N7: print() робить syscall (int 0x80) - у
+                    // Ring0-коді ядра це мало б катастрофічно інший сенс
+                    // (не "звернутись до ОС", а буквально програмний
+                    // переривання ВСЕРЕДИНІ самої ОС) - чесна заборона,
+                    // а не мовчазна генерація небезпечного коду.
+                    if (_target == NativeTarget.NyxOSKernel)
+                        throw new Exception("native codegen (Фаза N7): print() не підтримується для --target nyxos-kernel (це Ring0-код - syscall тут не має сенсу)");
                     // РЕАЛЬНА ПОМИЛКА Фази N1: `print(x)` у NyxilumLang НЕ
                     // виклик функції (CallExpression) - Parser.cs розбирає
                     // його як ОКРЕМИЙ вузол AST, PrintStatement.
@@ -704,8 +847,19 @@ public class NativeCodegen
                     if (returnStmt.Value != null)
                     {
                         var t = InferExprType(returnStmt.Value);
-                        CompileExpression(returnStmt.Value); // -> %xmm0 (Number) чи %eax (Bool)
-                        if (_isMain)
+                        CompileExpression(returnStmt.Value); // -> %xmm0 (Number) чи %eax (Bool/String)
+                        if (_isKernelExport)
+                        {
+                            // Фаза N7: C ABI - ціле число в %eax (як
+                            // звичайний C-return), НЕ %xmm0. Рядок - уже
+                            // коректний покажчик у %eax, конвертація не
+                            // потрібна (String завжди char*-сумісний).
+                            if (t == ValType.Number)
+                                _asm.AppendLine("    cvttsd2si %xmm0, %eax");
+                            else if (t != ValType.String)
+                                throw new Exception("native codegen (Фаза N7): kernel-функції можуть повертати лише число (як C int) чи рядок (як char*)");
+                        }
+                        else if (_isMain)
                         {
                             // Код виходу ЗАВЖДИ ціле число (syscall exit
                             // чекає його в %ebx) - Number-результат
@@ -721,7 +875,7 @@ public class NativeCodegen
                     else
                     {
                         _asm.AppendLine("    mov $0, %eax");
-                        if (!_isMain) _asm.AppendLine("    pxor %xmm0, %xmm0");
+                        if (!_isMain && !_isKernelExport) _asm.AppendLine("    pxor %xmm0, %xmm0");
                     }
                     _asm.AppendLine($"    jmp {_epilogueLabel}");
                     break;
@@ -804,6 +958,14 @@ public class NativeCodegen
 
             case TryStatement ts:
                 {
+                    // Фаза N7: не через якусь небезпеку самого try/catch
+                    // (він - чисте стек/регістрове маніпулювання, цілком
+                    // безпечне й у Ring0) - а через EmitUnhandledThrowHelper,
+                    // який на неперехопленому throw робить syscall exit(),
+                    // що в коді ЯДРА взагалі не має сенсу. Чесна заборона
+                    // ЗАРАЗ, а не тонкий баг пізніше.
+                    if (_target == NativeTarget.NyxOSKernel)
+                        throw new Exception("native codegen (Фаза N7): try/catch не підтримується для --target nyxos-kernel (обробник неперехопленого throw робить syscall exit(), якого в коді ядра немає)");
                     // setjmp/longjmp-стиль (Фаза N4): "кадр обробника" -
                     // 16 анонімних байтів на СТЕКУ ЦІЄЇ функції (offset
                     // обчислено заздалегідь у CollectVarsAndTypes,
@@ -858,6 +1020,8 @@ public class NativeCodegen
 
             case ThrowStatement throwStmt:
                 {
+                    if (_target == NativeTarget.NyxOSKernel)
+                        throw new Exception("native codegen (Фаза N7): throw не підтримується для --target nyxos-kernel (той самий обмежувач, що try/catch)");
                     // СПРОЩЕННЯ: throw підтримує лише числові (Number)
                     // значення - catch-змінна статично типізована як
                     // Number завжди (дивись CollectVarsAndTypes вище) -
@@ -959,10 +1123,11 @@ public class NativeCodegen
 
             case IndexExpression idx:
                 {
-                    if (InferExprType(idx.Array) != ValType.Array)
-                        throw new Exception("native codegen: індексування [..] підтримується лише для масивів");
+                    var containerType = InferExprType(idx.Array);
+                    if (containerType != ValType.Array && containerType != ValType.String)
+                        throw new Exception("native codegen: індексування [..] підтримується лише для масивів чи рядків");
                     if (InferExprType(idx.Index) != ValType.Number)
-                        throw new Exception("native codegen: індекс масиву має бути числом");
+                        throw new Exception("native codegen: індекс має бути числом");
                     CompileExpression(idx.Array);                    // -> %eax (вказівник)
                     _asm.AppendLine("    push %eax");
                     CompileExpression(idx.Index);                    // -> %xmm0
@@ -971,7 +1136,21 @@ public class NativeCodegen
                     // ВІДОМЕ, свідомо НЕ виправлене обмеження цієї фази:
                     // БЕЗ перевірки меж - вихід за [0, довжина) читає за
                     // межі виділеного блоку (Фаза N4+).
-                    _asm.AppendLine("    movsd 8(%eax,%ecx,8), %xmm0");
+                    if (containerType == ValType.Array)
+                    {
+                        _asm.AppendLine("    movsd 8(%eax,%ecx,8), %xmm0");
+                    }
+                    else
+                    {
+                        // s[i] (Фаза N7) - БАЙТ (0-255) за позицією i в
+                        // NUL-термінованому UTF-8-буфері (String) -
+                        // потрібно для k_strlen-подібної логіки
+                        // ("поки s[i] != 0"). movzbl - нуль-розширення
+                        // байта до 32-біт ПЕРЕД конвертацією в double
+                        // (щоб байти 128-255 не стали від'ємними).
+                        _asm.AppendLine("    movzbl (%eax,%ecx,1), %edx");
+                        _asm.AppendLine("    cvtsi2sd %edx, %xmm0");
+                    }
                     break;
                 }
 
@@ -1147,6 +1326,15 @@ public class NativeCodegen
 
             case CallExpression call:
                 {
+                    // Фаза N7, СПРОЩЕННЯ ПЕРШОГО кроку: kernel-функції
+                    // (C ABI, 4-байтові параметри) НЕ можуть викликати
+                    // одна одну ЧЕРЕЗ ЦЕЙ шлях - увесь виклик нижче
+                    // передбачає ЗВИЧАЙНУ 8-байтову Number-конвенцію
+                    // цього компілятора, а НЕ C-ABI - змішування дало б
+                    // тихо неправильний код (kstring.c й так не мав
+                    // внутрішніх викликів - не блокує поточну мету).
+                    if (_target == NativeTarget.NyxOSKernel)
+                        throw new Exception("native codegen (Фаза N7): виклики функцій усередині --target nyxos-kernel ще не підтримуються (різні calling convention)");
                     // f(args), де f - плоский ідентифікатор: АБО справжня
                     // функція з ЦЬОГО Ж файлу (call.FunctionName в
                     // _knownFunctions), АБО (Фаза N4) локальна змінна-

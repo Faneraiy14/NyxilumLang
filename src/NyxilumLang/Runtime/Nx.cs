@@ -72,7 +72,15 @@ public class Nx
             for (int i = 2; i < args.Length; i++)
             {
                 if (args[i] == "-o" && i + 1 < args.Length) outPath = args[++i];
-                else if (args[i] == "--target" && i + 1 < args.Length) target = args[++i] == "nyxos" ? NyxilumLang.Native.NativeTarget.NyxOS : NyxilumLang.Native.NativeTarget.Linux;
+                else if (args[i] == "--target" && i + 1 < args.Length)
+                {
+                    target = args[++i] switch
+                    {
+                        "nyxos" => NyxilumLang.Native.NativeTarget.NyxOS,
+                        "nyxos-kernel" => NyxilumLang.Native.NativeTarget.NyxOSKernel,
+                        _ => NyxilumLang.Native.NativeTarget.Linux,
+                    };
+                }
             }
             RunCompileNative(args[1], outPath, target);
             return;
@@ -248,8 +256,8 @@ public class Nx
         }
     }
 
-    // "nx compile-native <file.nx> [-o output] [--target linux|nyxos]" —
-    // Фаза N1-N2 (NATIVE_ROADMAP.md): компілює підмножину мови у СПРАВЖНІЙ
+    // "nx compile-native <file.nx> [-o output] [--target linux|nyxos|nyxos-kernel]" —
+    // Фаза N1-N7 (NATIVE_ROADMAP.md): компілює підмножину мови у СПРАВЖНІЙ
     // x86 (32-біт) машинний код через NativeCodegen.cs + `as`/`ld` (той
     // самий інструментарій, що збирає NyxOS) - НЕ через VirtualMachine.cs.
     //
@@ -260,7 +268,12 @@ public class Nx
     // заголовків узагалі) за адресою 0xC00000 (PROC_CODE_BASE в
     // src/process.c репозиторію NyxOS) - готовий для NyxOS-команди
     // "install"/"run" (той самий формат, що programs/hello.c там),
-    // NyxOS-syscall'и замість Linux.
+    // NyxOS-syscall'и замість Linux - user-процес (Ring3).
+    // --target nyxos-kernel (Фаза N7) - ЗОВСІМ ІНША модель: НЕ виконуваний
+    // файл узагалі, а звичайний РЕЛОКОВАНИЙ .o з C-ABI-сумісними
+    // символами (немає main/_start, немає syscall'ів) - призначений
+    // влитись у РЕАЛЬНУ збірку ядра NyxOS (Ring0) поряд з рештою .o
+    // файлів (build.sh у репозиторії NyxOS), НЕ лінкується тут узагалі.
     private static void RunCompileNative(string path, string? outPath, NyxilumLang.Native.NativeTarget target)
     {
         if (!File.Exists(path))
@@ -292,6 +305,16 @@ public class Nx
             {
                 RunShell("ld", $"-m elf_i386 {objPath} -o {outPath}");
                 Console.WriteLine($"✅ Скомпільовано в СПРАВЖНІЙ ELF-бінарник: {outPath}");
+            }
+            else if (target == NyxilumLang.Native.NativeTarget.NyxOSKernel)
+            {
+                // Фаза N7: НЕ виконуваний файл - звичайний релокований .o
+                // з C-ABI-сумісними символами (немає main/_start - жодного
+                // лінкування тут НЕ робимо, `as` уже дав готовий .o,
+                // призначений влитись у РЕАЛЬНУ збірку ядра поряд з
+                // рештою `.o` файлів (дивись build.sh у репозиторії NyxOS)).
+                Console.WriteLine($"✅ Скомпільовано в C-ABI-сумісний об'єкт для ядра NyxOS: {objPath}");
+                Console.WriteLine("   Додай його до ld-виклику збірки ядра (build.sh у репозиторії NyxOS) поряд з рештою .o файлів.");
             }
             else
             {
