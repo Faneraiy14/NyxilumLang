@@ -771,10 +771,11 @@ public class NativeCodegen
         UnaryExpression { Operator: "!" } => ValType.Bool,
         // Спрощення Фази N3: УСІ функції вважаються Number-, bool-
         // функції поки не підтримуються (дивись ReturnStatement нижче).
-        // ВИНЯТОК (Фаза N7): kmalloc() - зовнішній примітив ядра
-        // NyxOS (kheap.c, НЕ функція з ЦЬОГО файлу) - повертає
-        // ВКАЗІВНИК (void*), а не число.
-        CallExpression { FunctionName: "kmalloc" } => ValType.String,
+        // ВИНЯТОК (Фаза N7): відомі ЗОВНІШНІ примітиви ядра NyxOS (НЕ
+        // функції з ЦЬОГО файлу - реальні C-функції з kheap.c/gfx.c/
+        // vga_font.c, лінкер резолвить сам) - дивись ExternalKernelReturnType.
+        CallExpression callExpr when _target == NativeTarget.NyxOSKernel && !_knownFunctions.Contains(callExpr.FunctionName)
+            => ExternalKernelReturnType(callExpr.FunctionName),
         CallExpression => ValType.Number,
         BinaryExpression { Operator: "=" } assign => InferExprType(assign.Right),
         BinaryExpression { Operator: "&&" or "||" } => ValType.Bool,
@@ -808,6 +809,25 @@ public class NativeCodegen
         StructInitExpression si => si.StructName,
         _ => throw new Exception($"native codegen (Фаза N3): доступ до поля підтримується лише через змінну чи StructName{{...}} напряму, не через {expr.GetType().Name} (Фаза N4+)")
     };
+
+    // Тип РЕЗУЛЬТАТУ відомих зовнішніх примітивів ядра NyxOS (Фаза N7) -
+    // НЕ функцій з ЦЬОГО файлу, а справжніх C-функцій з kheap.c/gfx.c/
+    // vga_font.c тощо, чиї .o лінкер підключить сам, коли результат
+    // цього компілятора влиється в реальну збірку ядра. За
+    // ЗАМОВЧУВАННЯМ (тут відсутні) - Number, що покриває більшість
+    // (gfx_width/height/rgb, cyrillic_codepoint_to_byte тощо). Лише ті,
+    // що ПОВЕРТАЮТЬ ВКАЗІВНИК чи bool, потребують явного запису тут -
+    // інакше InferExprType дав би Number, і, наприклад,
+    // `!gfx_is_available()` читав би СМІТТЯ з %eax (результат справді
+    // лежав би в %xmm0, конвертований як double, а не bool в %eax).
+    private static readonly Dictionary<string, ValType> ExternalKernelReturnTypes = new()
+    {
+        ["kmalloc"] = ValType.String,          // kheap.c - void* -> вказівник
+        ["gfx_is_available"] = ValType.Bool,    // gfx.c - int, семантично bool (0/1)
+    };
+
+    private ValType ExternalKernelReturnType(string functionName) =>
+        ExternalKernelReturnTypes.TryGetValue(functionName, out var t) ? t : ValType.Number;
 
     private void CompileBlock(BlockStatement block)
     {
@@ -1421,15 +1441,18 @@ public class NativeCodegen
                     // окрема гілка, не спроба "втиснути" у код нижче.
                     if (_target == NativeTarget.NyxOSKernel)
                     {
-                        // kmalloc/kfree (Фаза N7) - НЕ функції з ЦЬОГО
-                        // файлу, а ЗОВНІШНІ символи з РЕАЛЬНОГО kheap.c
-                        // ядра NyxOS - лінкер (не цей компілятор)
-                        // резолвить `call kmalloc` у той .o, коли
-                        // результат влиється в реальну збірку ядра
-                        // поряд з рештою .o файлів.
-                        bool isExternalKernelPrimitive = call.FunctionName is "kmalloc" or "kfree";
-                        if (!_knownFunctions.Contains(call.FunctionName) && !isExternalKernelPrimitive)
-                            throw new Exception($"native codegen (Фаза N7): невідома функція '{call.FunctionName}' (лише функції з ЦЬОГО Ж файлу чи kmalloc/kfree з kheap.c ядра NyxOS)");
+                        // Будь-яке ім'я, що НЕ є функцією з ЦЬОГО файлу
+                        // (Фаза N7) - вважаємо ЗОВНІШНІМ символом
+                        // РЕАЛЬНОГО ядра NyxOS (kheap.c/gfx.c/vga_font.c
+                        // тощо - NyxilumLang не має синтаксису "extern",
+                        // тож перевірити ЗАЗДАЛЕГІДЬ, що такий символ і
+                        // справді існує, тут неможливо) - лінкер (не цей
+                        // компілятор) резолвить `call funcName`, коли
+                        // .o влиється в реальну збірку ядра; СПРАВЖНЯ
+                        // помилка (typo, неіснуюче ім'я) виявиться на
+                        // етапі ЛІНКУВАННЯ ("undefined reference") -
+                        // пізніше, ніж хотілось би, але не мовчки.
+                        bool isKnownFunc = _knownFunctions.Contains(call.FunctionName);
 
                         int pushedBytes = 0;
                         for (int i = call.Arguments.Count - 1; i >= 0; i--)
@@ -1455,10 +1478,15 @@ public class NativeCodegen
                         if (pushedBytes > 0)
                             _asm.AppendLine($"    add ${pushedBytes}, %esp");
                         // Результат callee - у %eax (C ABI). Конвертуємо
-                        // до конвенції ВИРАЗУ цього компілятора: kmalloc
-                        // повертає вказівник (String - УЖЕ %eax, нічого
-                        // робити не треба), решта - Number (%xmm0).
-                        if (call.FunctionName != "kmalloc")
+                        // до конвенції ВИРАЗУ цього компілятора: String/
+                        // Bool - УЖЕ %eax (нічого робити не треба),
+                        // Number - конвертуємо в %xmm0. Для ВІДОМИХ
+                        // (з цього файлу) функцій - СПРОЩЕННЯ: досі
+                        // вважаємо Number (той самий підхід, що решта
+                        // компілятора), для НЕВІДОМИХ (зовнішніх) -
+                        // дивимось у ExternalKernelReturnType.
+                        var retType = isKnownFunc ? ValType.Number : ExternalKernelReturnType(call.FunctionName);
+                        if (retType == ValType.Number)
                             _asm.AppendLine("    cvtsi2sd %eax, %xmm0");
                         break;
                     }
