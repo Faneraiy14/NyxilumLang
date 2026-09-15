@@ -1,0 +1,134 @@
+var col = 0.0
+var row = 0.0
+var cols_total = 0.0
+var rows_total = 0.0
+var fg_color = 0.0
+var bg_color = 0.0
+var grid = ""
+
+func redraw_all() {
+    gfx_clear(bg_color)
+    var r = 0
+    while (r < rows_total) {
+        var c = 0
+        while (c < cols_total) {
+            var ch = grid[r * 250 + c]
+            if (ch != 0) {
+                gfx_draw_char(c * 8, r * 16, ch, fg_color, bg_color)
+            }
+            c = c + 1
+        }
+        r = r + 1
+    }
+}
+
+func gconsole_init() {
+    if (!gfx_is_available()) {
+        return
+    }
+    cols_total = gfx_width() / 8
+    rows_total = gfx_height() / 16
+    if (cols_total > 250) {
+        cols_total = 250
+    }
+    if (rows_total > 80) {
+        rows_total = 80
+    }
+
+    fg_color = gfx_rgb(80, 220, 100)
+    bg_color = gfx_rgb(10, 15, 10)
+    col = 0
+    row = 0
+
+    grid = kmalloc(80 * 250)
+    var r = 0
+    while (r < 80) {
+        var c = 0
+        while (c < 250) {
+            grid[r * 250 + c] = 0
+            c = c + 1
+        }
+        r = r + 1
+    }
+    gfx_clear(bg_color)
+}
+
+func scroll_up() {
+    var r = 0
+    while (r < rows_total - 1) {
+        var c = 0
+        while (c < cols_total) {
+            grid[r * 250 + c] = grid[(r + 1) * 250 + c]
+            c = c + 1
+        }
+        r = r + 1
+    }
+    var c2 = 0
+    while (c2 < cols_total) {
+        grid[(rows_total - 1) * 250 + c2] = 0
+        c2 = c2 + 1
+    }
+    row = rows_total - 1
+    col = 0
+    redraw_all()
+}
+
+func gconsole_refresh() {
+    if (!gfx_is_available()) {
+        return
+    }
+    redraw_all()
+}
+
+func gconsole_putc(c: i32) {
+    if (!gfx_is_available()) {
+        return
+    }
+
+    if (c == 10) {
+        col = 0
+        row = row + 1
+    } else if (c == 8) {
+        if (col > 0) {
+            col = col - 1
+            grid[row * 250 + col] = 0
+            gfx_fill_rect(col * 8, row * 16, 8, 16, bg_color)
+        }
+    } else {
+        grid[row * 250 + col] = c
+        gfx_draw_char(col * 8, row * 16, c, fg_color, bg_color)
+        col = col + 1
+        if (col >= cols_total) {
+            col = 0
+            row = row + 1
+        }
+    }
+
+    if (row >= rows_total) {
+        scroll_up()
+    }
+}
+
+func gconsole_print(str: string) {
+    var i = 0
+    while (str[i] != 0) {
+        var b0 = str[i]
+        if (b0 < 128) {
+            gconsole_putc(b0)
+            i = i + 1
+        } else if (b0 >= 192 && b0 < 224 && str[i + 1] != 0) {
+            var b1 = str[i + 1]
+            var codepoint = (b0 % 32) * 64 + (b1 % 64)
+            var byte_code = cyrillic_codepoint_to_byte(codepoint)
+            if (byte_code != 0) {
+                gconsole_putc(byte_code)
+            } else {
+                gconsole_putc(63)
+            }
+            i = i + 2
+        } else {
+            gconsole_putc(63)
+            i = i + 1
+        }
+    }
+}

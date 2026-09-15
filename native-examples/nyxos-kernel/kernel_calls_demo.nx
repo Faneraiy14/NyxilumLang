@@ -1,0 +1,23 @@
+func k_strlen(s: string) {
+    var len = 0
+    while (s[len] != 0) {
+        len = len + 1
+    }
+    return len
+}
+
+func k_strlen_plus_one(s: string) {
+    return k_strlen(s) + 1
+}
+
+func make_greeting(n: size_t) {
+    var p = kmalloc(n)
+    p[0] = 72
+    p[1] = 105
+    p[2] = 0
+    return p
+}
+
+func free_it(p: string) {
+    kfree(p)
+}

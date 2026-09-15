@@ -1,0 +1,38 @@
+func k_strlen(s: string) {
+    var len = 0
+    while (s[len] != 0) {
+        len = len + 1
+    }
+    return len
+}
+
+func k_streq(a: string, b: string) {
+    var i = 0
+    while (a[i] != 0 && b[i] != 0) {
+        if (a[i] != b[i]) {
+            return 0
+        }
+        i = i + 1
+    }
+    return a[i] == b[i]
+}
+
+func k_starts_with(str: string, prefix: string) {
+    var i = 0
+    while (prefix[i] != 0) {
+        if (str[i] != prefix[i]) {
+            return 0
+        }
+        i = i + 1
+    }
+    return 1
+}
+
+func k_strcpy(dst: string, src: string, max_len: size_t) {
+    var i = 0
+    while (i < max_len - 1 && src[i] != 0) {
+        dst[i] = src[i]
+        i = i + 1
+    }
+    dst[i] = 0
+}
