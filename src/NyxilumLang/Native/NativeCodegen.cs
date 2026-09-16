@@ -1791,6 +1791,34 @@ public class NativeCodegen
                         _asm.AppendLine("    pop %eax");
                         _asm.AppendLine(bin.Operator == "+" ? "    add %ecx, %eax" : "    sub %ecx, %eax");
                     }
+                    else if (leftType == ValType.String && _target == NativeTarget.NyxOSKernel
+                             && (bin.Operator == "==" || bin.Operator == "!=")
+                             && (InferExprType(bin.Right) == ValType.String || InferExprType(bin.Right) == ValType.Number))
+                    {
+                        // Порівняння вказівників (Фаза N8, 16.09.2026) -
+                        // ЛИШЕ ідентичність АДРЕС (та сама "сира адреса в
+                        // %eax"), НЕ порівняння ЗМІСТУ (strcmp) - точнісінько
+                        // те, що потрібне для null-перевірок (kheap.c:
+                        // "current != 0", "header->next == header" тощо).
+                        // Правий операнд МОЖЕ бути Number (звичайний
+                        // літерал 0 для "порівняй з null") - тоді
+                        // конвертуємо його в ту саму 32-бітну адресну
+                        // форму (cvttsd2si), а НЕ навпаки (вказівник як
+                        // double не має сенсу). Результат - Bool (0/1 у
+                        // %eax), як і всюди в решті компілятора.
+                        CompileExpression(bin.Left);
+                        _asm.AppendLine("    push %eax");
+                        CompileExpression(bin.Right);
+                        if (InferExprType(bin.Right) == ValType.Number)
+                        {
+                            _asm.AppendLine("    cvttsd2si %xmm0, %eax");
+                        }
+                        _asm.AppendLine("    mov %eax, %ecx");
+                        _asm.AppendLine("    pop %eax");
+                        _asm.AppendLine("    cmp %ecx, %eax");
+                        _asm.AppendLine(bin.Operator == "==" ? "    sete %al" : "    setne %al");
+                        _asm.AppendLine("    movzbl %al, %eax");
+                    }
                     else if (leftType == ValType.String)
                     {
                         // ЖОДНИХ ІНШИХ операцій над рядками ще не
