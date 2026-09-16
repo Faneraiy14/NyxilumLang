@@ -770,6 +770,14 @@ public class NativeCodegen
         UnaryExpression { Operator: "-" } u => InferExprType(u.Operand),
         UnaryExpression { Operator: "!" } => ValType.Bool,
         UnaryExpression { Operator: "~" } => ValType.Number,
+        // peek32/poke32 (Фаза N8, 16.09.2026) - ВБУДОВАНІ інтринзики
+        // компілятора (НЕ зовнішні символи ядра - лінкер про них НІЧОГО
+        // не знає, компілятор сам вставляє сирі mov-інструкції), тому
+        // перевіряються ПЕРШИМИ, ще ДО загального "невідоме ім'я -
+        // зовнішня функція" припущення нижче. peekPtr читає покажчик
+        // (String), peekNum/pokeNum/pokePtr - прості числа/покажчики.
+        CallExpression { FunctionName: "peekPtr" } when _target == NativeTarget.NyxOSKernel => ValType.String,
+        CallExpression { FunctionName: "peekNum" or "pokeNum" or "pokePtr" } when _target == NativeTarget.NyxOSKernel => ValType.Number,
         // Спрощення Фази N3: УСІ функції вважаються Number-, bool-
         // функції поки не підтримуються (дивись ReturnStatement нижче).
         // ВИНЯТОК (Фаза N7): відомі ЗОВНІШНІ примітиви ядра NyxOS (НЕ
@@ -1460,6 +1468,60 @@ public class NativeCodegen
                     // окрема гілка, не спроба "втиснути" у код нижче.
                     if (_target == NativeTarget.NyxOSKernel)
                     {
+                        // peek32/poke32 (Фаза N8, 16.09.2026) - читання/
+                        // запис 4-байтового слова за адресою (String -
+                        // той самий "сирий вказівник у %eax", що ВЖЕ дає
+                        // kmalloc). Потрібно для kheap.c-подібного коду:
+                        // мова НЕ має справжніх структур-як-сирої-пам'яті
+                        // й адресної арифметики (Фаза N8, наступний крок
+                        // після побітових операторів) - це МІНІМАЛЬНИЙ,
+                        // достатній примітив замість повної системи
+                        // вказівників: "поле" структури в пам'яті - це
+                        // просто (базова_адреса + зсув), а peek/poke
+                        // читає/пише РІВНО 4 байти там. ЧОТИРИ варіанти
+                        // (не один) - бо статичний ТИП результату
+                        // (Number для size/flags, String/вказівник для
+                        // полів на кшталт "next") компілятор мусить
+                        // знати ЗАЗДАЛЕГІДЬ (InferExprType вище), а не
+                        // вгадувати за контекстом використання.
+                        if (call.FunctionName == "peekNum" && call.Arguments.Count == 1)
+                        {
+                            CompileExpression(call.Arguments[0]); // адреса (String) -> %eax
+                            _asm.AppendLine("    mov (%eax), %eax");
+                            _asm.AppendLine("    cvtsi2sd %eax, %xmm0");
+                            break;
+                        }
+                        if (call.FunctionName == "peekPtr" && call.Arguments.Count == 1)
+                        {
+                            CompileExpression(call.Arguments[0]); // адреса (String) -> %eax
+                            _asm.AppendLine("    mov (%eax), %eax"); // результат - теж String (вказівник), лишається в %eax
+                            break;
+                        }
+                        if (call.FunctionName == "pokeNum" && call.Arguments.Count == 2)
+                        {
+                            CompileExpression(call.Arguments[0]); // адреса -> %eax
+                            _asm.AppendLine("    push %eax");
+                            CompileExpression(call.Arguments[1]); // значення (Number) -> %xmm0
+                            _asm.AppendLine("    cvttsd2si %xmm0, %ecx");
+                            _asm.AppendLine("    pop %eax");
+                            _asm.AppendLine("    mov %ecx, (%eax)");
+                            _asm.AppendLine("    xor %eax, %eax");
+                            _asm.AppendLine("    cvtsi2sd %eax, %xmm0"); // "повертає" 0 - результат ніде реально не використовується
+                            break;
+                        }
+                        if (call.FunctionName == "pokePtr" && call.Arguments.Count == 2)
+                        {
+                            CompileExpression(call.Arguments[0]); // адреса -> %eax
+                            _asm.AppendLine("    push %eax");
+                            CompileExpression(call.Arguments[1]); // значення (String/вказівник) -> %eax
+                            _asm.AppendLine("    mov %eax, %ecx");
+                            _asm.AppendLine("    pop %eax");
+                            _asm.AppendLine("    mov %ecx, (%eax)");
+                            _asm.AppendLine("    xor %eax, %eax");
+                            _asm.AppendLine("    cvtsi2sd %eax, %xmm0");
+                            break;
+                        }
+
                         // Будь-яке ім'я, що НЕ є функцією з ЦЬОГО файлу
                         // (Фаза N7) - вважаємо ЗОВНІШНІМ символом
                         // РЕАЛЬНОГО ядра NyxOS (kheap.c/gfx.c/vga_font.c
@@ -1707,15 +1769,38 @@ public class NativeCodegen
                     {
                         CompileNumberBinary(bin);
                     }
+                    else if (leftType == ValType.String && _target == NativeTarget.NyxOSKernel
+                             && (bin.Operator == "+" || bin.Operator == "-")
+                             && InferExprType(bin.Right) == ValType.Number)
+                    {
+                        // Арифметика вказівників (Фаза N8, 16.09.2026) -
+                        // ЛИШЕ для kernel-target: String тут - це "сирий
+                        // вказівник у %eax" (те саме значення, що kmalloc
+                        // повертає) - "ptr + N" зсуває адресу на N БАЙТІВ
+                        // (як char* у C, НЕ як T* з масштабуванням на
+                        // sizeof(T) - той масштаб рахує сам код мовою,
+                        // множенням, як kheap.c вже робить руками для
+                        // "sizeof(block_header_t)"). СВІДОМО не чіпає
+                        // Linux/nyxos-userspace цілі - там рядки лишаються
+                        // ЛИШЕ .rodata-текстом, арифметика над ними була б
+                        // безглуздою (і небезпечною - .rodata read-only).
+                        CompileExpression(bin.Left);   // адреса -> %eax
+                        _asm.AppendLine("    push %eax");
+                        CompileExpression(bin.Right);  // зсув (Number) -> %xmm0
+                        _asm.AppendLine("    cvttsd2si %xmm0, %ecx");
+                        _asm.AppendLine("    pop %eax");
+                        _asm.AppendLine(bin.Operator == "+" ? "    add %ecx, %eax" : "    sub %ecx, %eax");
+                    }
                     else if (leftType == ValType.String)
                     {
-                        // ЖОДНИХ операцій над рядками ще не підтримуємо -
-                        // навіть ==/!= НЕ додаємо тут: CompileBoolBinary
-                        // порівняв би просто АДРЕСИ (identity), а НЕ ЗМІСТ
-                        // (потрібен strcmp), і незрозуміло, чи це взагалі
-                        // збігається з тим, як порівнює рядки VM - чесна
-                        // помилка компіляції краща за неперевірену,
-                        // можливо хибну поведінку (Фаза N4+).
+                        // ЖОДНИХ ІНШИХ операцій над рядками ще не
+                        // підтримуємо - навіть ==/!= НЕ додаємо тут:
+                        // CompileBoolBinary порівняв би просто АДРЕСИ
+                        // (identity), а НЕ ЗМІСТ (потрібен strcmp), і
+                        // незрозуміло, чи це взагалі збігається з тим, як
+                        // порівнює рядки VM - чесна помилка компіляції
+                        // краща за неперевірену, можливо хибну поведінку
+                        // (Фаза N4+).
                         throw new Exception($"native codegen (Фаза N3): оператор '{bin.Operator}' для рядків ще не підтримується (потрібне порівняння ЗМІСТУ/strcmp - Фаза N4+)");
                     }
                     else if (leftType == ValType.Array)
