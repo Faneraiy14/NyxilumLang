@@ -539,9 +539,22 @@ public class Parser
     }
 
     private ExpressionNode ParseOr() { var left = ParseAnd(); int n = 0; while (Peek().Type == TokenType.Operator && Peek().Value == "||") { ChainCheck(++n); Advance(); var right = ParseAnd(); left = new BinaryExpression(left, "||", right); } return left; }
-    private ExpressionNode ParseAnd() { var left = ParseEquality(); int n = 0; while (Peek().Type == TokenType.Operator && Peek().Value == "&&") { ChainCheck(++n); Advance(); var right = ParseEquality(); left = new BinaryExpression(left, "&&", right); } return left; }
+    private ExpressionNode ParseAnd() { var left = ParseBitOr(); int n = 0; while (Peek().Type == TokenType.Operator && Peek().Value == "&&") { ChainCheck(++n); Advance(); var right = ParseBitOr(); left = new BinaryExpression(left, "&&", right); } return left; }
+    // Побітові оператори (| ^ &) - Фаза N8 (16.09.2026), додані для
+    // native kernel-target (pkg.c-подібний код: розбір little-endian
+    // байтів, XOR-хеші тощо) - той самий C-подібний порядок
+    // пріоритетів, що в будь-якій мові цієї родини: | слабший за ^,
+    // ^ слабший за &, & слабший за == - "a == b & c" читається як
+    // "a == (b & c)", НЕ "(a == b) & c".
+    private ExpressionNode ParseBitOr() { var left = ParseBitXor(); int n = 0; while (Peek().Type == TokenType.Operator && Peek().Value == "|") { ChainCheck(++n); Advance(); var right = ParseBitXor(); left = new BinaryExpression(left, "|", right); } return left; }
+    private ExpressionNode ParseBitXor() { var left = ParseBitAnd(); int n = 0; while (Peek().Type == TokenType.Operator && Peek().Value == "^") { ChainCheck(++n); Advance(); var right = ParseBitAnd(); left = new BinaryExpression(left, "^", right); } return left; }
+    private ExpressionNode ParseBitAnd() { var left = ParseEquality(); int n = 0; while (Peek().Type == TokenType.Operator && Peek().Value == "&") { ChainCheck(++n); Advance(); var right = ParseEquality(); left = new BinaryExpression(left, "&", right); } return left; }
     private ExpressionNode ParseEquality() { var left = ParseComparison(); int n = 0; while (Peek().Type == TokenType.Operator && (Peek().Value == "==" || Peek().Value == "!=")) { ChainCheck(++n); string op = Advance().Value; var right = ParseComparison(); left = new BinaryExpression(left, op, right); } return left; }
-    private ExpressionNode ParseComparison() { var left = ParseAddition(); int n = 0; while (Peek().Type == TokenType.Operator && (Peek().Value == "<" || Peek().Value == "<=" || Peek().Value == ">" || Peek().Value == ">=")) { ChainCheck(++n); string op = Advance().Value; var right = ParseAddition(); left = new BinaryExpression(left, op, right); } return left; }
+    private ExpressionNode ParseComparison() { var left = ParseShift(); int n = 0; while (Peek().Type == TokenType.Operator && (Peek().Value == "<" || Peek().Value == "<=" || Peek().Value == ">" || Peek().Value == ">=")) { ChainCheck(++n); string op = Advance().Value; var right = ParseShift(); left = new BinaryExpression(left, op, right); } return left; }
+    // Зсуви (<< >>) - Фаза N8 - між порівняннями й додаванням, як у C:
+    // "1 << 2 + 3" читається як "1 << (2 + 3)" (додавання щільніше), а
+    // "a << b < c" - як "(a << b) < c" (зсув щільніший за порівняння).
+    private ExpressionNode ParseShift() { var left = ParseAddition(); int n = 0; while (Peek().Type == TokenType.Operator && (Peek().Value == "<<" || Peek().Value == ">>")) { ChainCheck(++n); string op = Advance().Value; var right = ParseAddition(); left = new BinaryExpression(left, op, right); } return left; }
     private ExpressionNode ParseAddition() { var left = ParseMultiplication(); int n = 0; while (Peek().Type == TokenType.Operator && (Peek().Value == "+" || Peek().Value == "-")) { ChainCheck(++n); string op = Advance().Value; var right = ParseMultiplication(); left = new BinaryExpression(left, op, right); } return left; }
     private ExpressionNode ParseMultiplication() { var left = ParseUnary(); int n = 0; while (Peek().Type == TokenType.Operator && (Peek().Value == "*" || Peek().Value == "/" || Peek().Value == "%")) { ChainCheck(++n); string op = Advance().Value; var right = ParseUnary(); left = new BinaryExpression(left, op, right); } return left; }
 
@@ -552,7 +565,7 @@ public class Parser
     // бо ParseUnary ніколи не повертається в ParseExpression між ітераціями).
     private ExpressionNode ParseUnary()
     {
-        if (Peek().Type == TokenType.Operator && (Peek().Value == "!" || Peek().Value == "-"))
+        if (Peek().Type == TokenType.Operator && (Peek().Value == "!" || Peek().Value == "-" || Peek().Value == "~"))
         {
             string op = Advance().Value;
             if (++_expressionDepth > MaxExpressionDepth)

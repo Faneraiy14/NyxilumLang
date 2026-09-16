@@ -6,6 +6,12 @@ public enum OpCode : byte
     ADD, SUB, MUL, DIV, MOD,
     EQ, NEQ, LT, LTE, GT, GTE,
     AND, OR, NOT,
+    /* Побітові (Фаза N8, 16.09.2026) - числа у VM все одно boxed
+     * double, тож BIT_AND/OR/XOR/SHL/SHR конвертують через (long) на
+     * вході й назад на виході (див. VirtualMachine.cs) - точнісінько
+     * той самий трюк, що вже робить native-компілятор для % (mod).
+     * BIT_NOT - унарний, як NOT вище. */
+    BIT_AND, BIT_OR, BIT_XOR, SHL, SHR, BIT_NOT,
     JUMP, JUMP_IF_FALSE, CALL, RETURN,
     PRINT,
     READ_LINE, READ_INT, READ_DOUBLE,

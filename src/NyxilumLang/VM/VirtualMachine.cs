@@ -944,6 +944,21 @@ public class VirtualMachine
                 case OpCode.AND: { var b = Convert.ToBoolean(_stack.Pop()); var a = Convert.ToBoolean(_stack.Pop()); _stack.Push(a && b); } break;
                 case OpCode.OR: { var b = Convert.ToBoolean(_stack.Pop()); var a = Convert.ToBoolean(_stack.Pop()); _stack.Push(a || b); } break;
                 case OpCode.NOT: _stack.Push(!Convert.ToBoolean(_stack.Pop())); break;
+                // Побітові (Фаза N8, 16.09.2026) - числа тут усе одно boxed
+                // double, тож конвертуємо через (int) - ЗВИЧАЙНЕ, СИГНАЛЬНЕ
+                // 32-бітне ціле, точнісінько те, що native-компілятор дає
+                // через cvttsd2si (щоб VM і native давали ІДЕНТИЧНИЙ
+                // результат на тих самих вхідних числах - той самий принцип
+                // побайтової звірки, що й для % раніше). Лічильник зсуву
+                // маскуємо на 5 біт (& 31) - так само, як реальна x86
+                // shl/shr з CL-регістром робить апаратно, а НЕ як C#'s <<
+                // (який маскує на 6 біт для long, тут не той тип).
+                case OpCode.BIT_AND: { var b = (int) PopNum(); var a = (int) PopNum(); _stack.Push((double) (a & b)); } break;
+                case OpCode.BIT_OR: { var b = (int) PopNum(); var a = (int) PopNum(); _stack.Push((double) (a | b)); } break;
+                case OpCode.BIT_XOR: { var b = (int) PopNum(); var a = (int) PopNum(); _stack.Push((double) (a ^ b)); } break;
+                case OpCode.SHL: { var b = (int) PopNum() & 31; var a = (int) PopNum(); _stack.Push((double) (a << b)); } break;
+                case OpCode.SHR: { var b = (int) PopNum() & 31; var a = (int) PopNum(); _stack.Push((double) (a >> b)); } break;
+                case OpCode.BIT_NOT: { var a = (int) PopNum(); _stack.Push((double) (~a)); } break;
                 case OpCode.JUMP:
                     {
                         int jumpInstrAddr = _ip - 1;

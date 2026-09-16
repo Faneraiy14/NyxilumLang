@@ -749,6 +749,8 @@ public class Compiler
                         "==" => OpCode.EQ, "!=" => OpCode.NEQ,
                         "<" => OpCode.LT, "<=" => OpCode.LTE,
                         ">" => OpCode.GT, ">=" => OpCode.GTE,
+                        "&" => OpCode.BIT_AND, "|" => OpCode.BIT_OR, "^" => OpCode.BIT_XOR,
+                        "<<" => OpCode.SHL, ">>" => OpCode.SHR,
                         _ => throw new Exception($"Невідомий оператор: {b.Operator}")
                     });
                 }
@@ -764,6 +766,11 @@ public class Compiler
                     _bytecode!.Emit(OpCode.LOAD_CONST, _bytecode.AddConstant(0.0));
                     CompileExpression(u.Operand);
                     _bytecode!.Emit(OpCode.SUB);
+                }
+                else if (u.Operator == "~")
+                {
+                    CompileExpression(u.Operand);
+                    _bytecode!.Emit(OpCode.BIT_NOT);
                 }
                 break;
             case CallExpression c:

@@ -769,6 +769,7 @@ public class NativeCodegen
                 : throw new Exception($"native codegen: змінна '{v.Name}' використана до оголошення"),
         UnaryExpression { Operator: "-" } u => InferExprType(u.Operand),
         UnaryExpression { Operator: "!" } => ValType.Bool,
+        UnaryExpression { Operator: "~" } => ValType.Number,
         // Спрощення Фази N3: УСІ функції вважаються Number-, bool-
         // функції поки не підтримуються (дивись ReturnStatement нижче).
         // ВИНЯТОК (Фаза N7): відомі ЗОВНІШНІ примітиви ядра NyxOS (НЕ
@@ -1431,6 +1432,24 @@ public class NativeCodegen
                 _asm.AppendLine("    movzbl %al, %eax");
                 break;
 
+            case UnaryExpression { Operator: "~" } unaryBitNot:
+                {
+                    // Фаза N8 - лише для Number (той самий cvttsd2si/
+                    // cvtsi2sd round-trip, що CompileNumberBinary для
+                    // &|^<<>>) - на Bool/іншому чесна помилка компіляції,
+                    // а не спроба вгадати поведінку.
+                    var tNot = InferExprType(unaryBitNot.Operand);
+                    if (tNot != ValType.Number)
+                    {
+                        throw new Exception("native codegen (Фаза N8): '~' підтримується лише для чисел");
+                    }
+                    CompileExpression(unaryBitNot.Operand);
+                    _asm.AppendLine("    cvttsd2si %xmm0, %eax");
+                    _asm.AppendLine("    not %eax");
+                    _asm.AppendLine("    cvtsi2sd %eax, %xmm0");
+                    break;
+                }
+
             case CallExpression call:
                 {
                     // Фаза N7: kernel-функції (--target nyxos-kernel)
@@ -1729,10 +1748,22 @@ public class NativeCodegen
     // CompileBoolBinary нижче, лише подвоєний під double.
     private void CompileNumberBinary(BinaryExpression bin)
     {
-        CompileExpression(bin.Left);           // -> %xmm0
+        CompileExpression(bin.Left);           // -> %xmm0 (тип ЛІВОГО - Number, інакше викликач взагалі не потрапив би сюди - див. диспетчер вище)
         _asm.AppendLine("    sub $8, %esp");
         _asm.AppendLine("    movsd %xmm0, (%esp)");
-        CompileExpression(bin.Right);           // -> %xmm0 (праве)
+        CompileExpression(bin.Right);           // -> %xmm0 (праве) АБО %eax, якщо праве НЕ Number
+        // РЕАЛЬНИЙ БАГ, знайдений живим тестом (Фаза N8, 16.09.2026,
+        // "6 & (5==4)" дало 4 замість правильних 0): якщо ПРАВИЙ
+        // операнд - Bool (напр. результат ==/!=/</&&), його значення
+        // приходить у %eax (0 чи 1), а НЕ в %xmm0 - без цієї конвертації
+        // нижче код читав би СМІТТЯ з %xmm0 (що там лишилось з
+        // попередньої SSE2-операції), а не 0.0/1.0. Той самий "конвертуй
+        // РІВНО раз на межі" принцип, що вже є для kernel-параметрів
+        // (Фаза N7).
+        if (InferExprType(bin.Right) != ValType.Number)
+        {
+            _asm.AppendLine("    cvtsi2sd %eax, %xmm0");
+        }
         _asm.AppendLine("    movsd %xmm0, %xmm1");
         _asm.AppendLine("    movsd (%esp), %xmm0");
         _asm.AppendLine("    add $8, %esp");
@@ -1766,6 +1797,48 @@ public class NativeCodegen
             case "<=": _asm.AppendLine("    ucomisd %xmm1, %xmm0"); _asm.AppendLine("    setbe %al"); _asm.AppendLine("    movzbl %al, %eax"); break;
             case ">": _asm.AppendLine("    ucomisd %xmm1, %xmm0"); _asm.AppendLine("    seta %al"); _asm.AppendLine("    movzbl %al, %eax"); break;
             case ">=": _asm.AppendLine("    ucomisd %xmm1, %xmm0"); _asm.AppendLine("    setae %al"); _asm.AppendLine("    movzbl %al, %eax"); break;
+            // Побітові (Фаза N8, 16.09.2026) - чисел-як-double тут НЕМАЄ
+            // побітової інструкції SSE2 (нема "andsd" для цілих бітів
+            // double) - той самий трюк, що вже дає % вище: округлюємо
+            // ОБИДВА операнди в 32-бітні GPR через cvttsd2si (усічення
+            // до нуля - ІДЕНТИЧНО (int) у VirtualMachine.cs, той самий
+            // принцип побайтової відповідності VM/native), робимо
+            // ЦІЛОЧИСЕЛЬНУ операцію, конвертуємо результат назад через
+            // cvtsi2sd. Зсуви - лічильник ОБОВ'ЯЗКОВО в %cl (єдиний
+            // регістр, який x86 shl/sar дозволяють для змінної кількості
+            // бітів) - "sar" (арифметичний, зі знаком), а НЕ "shr"
+            // (логічний), щоб збігатись із C#'s ">>" на int у VM (теж
+            // арифметичний для знакового типу).
+            case "&":
+                _asm.AppendLine("    cvttsd2si %xmm0, %eax");
+                _asm.AppendLine("    cvttsd2si %xmm1, %ecx");
+                _asm.AppendLine("    and %ecx, %eax");
+                _asm.AppendLine("    cvtsi2sd %eax, %xmm0");
+                break;
+            case "|":
+                _asm.AppendLine("    cvttsd2si %xmm0, %eax");
+                _asm.AppendLine("    cvttsd2si %xmm1, %ecx");
+                _asm.AppendLine("    or %ecx, %eax");
+                _asm.AppendLine("    cvtsi2sd %eax, %xmm0");
+                break;
+            case "^":
+                _asm.AppendLine("    cvttsd2si %xmm0, %eax");
+                _asm.AppendLine("    cvttsd2si %xmm1, %ecx");
+                _asm.AppendLine("    xor %ecx, %eax");
+                _asm.AppendLine("    cvtsi2sd %eax, %xmm0");
+                break;
+            case "<<":
+                _asm.AppendLine("    cvttsd2si %xmm0, %eax");
+                _asm.AppendLine("    cvttsd2si %xmm1, %ecx");
+                _asm.AppendLine("    shl %cl, %eax");
+                _asm.AppendLine("    cvtsi2sd %eax, %xmm0");
+                break;
+            case ">>":
+                _asm.AppendLine("    cvttsd2si %xmm0, %eax");
+                _asm.AppendLine("    cvttsd2si %xmm1, %ecx");
+                _asm.AppendLine("    sar %cl, %eax");
+                _asm.AppendLine("    cvtsi2sd %eax, %xmm0");
+                break;
             default:
                 throw new Exception($"native codegen (Фаза N3): оператор '{bin.Operator}' для чисел ще не підтримується");
         }

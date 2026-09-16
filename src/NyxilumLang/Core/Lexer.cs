@@ -285,7 +285,17 @@ public class Lexer
                 op = "/=";
                 _pos += 2;
             }
-            else if ("+-*/%=!<>|&".Contains(c))
+            else if (c == '<' && _pos + 1 < _source.Length && _source[_pos + 1] == '<')
+            {
+                op = "<<";
+                _pos += 2;
+            }
+            else if (c == '>' && _pos + 1 < _source.Length && _source[_pos + 1] == '>')
+            {
+                op = ">>";
+                _pos += 2;
+            }
+            else if ("+-*/%=!<>|&^~".Contains(c))
             {
                 op = c.ToString();
                 _pos++;
