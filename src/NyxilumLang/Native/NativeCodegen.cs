@@ -171,6 +171,21 @@ public class NativeCodegen
         var mainFunc = allFuncs.FirstOrDefault(f => f.Name == "main")
             ?? throw new Exception("native codegen: у файлі немає func main()");
 
+        // РЕАЛЬНА ПОМИЛКА (знайдена живим тестом 16.09.2026): Parser.cs
+        // ParseFunctionDeclaration парсить "func Struct.method(...)"
+        // ОДНАКОВО незалежно від того, чи ця декларація лежить УСЕРЕДИНІ
+        // тіла struct {...} (тоді вона потрапляє в StructDeclaration.
+        // Methods), чи як ЗВИЧАЙНА декларація верхнього рівня (тоді вона
+        // просто один з program.Statements з крапкою в
+        // FunctionDeclaration.Name - StructDeclaration.Methods про неї
+        // НІЧОГО не знає). Compiler.cs (VM-шлях) реєструє функції за
+        // ПОВНИМ іменем незалежно від джерела, тому обидва синтаксиси
+        // там працюють однаково - а тут (нативний бекенд) методи
+        // збирались ЛИШЕ з s.Methods, тому метод, оголошений поза тілом
+        // структури, ніколи не потрапляв у _structMethods і виклик давав
+        // "структура не має методу", хоча метод був.
+        var topLevelMethodFuncs = allFuncs.Where(f => f.Name.Contains('.')).ToList();
+
         // Offset'и полів структур і карта методів - ОДИН РАЗ на весь файл
         // (структури оголошуються на верхньому рівні, а не всередині
         // функцій). Успадковані (extends) поля/методи батька НЕ
@@ -183,15 +198,20 @@ public class NativeCodegen
                 offsets[s.Fields[i].Name] = i * 8;
             _structFieldOffsets[s.Name] = offsets;
 
-            // РЕАЛЬНА ПОМИЛКА, знайдена живим тестом: Parser.cs зберігає
-            // ПОВНЕ ім'я методу як "StructName.methodName" (напр.
-            // "Point.length") у FunctionDeclaration.Name, а НЕ просто
-            // "length" - ключ у методMap мусить бути "голим" іменем
-            // (те, що прийде в MethodCallExpression.MethodName).
+            // Ключ у methodMap мусить бути "голим" іменем (те, що прийде
+            // в MethodCallExpression.MethodName) - FunctionDeclaration.Name
+            // зберігає ПОВНЕ "StructName.methodName" в обох джерелах нижче.
             var methodMap = new Dictionary<string, FunctionDeclaration>();
             foreach (var m in s.Methods)
             {
                 string bareName = m.Name.Contains('.') ? m.Name[(m.Name.LastIndexOf('.') + 1)..] : m.Name;
+                methodMap[bareName] = m;
+            }
+            foreach (var m in topLevelMethodFuncs)
+            {
+                string ownerName = m.Name[..m.Name.LastIndexOf('.')];
+                if (ownerName != s.Name) continue;
+                string bareName = m.Name[(m.Name.LastIndexOf('.') + 1)..];
                 methodMap[bareName] = m;
             }
             _structMethods[s.Name] = methodMap;
@@ -207,7 +227,11 @@ public class NativeCodegen
         // а НЕ `ret`, на відміну від УСІХ інших функцій нижче.
         CompileFunction(mainFunc, isMain: true);
 
-        foreach (var func in allFuncs.Where(f => f.Name != "main"))
+        // Функції-методи (ім'я з крапкою, "StructName.methodName") НЕ
+        // компілюються тут як звичайні функції - вони йдуть нижче, під
+        // міткою "StructName__methodName", через _structMethods (яка вже
+        // об'єднала обидва синтаксиси реєстрації методу вище).
+        foreach (var func in allFuncs.Where(f => f.Name != "main" && !f.Name.Contains('.')))
         {
             CompileFunction(func, isMain: false);
         }
@@ -215,12 +239,13 @@ public class NativeCodegen
         // Методи структур (Фаза N4) - КОЖЕН під власною, УНІКАЛЬНОЮ
         // міткою "StructName__methodName" (labelOverride), інакше
         // однойменні методи РІЗНИХ структур (напр. Dog.speak() і
-        // Cat.speak()) зіткнулися б в одній .text-мітці.
+        // Cat.speak()) зіткнулися б в одній .text-мітці. Ітеруємо вже
+        // зібрану _structMethods (а не s.Methods напряму), щоб методи,
+        // оголошені ПОЗА тілом структури, теж скомпілювались.
         foreach (var s in program.Statements.OfType<StructDeclaration>())
         {
-            foreach (var m in s.Methods)
+            foreach (var (bareName, m) in _structMethods[s.Name])
             {
-                string bareName = m.Name.Contains('.') ? m.Name[(m.Name.LastIndexOf('.') + 1)..] : m.Name;
                 CompileFunction(m, isMain: false, labelOverride: $"{s.Name}__{bareName}");
             }
         }
