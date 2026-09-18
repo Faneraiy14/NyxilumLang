@@ -1,0 +1,76 @@
+// rtc.nx — переклад src/rtc.c (репозиторій NyxOS) на NyxilumLang,
+// --target nyxos-kernel. Восьмий модуль ядра - перший, де out-параметр
+// (rtc_time_t* out, 8 байтів: year(u16)=0, month=2, day=3, hour=4,
+// minute=5, second=6 - підтверджено freestanding _Static_assert перед
+// перекладом, той самий підхід, що pci_device_t/user_record_t) містить
+// ЗМІШАНІ розміри полів (одне 2-байтове, решта 1-байтові) - на
+// відміну від pci.c/auth.c, де out-структури складались лише з
+// 1- і 4-байтових полів.
+//
+// **ЧОМУ `year` НЕ записано через `pokeNum`**: pokeNum пише РІВНО 4
+// байти - для 2-байтового `year` (offset 0) це затерло б і `month`
+// (offset 2), й частину `day` (offset 3) - реальна корупція сусідніх
+// полів, той самий клас пастки, що вже кілька разів документований
+// у цьому файлі (структуру ЗАВЖДИ спершу перевіряти _Static_assert,
+// НІКОЛИ не вгадувати офсети/розміри). Компілятор не має 2-байтового
+// poke-примітиву - тому `year` пишеться РІВНО ЯК pci.c вже пише
+// 1-байтові поля (`out[i] = ...`), лише ДВІЧІ, по одному байту (x86 -
+// little-endian, молодший байт за меншою адресою): `out[0] = year &
+// 255`, `out[1] = (year / 256) % 256` (year тут завжди < 65536 -
+// 2000+YY - тому ціле ділення на 256 безпечне без окремого trunc-
+// трюку: `&`/побітові прибирають дробову частину природно, а прямого
+// `%`/`/` тут і не використано - замінено на `& 255`/`(year >> 8) &
+// 255`, ідентично до того, як pci.c вже розкладає vendor_id/device_id
+// на байти).
+
+func cmos_read(reg: i32) -> i32 {
+    outb(112, reg) // CMOS_INDEX=0x70
+    return inb(113) // CMOS_DATA=0x71
+}
+
+func update_in_progress() -> i32 {
+    return cmos_read(10) & 128 // регістр 0x0A, біт 0x80
+}
+
+func bcd_to_bin(v: i32) -> i32 {
+    return (v & 15) + ((v >> 4) * 10)
+}
+
+func rtc_read(out: string) {
+    while update_in_progress() != 0 {
+        // чекаємо, поки мікросхема сама не завершить оновлення регістрів
+    }
+
+    var second = cmos_read(0)
+    var minute = cmos_read(2)
+    var hour = cmos_read(4)
+    var day = cmos_read(7)
+    var month = cmos_read(8)
+    var year = cmos_read(9)
+    var status_b = cmos_read(11)
+
+    var is_binary = status_b & 4
+    var is_24hr = status_b & 2
+
+    if is_binary == 0 {
+        second = bcd_to_bin(second)
+        minute = bcd_to_bin(minute)
+        var pm_flag = hour & 128
+        hour = bcd_to_bin(hour & 127)
+        if is_24hr == 0 && pm_flag != 0 && hour != 12 {
+            hour = hour + 12
+        }
+        day = bcd_to_bin(day)
+        month = bcd_to_bin(month)
+        year = bcd_to_bin(year)
+    }
+
+    var full_year = 2000 + year
+    out[0] = full_year & 255
+    out[1] = (full_year >> 8) & 255
+    out[2] = month & 255
+    out[3] = day & 255
+    out[4] = hour & 255
+    out[5] = minute & 255
+    out[6] = second & 255
+}
