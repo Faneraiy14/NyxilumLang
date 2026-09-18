@@ -856,6 +856,12 @@ public class NativeCodegen
         // інтринзики, що peek/poke, завжди Number (порт/значення - і
         // так лише 8/16/32-бітні цілі, тут це double).
         CallExpression { FunctionName: "inb" or "inw" or "inl" or "outb" or "outw" or "outl" } when _target == NativeTarget.NyxOSKernel => ValType.Number,
+        // hlt() (Фаза N8.5e, 18.09.2026) - той самий клас інтринзика, що
+        // порти вище: без аргументів, "повертає" 0 (результат ніколи не
+        // використовується - викликається лише заради побічного ефекту,
+        // сну CPU до наступного переривання). Потрібен для auth.c-
+        // подібного коду (while (!line_ready) { __asm__("hlt"); }).
+        CallExpression { FunctionName: "hlt" } when _target == NativeTarget.NyxOSKernel => ValType.Number,
         // Спрощення Фази N3: УСІ функції вважаються Number-, bool-
         // функції поки не підтримуються (дивись ReturnStatement нижче).
         // ВИНЯТОК (Фаза N7): відомі ЗОВНІШНІ примітиви ядра NyxOS (НЕ
@@ -1655,6 +1661,13 @@ public class NativeCodegen
                             _asm.AppendLine("    xor %eax, %eax"); // очищаємо ВЕРХНІ байти ПЕРЕД частковим in - inb/inw їх не чіпають самі
                             _asm.AppendLine($"    in{inSuffix} %dx, {inReg}");
                             _asm.AppendLine("    cvtsi2sd %eax, %xmm0");
+                            break;
+                        }
+                        if (call.FunctionName == "hlt" && call.Arguments.Count == 0)
+                        {
+                            _asm.AppendLine("    hlt");
+                            _asm.AppendLine("    xor %eax, %eax");
+                            _asm.AppendLine("    cvtsi2sd %eax, %xmm0"); // "повертає" 0 - результат ніде реально не використовується, як out*/poke*
                             break;
                         }
                         if (call.FunctionName == "numToPtr" && call.Arguments.Count == 1)

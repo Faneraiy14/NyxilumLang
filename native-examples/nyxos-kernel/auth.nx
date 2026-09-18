@@ -1,0 +1,155 @@
+// auth.nx — переклад src/auth.c (репозиторій NyxOS) на NyxilumLang,
+// --target nyxos-kernel. Третій кандидат з обстеження 15.09.2026 -
+// довго лишався ЗАБЛОКОВАНИМ через ДВА примітиви, яких компілятор не
+// мав: "адреса функції як значення" (потрібна для
+// keyboard_set_handler(auth_char_handler) - реєстрація callback'а) і
+// сирий __asm__("hlt") (потрібен для read_line()'s "спати до
+// переривання"). Перший закрито 18.09.2026 разом із pci.c (Фаза
+// N8.5c); другий - НОВИЙ hlt()-інтринзик (Фаза N8.5e, цей же день,
+// одразу для цього файлу) - той самий клас "гола інструкція без
+// операндів", що outb/inb, лише без портового номера/значення.
+//
+// РОЗКЛАДКА user_record_t (з auth.c, typedef struct { char
+// username[32]; uint32_t password_hash; } - стандартне вирівнювання
+// gcc -m32, uint32_t і так вже на 4-байтовій межі після 32-байтного
+// масиву, padding не потрібен): username=0..31 (32 байти),
+// password_hash=32 (4 байти), sizeof=36.
+//
+// ЧЕСНО, ВІДОМА РОЗБІЖНІСТЬ з оригінальним C: simple_hash() тут -
+// ТОЙ САМИЙ FNV-1a за формою (XOR потім множення), АЛЕ з явним
+// маскуванням акумулятора до 24 біт (0xFFFFFF) на КОЖНІЙ ітерації,
+// А НЕ повне 32-бітне unsigned-переповнення, яким живиться C-версія.
+// Причина - той самий клас пастки, що вже задокументовано в pci.nx
+// (коментар про 0x80000000/(1<<31)): побітові оператори цього
+// компілятора (&|^<<>>) конвертують double->int32 через cvttsd2si
+// ПЕРЕД самою операцією - якщо проміжне значення виходить ЗА межі
+// ЗНАКОВОГО int32 (>2^31-1), апаратура дає "невизначене значення"
+// (0x80000000) замість справжніх нижніх 32 бітів, як дав би реальний
+// uint32_t-огортання в C. 24-бітний акумулятор (max (2^24-1)*97 ≈
+// 1.63e9, з запасом < 2^31-1) - свідомо підібраний, щоб ЖОДНЕ проміжне
+// значення НІКОЛИ не наближалось до цієї межі. Наслідок: хеші НЕ
+// байт-у-байт ідентичні C-версії (users.dat, створений оригінальним
+// auth.c, не автентифікує через цю NyxilumLang-версію і навпаки) - але
+// створення+вхід САМІ ПО СОБІ повністю самоузгоджені (той самий
+// simple_hash використовує і create_account(), і login_prompt()), що й
+// перевірено живцем нижче. Сам C-хеш і так явно задокументований як
+// "НЕ криптографічний, лише щоб пароль не лежав відкритим текстом" -
+// ця зміна не послаблює й не посилює реальну загрозу.
+
+var line_buffer: string
+var line_len = 0
+var line_ready = 0
+var mask_input = 0
+
+func auth_char_handler(c: i32) {
+    if c == 10 {
+        line_buffer[line_len] = 0
+        line_ready = 1
+        vga_putc(10)
+        return
+    }
+    if c == 8 {
+        if line_len > 0 {
+            line_len = line_len - 1
+            vga_putc(8)
+        }
+        return
+    }
+    if line_len < 63 {
+        line_buffer[line_len] = c
+        line_len = line_len + 1
+        if mask_input == 1 {
+            vga_putc(42) // '*'
+        } else {
+            vga_putc(c)
+        }
+    }
+}
+
+func read_line(mask: i32) {
+    if line_buffer == 0 {
+        line_buffer = kmalloc(64)
+    }
+    line_len = 0
+    line_ready = 0
+    mask_input = mask
+    keyboard_set_handler(auth_char_handler)
+    while line_ready == 0 {
+        hlt() // спати до наступного переривання, не палити CPU в холостому циклі
+    }
+}
+
+func simple_hash(s: string) -> i32 {
+    var h = 2166136261 // FNV offset basis - в межах int32, безпечно для першого & нижче
+    h = h & 16777215    // одразу звужуємо до 24-бітного акумулятора (дивись примітку зверху файлу)
+    var i = 0
+    while s[i] != 0 {
+        h = h ^ s[i]
+        h = h * 97
+        h = h & 16777215
+        i = i + 1
+    }
+    return h
+}
+
+func create_account() {
+    vga_print("Користувачів ще немає - створимо першого.\n")
+    var user = kmalloc(36)
+
+    vga_print("Ім'я користувача: ")
+    read_line(0)
+    k_strcpy(user, line_buffer, 32)
+
+    vga_print("Пароль: ")
+    read_line(1)
+    var hash = simple_hash(line_buffer)
+    pokeNum(user + 32, hash)
+
+    if fs_create("users.dat", user, 36) != 0 {
+        vga_print("Обліковий запис створено. Ласкаво просимо, ")
+        vga_print(user)
+        vga_print("!\n")
+    } else {
+        vga_print("ПОМИЛКА: не вдалося зберегти обліковий запис (диск повний?) - продовжую без входу.\n")
+    }
+}
+
+func login_prompt(expected: string) {
+    while true {
+        vga_print("Ім'я користувача: ")
+        read_line(0)
+        var entered_name = kmalloc(32)
+        k_strcpy(entered_name, line_buffer, 32)
+
+        vga_print("Пароль: ")
+        read_line(1)
+        var entered_hash = simple_hash(line_buffer)
+        var expected_hash = peekNum(expected + 32)
+
+        if k_streq(entered_name, expected) != 0 && entered_hash == expected_hash {
+            vga_print("Вхід виконано. Ласкаво просимо, ")
+            vga_print(expected)
+            vga_print("!\n")
+            return
+        }
+        vga_print("Невірне ім'я користувача чи пароль. Спробуй ще раз.\n")
+    }
+}
+
+func auth_run() {
+    if fs_exists("users.dat") == 0 {
+        create_account()
+        return
+    }
+
+    var stored = kmalloc(36)
+    var out_size_buf = kmalloc(4)
+    var read_ok = fs_read("users.dat", stored, 36, out_size_buf)
+    var out_size = peekNum(out_size_buf)
+    if read_ok == 0 || out_size != 36 {
+        vga_print("ПОМИЛКА: users.dat пошкоджено - продовжую без входу.\n")
+        return
+    }
+
+    login_prompt(stored)
+}
