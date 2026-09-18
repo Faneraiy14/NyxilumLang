@@ -1,0 +1,91 @@
+// pkg.nx — переклад src/pkg.c (репозиторій NyxOS) на NyxilumLang,
+// --target nyxos-kernel. Раніше (Фаза N7, обстеження третього модуля)
+// позначений НЕПЕРЕКЛАДНИМ через "побітові зсуви для little-endian
+// u32 і out-параметри через покажчик" - мова НЕ мала побітових
+// операторів ВЗАГАЛІ й жодного способу писати через переданий
+// вказівник. Обидва блокери закрито Фазою N8 (побітові оператори,
+// pokeNum/pokePtr) - переклад тепер прямий, без обхідних рішень.
+//
+// Формат .nyxpkg (pkg.h): байти 0-3 "NYXP", 4-35 назва (32Б,
+// нуль-доповнена), 36-51 версія (16Б), 52-55 розмір коду (u32 LE),
+// 56+ сам код.
+// Мова не має окремого "const" - звичайні глобальні Number зі сталим
+// літеральним ініціалізатором (як і решта Фази N7-глобальних).
+var PKG_NAME_MAX = 32
+var PKG_VERSION_MAX = 16
+var PKG_HEADER_SIZE = 56
+
+// Внутрішній хелпер (у C - static, частина ABI лише всередині pkg.c) -
+// сигнатура спрощена: повертає offset тіла (>=0) або -1, замість
+// bool-результату + окремого out-параметра, як у C. pkg_parse -
+// ЄДИНА реально зовнішня (публічна, з pkg.h) функція цього файлу, і
+// саме її сигнатура має лишатись ABI-сумісною з оригіналом.
+func find_body_start(data: string, len: i32) -> i32 {
+    var i = 0
+    while i + 3 < len {
+        if (data[i] == 13) && (data[i + 1] == 10) && (data[i + 2] == 13) && (data[i + 3] == 10) {
+            return i + 4
+        }
+        i = i + 1
+    }
+    return -1
+}
+
+func read_u32_le(p: string) -> i32 {
+    var b0 = p[0]
+    var b1 = p[1]
+    var b2 = p[2]
+    var b3 = p[3]
+    return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
+}
+
+// out_name_ptr/out_version_ptr - звичайні String-вказівники на буфери
+// виклика (в C - char[N], розпадається на вказівник САМ, без
+// подвійного рівня непрямості) - запис символ-за-символом через `s[i]
+// = ...` (Фаза N7). out_code_ptr/out_code_size_ptr - СПРАВЖНІ
+// вказівники-НА-вказівник/число (в C - `const uint8_t**`/`uint32_t*`)
+// - запис через pokePtr/pokeNum (Фаза N8) РІВНО ОДИН РАЗ, у самому
+// кінці, той самий принцип "конвертація на межі", що й усюди в
+// kernel-цілі.
+func pkg_parse(http_response: string, response_len: i32,
+               out_name_ptr: string, out_version_ptr: string,
+               out_code_ptr: string, out_code_size_ptr: string) -> i32 {
+    var body_start = find_body_start(http_response, response_len)
+    if body_start == -1 {
+        return 0
+    }
+
+    var body = http_response + body_start
+    var body_len = response_len - body_start
+
+    if body_len < PKG_HEADER_SIZE {
+        return 0
+    }
+    // 'N'=78 'Y'=89 'X'=88 'P'=80
+    if !((body[0] == 78) && (body[1] == 89) && (body[2] == 88) && (body[3] == 80)) {
+        return 0
+    }
+
+    var i = 0
+    while i < PKG_NAME_MAX {
+        out_name_ptr[i] = body[4 + i]
+        i = i + 1
+    }
+    out_name_ptr[PKG_NAME_MAX - 1] = 0
+
+    var j = 0
+    while j < PKG_VERSION_MAX {
+        out_version_ptr[j] = body[36 + j]
+        j = j + 1
+    }
+    out_version_ptr[PKG_VERSION_MAX - 1] = 0
+
+    var code_size = read_u32_le(body + 52)
+    if code_size > (body_len - PKG_HEADER_SIZE) {
+        return 0
+    }
+
+    pokePtr(out_code_ptr, body + PKG_HEADER_SIZE)
+    pokeNum(out_code_size_ptr, code_size)
+    return 1
+}
