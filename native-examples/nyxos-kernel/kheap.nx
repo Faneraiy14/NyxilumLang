@@ -1,0 +1,134 @@
+// kheap.nx — повний переклад src/kheap.c (репозиторій NyxOS) на
+// NyxilumLang, --target nyxos-kernel. Класичний free-list-розподілювач
+// (перше підходяще + об'єднання сусідніх вільних блоків) — той самий
+// алгоритм, що й оригінал, побайтово еквівалентна структура заголовка.
+//
+// Мова не має справжніх структур-у-сирій-пам'яті (heap-структури мови —
+// 8-байтів-на-поле, НЕ C-layout) і адресної арифметики "з коробки" —
+// тому заголовок блоку представлений ВРУЧНУ через зсуви й примітиви
+// Фази N8/N8.5 (peekNum/peekPtr/pokeNum/pokePtr, арифметика вказівників
+// "ptr + N", numToPtr), той самий підхід, що вже описаний у
+// NATIVE_ROADMAP.md для цього файлу.
+//
+// Розкладка block_header_t (12 байтів, точно як у C — жодного padding,
+// бо всі три поля вже 4-байтові):
+//   offset 0: size  (u32, розмір КОРИСНИХ даних, без заголовка)
+//   offset 4: free  (u32, 0/1)
+//   offset 8: next  (вказівник на наступний block_header_t, 0 = кінець)
+// Мова не має окремого "const" - звичайні глобальні Number-змінні зі
+// сталим літеральним ініціалізатором (як і решта Фази N7-глобальних),
+// які просто ніде не перепризначаються.
+var HEADER_SIZE = 12
+
+var HEAP_START = 4194304   // 0x400000 — 4 МБ, з запасом ПІСЛЯ ядра+PMM+таблиць сторінок
+var HEAP_MAX = 16777216    // 0x1000000 — 16 МБ, межа identity-map з paging.c
+
+var heap_break = 0           // Number: сира адреса, росте лише вперед — той самий bump-хвіст, що в C
+var heap_first_block: string // String: вказівник на перший block_header_t; БЕЗ ініціалізатора = справжній null (Фаза N8.5)
+
+func kheap_init() {
+    heap_break = HEAP_START
+    heap_first_block = numToPtr(0)
+}
+
+// Повертає вказівник на НОВИЙ заголовок блоку, узятий з "хвоста" купи
+// (bump-allocation), або null, якщо купа вичерпана/було б переповнення.
+// last - вказівник на останній заголовок у списку (або null, якщо
+// список ще порожній) - якщо не null, його next одразу прив'язується
+// до нового блоку (той самий порядок дій, що в C-версії).
+func request_space(last: string, size: i32) -> string {
+    var total = HEADER_SIZE + size
+    if (heap_break + total > HEAP_MAX) || (heap_break + total < heap_break) {
+        return numToPtr(0)
+    }
+
+    var block = numToPtr(heap_break)
+    heap_break = heap_break + total
+
+    pokeNum(block, size)
+    pokeNum(block + 4, 0)
+    pokePtr(block + 8, numToPtr(0))
+
+    if last != 0 {
+        pokePtr(last + 8, block)
+    }
+    return block
+}
+
+func kmalloc(size: i32) -> string {
+    if size == 0 {
+        return numToPtr(0)
+    }
+    // Вирівнювання на 16 байт — та сама формула, що в C: (size+15) & ~15
+    var aligned_size = (size + 15) & ~15
+
+    if heap_first_block == 0 {
+        var block = request_space(numToPtr(0), aligned_size)
+        if block == 0 {
+            return numToPtr(0)
+        }
+        heap_first_block = block
+        return block + HEADER_SIZE
+    }
+
+    // Перше підходяще (first-fit) — той самий компроміс, що в C: простіше
+    // й швидше за best-fit, ціна — трохи більша фрагментація з часом.
+    var last = heap_first_block
+    var current = heap_first_block
+    while (current != 0) && !((peekNum(current + 4) == 1) && (peekNum(current) >= aligned_size)) {
+        last = current
+        current = peekPtr(current + 8)
+    }
+
+    if current != 0 {
+        pokeNum(current + 4, 0)
+        return current + HEADER_SIZE
+    }
+
+    var block = request_space(last, aligned_size)
+    if block == 0 {
+        return numToPtr(0)
+    }
+    return block + HEADER_SIZE
+}
+
+func header_of(ptr: string) -> string {
+    return ptr - HEADER_SIZE
+}
+
+func kfree(ptr: string) {
+    if ptr == 0 {
+        return
+    }
+    var header = header_of(ptr)
+    pokeNum(header + 4, 1)
+
+    // Об'єднання з НАСТУПНИМ блоком, якщо той теж вільний і ФІЗИЧНО
+    // впритул (перевірка адрес — інакше два вільні, але роз'єднані
+    // діркою блоки об'єдналися б у щось, чого насправді нема).
+    var next = peekPtr(header + 8)
+    if next != 0 {
+        var next_free = peekNum(next + 4)
+        if (next_free == 1) && (header + HEADER_SIZE + peekNum(header) == next) {
+            var merged_size = peekNum(header) + HEADER_SIZE + peekNum(next)
+            pokeNum(header, merged_size)
+            pokePtr(header + 8, peekPtr(next + 8))
+        }
+    }
+
+    // Об'єднання з ПОПЕРЕДНІМ — однозв'язний список, немає prev-
+    // вказівника, тож проходимо з початку в пошуках того, хто на header
+    // вказує (купа маленька — лінійний прохід не проблема, як і в C).
+    var prev = heap_first_block
+    while (prev != 0) && (peekPtr(prev + 8) != header) {
+        prev = peekPtr(prev + 8)
+    }
+    if prev != 0 {
+        var prev_free = peekNum(prev + 4)
+        if (prev_free == 1) && (prev + HEADER_SIZE + peekNum(prev) == header) {
+            var merged_size2 = peekNum(prev) + HEADER_SIZE + peekNum(header)
+            pokeNum(prev, merged_size2)
+            pokePtr(prev + 8, peekPtr(header + 8))
+        }
+    }
+}

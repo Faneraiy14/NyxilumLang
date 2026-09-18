@@ -403,7 +403,21 @@ public class NativeCodegen
             ValType type;
             if (v.Initializer == null)
             {
-                type = ValType.Number;
+                // Без ініціалізатора тип раніше завжди був Number - та
+                // сама прогалина, що колись була з ReturnType функцій
+                // (Parser.cs давно парсить `var x: string`, кодоген просто
+                // не читав TypeAnnotation). Потрібно для полів-вказівників
+                // зі станом "ще нічого немає" (напр. kheap.c
+                // heap_first_block: string - справжній нульовий вказівник,
+                // а не Number 0.0/double).
+                type = v.TypeAnnotation switch
+                {
+                    null => ValType.Number,
+                    "string" => ValType.String,
+                    "bool" => ValType.Bool,
+                    "any" or "i32" or "f64" or "int" or "number" or "size_t" or "u32" or "usize" => ValType.Number,
+                    _ => throw new Exception($"native codegen (Фаза N8.5): тип глобальної '{v.Name}' ('{v.TypeAnnotation}') не підтримується для --target nyxos-kernel - лише string/bool/число")
+                };
             }
             else if (v.Initializer is LiteralExpression { Value: double or bool or string })
             {
@@ -428,9 +442,20 @@ public class NativeCodegen
                     _globalData.AppendLine($"    .long {(bv ? 1 : 0)}");
                     break;
                 case ValType.String:
-                    string sv = v.Initializer is LiteralExpression { Value: string s } ? s : "";
-                    string strLabel = EmitStringLiteral(sv, nullTerminate: true);
-                    _globalData.AppendLine($"    .long {strLabel}");
+                    if (v.Initializer == null)
+                    {
+                        // Немає ініціалізатора -> СПРАВЖНІЙ нульовий
+                        // вказівник (адреса 0), а НЕ вказівник на порожній
+                        // рядок - інакше `p == 0`-перевірка (Фаза N8) на
+                        // такій глобальній завжди була б хибною.
+                        _globalData.AppendLine("    .long 0");
+                    }
+                    else
+                    {
+                        string sv = v.Initializer is LiteralExpression { Value: string s } ? s : "";
+                        string strLabel = EmitStringLiteral(sv, nullTerminate: true);
+                        _globalData.AppendLine($"    .long {strLabel}");
+                    }
                     break;
                 default:
                     throw new Exception($"native codegen (Фаза N7): непідтримуваний тип глобальної '{v.Name}'");
@@ -817,7 +842,7 @@ public class NativeCodegen
         // перевіряються ПЕРШИМИ, ще ДО загального "невідоме ім'я -
         // зовнішня функція" припущення нижче. peekPtr читає покажчик
         // (String), peekNum/pokeNum/pokePtr - прості числа/покажчики.
-        CallExpression { FunctionName: "peekPtr" } when _target == NativeTarget.NyxOSKernel => ValType.String,
+        CallExpression { FunctionName: "peekPtr" or "numToPtr" } when _target == NativeTarget.NyxOSKernel => ValType.String,
         CallExpression { FunctionName: "peekNum" or "pokeNum" or "pokePtr" } when _target == NativeTarget.NyxOSKernel => ValType.Number,
         // Спрощення Фази N3: УСІ функції вважаються Number-, bool-
         // функції поки не підтримуються (дивись ReturnStatement нижче).
@@ -1569,6 +1594,22 @@ public class NativeCodegen
                         // полів на кшталт "next") компілятор мусить
                         // знати ЗАЗДАЛЕГІДЬ (InferExprType вище), а не
                         // вгадувати за контекстом використання.
+                        if (call.FunctionName == "numToPtr" && call.Arguments.Count == 1)
+                        {
+                            // Сире перетворення число->вказівник (Фаза
+                            // N8.5, 18.09.2026) - потрібне для kheap.c-
+                            // подібного коду: HEAP_START/heap_break -
+                            // звичайна адреса-як-число (щоб працювали
+                            // ЗВИЧАЙНІ >/< /арифметика через
+                            // CompileNumberBinary), а ЩОЙНО з неї треба
+                            // зробити СПРАВЖНІЙ вказівник (щоб peek/poke й
+                            // "ptr + N" запрацювали) - рівно один
+                            // reinterpret-cast %xmm0->%eax, БЕЗ звернення
+                            // до пам'яті (на відміну від peekNum/peekPtr).
+                            CompileExpression(call.Arguments[0]); // число (адреса) -> %xmm0
+                            _asm.AppendLine("    cvttsd2si %xmm0, %eax");
+                            break;
+                        }
                         if (call.FunctionName == "peekNum" && call.Arguments.Count == 1)
                         {
                             CompileExpression(call.Arguments[0]); // адреса (String) -> %eax
