@@ -1,0 +1,135 @@
+// pci.nx — переклад src/pci.c (репозиторій NyxOS) на NyxilumLang,
+// --target nyxos-kernel. Фундаментальний модуль - НА НЬОМУ тримається
+// pci_scan()/pci_find_device(), якими користуються rtl8139.c/ahci.c/
+// uhci.c/settings.c - перший переклад, що потребував ТРЬОХ нових
+// можливостей компілятора одразу (Фаза N8.5c/d, 18.09.2026):
+//   1. "гола" назва функції = її АДРЕСА (String) - потрібно передати
+//      callback ЗОВНІ (pci_scan(find_uhci_callback) - той самий стиль
+//      виклику, що вже в реальному pci.c).
+//   2. Непрямий виклик через ЗНАЧЕННЯ-параметр (cb(arg), де cb -
+//      String-параметр) - потрібно, щоб САМ pci_scan МІГ викликати
+//      переданий йому callback.
+//   3. Портовий ввід-вивід (inl/outl) - pci.c читає/пише конфігураційний
+//      простір PCI напряму через порти 0xCF8/0xCFC, апаратна вимога.
+//
+// Розкладка pci_device_t (з pci.h, стандартне вирівнювання gcc -m32,
+// підтверджено freestanding _Static_assert ПЕРЕД перекладом): bus=0
+// device=1 function=2 vendor_id=4 device_id=6 class_code=8 subclass=9
+// prog_if=10 bar=12 (6×4Б до 36) interrupt_line=36, sizeof=40.
+
+func pci_make_address(bus: i32, device: i32, function: i32, offset: i32) -> i32 {
+    // 0x80000000 - через (1 << 31), а НЕ літерал 2147483648: останній
+    // ПОЗА діапазоном signed int32 для прямої конвертації double->int
+    // (дав би "невизначене значення" за специфікацією SSE2 - воно й
+    // ТАК випадково дало б правильний біт-патерн, але покладатись на
+    // це - крихко й незрозуміло; зсув 1<<31 - чисто ціла операція,
+    // без жодної двозначної конвертації).
+    var enable_bit = 1 << 31
+    return enable_bit | (bus << 16) | ((device & 31) << 11) | ((function & 7) << 8) | (offset & 252)
+}
+
+func pci_config_read32(bus: i32, device: i32, function: i32, offset: i32) -> i32 {
+    var addr = pci_make_address(bus, device, function, offset)
+    outl(3320, addr) // 0xCF8
+    return inl(3324) // 0xCFC
+}
+
+func pci_config_write32(bus: i32, device: i32, function: i32, offset: i32, value: i32) {
+    var addr = pci_make_address(bus, device, function, offset)
+    outl(3320, addr)
+    outl(3324, value)
+}
+
+// out - вказівник на pci_device_t-буфер виклика (40 байтів, вже
+// виділений) - записуємо поля ВРУЧНУ за точними зсувами: 1-байтові
+// поля через `out[i] = ...` (Фаза N7 - байтовий запис по індексу),
+// 4-байтові (bar[]) через pokeNum (кожен елемент - власні, повністю
+// вирівняні 4 байти, жодного сусіднього поля не зачіпає).
+func read_device(bus: i32, device: i32, function: i32, out: string) {
+    var reg0 = pci_config_read32(bus, device, function, 0)
+    out[0] = bus & 255
+    out[1] = device & 255
+    out[2] = function & 255
+    var vendor_id = reg0 & 65535
+    var device_id = (reg0 >> 16) & 65535
+    out[4] = vendor_id & 255
+    out[5] = (vendor_id >> 8) & 255
+    out[6] = device_id & 255
+    out[7] = (device_id >> 8) & 255
+
+    var reg2 = pci_config_read32(bus, device, function, 8)
+    out[8] = (reg2 >> 24) & 255  // class_code
+    out[9] = (reg2 >> 16) & 255  // subclass
+    out[10] = (reg2 >> 8) & 255  // prog_if
+
+    var i = 0
+    while i < 6 {
+        var bar_val = pci_config_read32(bus, device, function, 16 + i * 4)
+        pokeNum(out + 12 + i * 4, bar_val)
+        i = i + 1
+    }
+
+    var reg15 = pci_config_read32(bus, device, function, 60)
+    out[36] = reg15 & 255 // interrupt_line
+}
+
+// callback - String-значення (адреса функції виду `func f(dev: string)`,
+// передана ЗОВНІ "голою назвою" - дивись коментар зверху файлу).
+// Кожен знайдений пристрій - НОВИЙ буфер через kmalloc (не один
+// перевикористаний - callback МІГ БИ зберегти вказівник собі, як
+// find_callback в оригінальному pci.c зберігає копію структури).
+func pci_scan(callback: string) {
+    var bus = 0
+    while bus < 256 {
+        var device = 0
+        while device < 32 {
+            var function = 0
+            while function < 8 {
+                var reg0 = pci_config_read32(bus, device, function, 0)
+                var vendor_id = reg0 & 65535
+                if vendor_id != 65535 {
+                    var dev = kmalloc(40)
+                    read_device(bus, device, function, dev)
+                    callback(dev)
+                }
+                function = function + 1
+            }
+            device = device + 1
+        }
+        bus = bus + 1
+    }
+}
+
+// pci_find_device - у C-оригіналі captures пошуковий контекст через
+// глобальний вказівник g_find_ctx (бо звичайні C function pointers теж
+// не вміють захоплювати оточення) - тут той самий підхід, лише напряму
+// глобальними змінними (NyxilumLang kernel-ціль так само не має
+// повноцінних замикань).
+var g_find_vendor_id = 0
+var g_find_device_id = 0
+var g_find_out: string
+var g_find_found = 0
+
+func find_callback(dev: string) {
+    if g_find_found == 0 {
+        var vendor_id = dev[4] | (dev[5] << 8)
+        var device_id = dev[6] | (dev[7] << 8)
+        if (vendor_id == g_find_vendor_id) && (device_id == g_find_device_id) {
+            var i = 0
+            while i < 40 {
+                g_find_out[i] = dev[i]
+                i = i + 1
+            }
+            g_find_found = 1
+        }
+    }
+}
+
+func pci_find_device(vendor_id: i32, device_id: i32, out: string) -> i32 {
+    g_find_vendor_id = vendor_id
+    g_find_device_id = device_id
+    g_find_out = out
+    g_find_found = 0
+    pci_scan(find_callback)
+    return g_find_found
+}

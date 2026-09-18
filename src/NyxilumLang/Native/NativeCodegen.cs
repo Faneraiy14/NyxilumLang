@@ -832,7 +832,15 @@ public class NativeCodegen
             ? t
             : _globalVars.TryGetValue(v.Name, out var gt)
                 ? gt // Фаза N7: глобальна (лише --target nyxos-kernel) - локальна/параметр ЗАВЖДИ затіняє
-                : throw new Exception($"native codegen: змінна '{v.Name}' використана до оголошення"),
+                : _target == NativeTarget.NyxOSKernel && _knownFunctions.Contains(v.Name)
+                    // Фаза N8.5c (18.09.2026): "гола" назва функції (БЕЗ
+                    // виклику) - її АДРЕСА, потрібна для реєстрації
+                    // callback'ів у зовнішньому C-коді ядра (напр.
+                    // pci_scan(callback), isr_register_handler(vec, fn)) -
+                    // те саме String/вказівник, що й будь-який інший
+                    // покажчик у kernel-цілі.
+                    ? ValType.String
+                    : throw new Exception($"native codegen: змінна '{v.Name}' використана до оголошення"),
         UnaryExpression { Operator: "-" } u => InferExprType(u.Operand),
         UnaryExpression { Operator: "!" } => ValType.Bool,
         UnaryExpression { Operator: "~" } => ValType.Number,
@@ -844,6 +852,10 @@ public class NativeCodegen
         // (String), peekNum/pokeNum/pokePtr - прості числа/покажчики.
         CallExpression { FunctionName: "peekPtr" or "numToPtr" } when _target == NativeTarget.NyxOSKernel => ValType.String,
         CallExpression { FunctionName: "peekNum" or "pokeNum" or "pokePtr" } when _target == NativeTarget.NyxOSKernel => ValType.Number,
+        // Портовий ввід-вивід (Фаза N8.5d) - ті самі компілятор-
+        // інтринзики, що peek/poke, завжди Number (порт/значення - і
+        // так лише 8/16/32-бітні цілі, тут це double).
+        CallExpression { FunctionName: "inb" or "inw" or "inl" or "outb" or "outw" or "outl" } when _target == NativeTarget.NyxOSKernel => ValType.Number,
         // Спрощення Фази N3: УСІ функції вважаються Number-, bool-
         // функції поки не підтримуються (дивись ReturnStatement нижче).
         // ВИНЯТОК (Фаза N7): відомі ЗОВНІШНІ примітиви ядра NyxOS (НЕ
@@ -1520,6 +1532,19 @@ public class NativeCodegen
                             _asm.AppendLine($"    mov {label}, %eax");
                         break;
                     }
+                    // Фаза N8.5c: "гола" назва СВОЄЇ функції (без виклику)
+                    // - її АДРЕСА (той самий підхід, що kernel-функції
+                    // вже й так експортуються під ВЛАСНИМ іменем як
+                    // `.global funcName`, C ABI-сумісно) - потрібно для
+                    // callback-параметрів (pci_scan, isr_register_handler
+                    // тощо). Сирий reinterpret: мітка функції - вже
+                    // валідна адреса коду, immediate-завантаження в %eax,
+                    // БЕЗ виклику.
+                    if (_target == NativeTarget.NyxOSKernel && _knownFunctions.Contains(varExpr.Name))
+                    {
+                        _asm.AppendLine($"    mov ${varExpr.Name}, %eax");
+                        break;
+                    }
                     throw new Exception($"native codegen: змінна '{varExpr.Name}' використана до оголошення (масиви/структури - наступна фаза)");
                 }
 
@@ -1594,6 +1619,44 @@ public class NativeCodegen
                         // полів на кшталт "next") компілятор мусить
                         // знати ЗАЗДАЛЕГІДЬ (InferExprType вище), а не
                         // вгадувати за контекстом використання.
+                        // Портовий ввід-вивід (Фаза N8.5d, 18.09.2026) -
+                        // компілятор-інтринзики (як peek/poke), НЕ
+                        // зовнішні символи - генерують сирі in/out
+                        // інструкції напряму. Потрібні для pci.c-
+                        // подібного коду (і майже КОЖНОГО іншого файлу,
+                        // що торкається заліза напряму - timer.c/rtc.c/
+                        // keyboard.c/vga.c/ata.c тощо, ~20 ще лишається).
+                        // Номер порту - у %dx (апаратна вимога x86 для
+                        // "змінного порту" форми in/out), значення - у
+                        // AL/AX/EAX залежно від розміру.
+                        if ((call.FunctionName == "outb" || call.FunctionName == "outw" || call.FunctionName == "outl")
+                            && call.Arguments.Count == 2)
+                        {
+                            CompileExpression(call.Arguments[0]); // порт -> %xmm0
+                            _asm.AppendLine("    cvttsd2si %xmm0, %edx");
+                            _asm.AppendLine("    push %edx");
+                            CompileExpression(call.Arguments[1]); // значення -> %xmm0
+                            _asm.AppendLine("    cvttsd2si %xmm0, %eax");
+                            _asm.AppendLine("    pop %edx");
+                            string outReg = call.FunctionName switch { "outb" => "%al", "outw" => "%ax", _ => "%eax" };
+                            string outSuffix = call.FunctionName switch { "outb" => "b", "outw" => "w", _ => "l" };
+                            _asm.AppendLine($"    out{outSuffix} {outReg}, %dx");
+                            _asm.AppendLine("    xor %eax, %eax");
+                            _asm.AppendLine("    cvtsi2sd %eax, %xmm0"); // "повертає" 0 - результат ніде реально не використовується, як pokeNum/pokePtr
+                            break;
+                        }
+                        if ((call.FunctionName == "inb" || call.FunctionName == "inw" || call.FunctionName == "inl")
+                            && call.Arguments.Count == 1)
+                        {
+                            CompileExpression(call.Arguments[0]); // порт -> %xmm0
+                            _asm.AppendLine("    cvttsd2si %xmm0, %edx");
+                            string inReg = call.FunctionName switch { "inb" => "%al", "inw" => "%ax", _ => "%eax" };
+                            string inSuffix = call.FunctionName switch { "inb" => "b", "inw" => "w", _ => "l" };
+                            _asm.AppendLine("    xor %eax, %eax"); // очищаємо ВЕРХНІ байти ПЕРЕД частковим in - inb/inw їх не чіпають самі
+                            _asm.AppendLine($"    in{inSuffix} %dx, {inReg}");
+                            _asm.AppendLine("    cvtsi2sd %eax, %xmm0");
+                            break;
+                        }
                         if (call.FunctionName == "numToPtr" && call.Arguments.Count == 1)
                         {
                             // Сире перетворення число->вказівник (Фаза
@@ -1659,6 +1722,58 @@ public class NativeCodegen
                         // помилка (typo, неіснуюче ім'я) виявиться на
                         // етапі ЛІНКУВАННЯ ("undefined reference") -
                         // пізніше, ніж хотілось би, але не мовчки.
+                        // Непрямий виклик через ЗНАЧЕННЯ (Фаза N8.5c,
+                        // 18.09.2026): call.FunctionName - НЕ функція
+                        // цього файлу, а звичайна локальна/глобальна
+                        // ЗМІННА типу String, що зберігає АДРЕСУ функції
+                        // (взяту раніше "голою назвою" - дивись
+                        // VariableExpression вище). Потрібно, щоб
+                        // САМА kernel-функція могла викликати callback,
+                        // який їй передали параметром (той самий сенс,
+                        // що pci_scan(callback) у NyxOS - callback
+                        // виконується ВСЕРЕДИНІ pci_scan, не ззовні).
+                        bool isIndirectCall = !_knownFunctions.Contains(call.FunctionName)
+                            && ((_varTypes.TryGetValue(call.FunctionName, out var indirectVarType) && indirectVarType == ValType.String)
+                                || (!_varOffsets.ContainsKey(call.FunctionName) && _globalVars.TryGetValue(call.FunctionName, out var indirectGlobalType) && indirectGlobalType == ValType.String));
+
+                        if (isIndirectCall)
+                        {
+                            int pushedIndirect = 0;
+                            for (int i = call.Arguments.Count - 1; i >= 0; i--)
+                            {
+                                var argType = InferExprType(call.Arguments[i]);
+                                CompileExpression(call.Arguments[i]);
+                                if (argType == ValType.Number)
+                                {
+                                    _asm.AppendLine("    cvttsd2si %xmm0, %eax");
+                                    _asm.AppendLine("    push %eax");
+                                }
+                                else if (argType == ValType.String)
+                                {
+                                    _asm.AppendLine("    push %eax");
+                                }
+                                else
+                                {
+                                    throw new Exception("native codegen (Фаза N8.5c): аргументи непрямого виклику підтримуються лише числові чи рядкові (вказівники)");
+                                }
+                                pushedIndirect += 4;
+                            }
+                            // Значення змінної (адреса функції) - в %eax,
+                            // завантажуємо ОСТАННІМ (після всіх push'ів
+                            // аргументів), щоб не затерти їх.
+                            CompileExpression(new VariableExpression(call.FunctionName));
+                            _asm.AppendLine("    call *%eax");
+                            if (pushedIndirect > 0)
+                                _asm.AppendLine($"    add ${pushedIndirect}, %esp");
+                            // Callback - завжди void у наших сценаріях
+                            // (pci_scan-подібні callback'и нічого не
+                            // повертають) - Number-конвенція за
+                            // замовчуванням, як і для невідомих зовнішніх
+                            // викликів без анотації.
+                            _asm.AppendLine("    cvtsi2sd %eax, %xmm0");
+                            break;
+                        }
+
                         bool isKnownFunc = _knownFunctions.Contains(call.FunctionName);
 
                         int pushedBytes = 0;
