@@ -933,6 +933,10 @@ public class NativeCodegen
     {
         ["kmalloc"] = ValType.String,          // kheap.c - void* -> вказівник
         ["gfx_is_available"] = ValType.Bool,    // gfx.c - int, семантично bool (0/1)
+        ["scheduler_tick"] = ValType.String,    // process.c - повертає СИРУ адресу ESP
+                                                 // (uint32_t, що isr.s підставляє як
+                                                 // новий стек) - НЕ число, cvtsi2sd
+                                                 // спотворив би біти адреси (timer.c).
     };
 
     private ValType ExternalKernelReturnType(string functionName) =>
