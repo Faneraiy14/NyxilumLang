@@ -145,6 +145,19 @@ public class NativeCodegen
     private readonly Stack<(string Start, string End)> _loopLabels = new();
     private HashSet<string> _knownFunctions = new();
 
+    // Фаза N8.5 (18.09.2026): kernel-target функції можуть ОГОЛОСИТИ тип
+    // результату явно (func f(...) -> string {...}) - Parser.cs це вже
+    // давно парсить у FunctionDeclaration.ReturnType, але NativeCodegen
+    // досі це поле НІКОЛИ не читав і завжди вважав будь-яку відому
+    // функцію Number-результатом (та сама межа, що вже впиралась у
+    // kheap.c - kmalloc-подібна функція не могла повернути покажчик).
+    // Заповнюється ОДИН РАЗ у CompileKernelObject - лише для kernel-target
+    // (звичайні функції й так СТРОГО Number, дивись ReturnStatement).
+    private Dictionary<string, FunctionDeclaration> _kernelFuncsByName = new();
+    // Яку kernel-функцію зараз компілюємо - потрібно в ReturnStatement,
+    // щоб звірити РЕАЛЬНИЙ тип значення з явною анотацією (якщо вона є).
+    private FunctionDeclaration? _currentKernelFunc;
+
     // Рядкові й дробові літерали - у .rodata, кожен під СВОЄЮ міткою
     // (.Lstr0/.Ldbl0, ...) - записуємо в НАКОПИЧЕНУ секцію одразу, коли
     // зустрічаємо (не окремий прохід по AST заздалегідь). Спільний
@@ -373,6 +386,8 @@ public class NativeCodegen
         if (allFuncs.Count == 0)
             throw new Exception("native codegen (Фаза N7): у файлі немає жодної функції для --target nyxos-kernel");
 
+        _kernelFuncsByName = allFuncs.ToDictionary(f => f.Name);
+
         // Глобальні змінні верхнього рівня (потрібно для модулів зі
         // станом, напр. gconsole.c - grid/col/row/fg_color/bg_color
         // живуть МІЖ викликами функцій, той самий сенс, що C static).
@@ -468,6 +483,7 @@ public class NativeCodegen
         _nextLocalOffset = 0;
         _isMain = false;
         _isKernelExport = true;
+        _currentKernelFunc = func;
 
         var numericParams = new List<(string Name, int CabiOffset)>();
         for (int i = 0; i < func.Parameters.Count; i++)
@@ -810,10 +826,26 @@ public class NativeCodegen
         // vga_font.c, лінкер резолвить сам) - дивись ExternalKernelReturnType.
         CallExpression callExpr when _target == NativeTarget.NyxOSKernel && !_knownFunctions.Contains(callExpr.FunctionName)
             => ExternalKernelReturnType(callExpr.FunctionName),
+        // Фаза N8.5: виклик ВЛАСНОЇ (.nx) kernel-функції з явною анотацією
+        // результату (func f(...) -> string {...}) - дивись
+        // KernelReturnTypeFromAnnotation. Без анотації - той самий
+        // Number, що й завжди.
+        CallExpression callExpr2 when _target == NativeTarget.NyxOSKernel && _kernelFuncsByName.TryGetValue(callExpr2.FunctionName, out var calledDecl)
+            => KernelReturnTypeFromAnnotation(calledDecl),
         CallExpression => ValType.Number,
         BinaryExpression { Operator: "=" } assign => InferExprType(assign.Right),
         BinaryExpression { Operator: "&&" or "||" } => ValType.Bool,
         BinaryExpression { Operator: "==" or "!=" or "<" or "<=" or ">" or ">=" } => ValType.Bool,
+        // Фаза N8.5: InferExprType не знав, що "ptr + N"/"ptr - N" (Фаза
+        // N8, арифметика вказівників) дає String - сама КОМПІЛЯЦІЯ це
+        // вже вміла (дивись CompileExpression/BinaryExpression нижче),
+        // але тип-вивід досі мовчки казав Number для БУДЬ-ЯКОГО +/-,
+        // тому напр. "func f(p: string) -> string { return p + 1 }"
+        // падало б з хибним "оголошено -> string, але return дає
+        // Number" - знайдено ЖИВИМ тестом на самому фіксі N8.5 вище.
+        BinaryExpression { Operator: "+" or "-" } ptrArith when _target == NativeTarget.NyxOSKernel
+            && InferExprType(ptrArith.Left) == ValType.String && InferExprType(ptrArith.Right) == ValType.Number
+            => ValType.String,
         BinaryExpression => ValType.Number, // + - * %
         ArrayLiteralExpression => ValType.Array,
         // СПРОЩЕННЯ: масиви лише з Number-елементів (Фаза N3) - інакше
@@ -862,6 +894,20 @@ public class NativeCodegen
 
     private ValType ExternalKernelReturnType(string functionName) =>
         ExternalKernelReturnTypes.TryGetValue(functionName, out var t) ? t : ValType.Number;
+
+    // Той самий словник типів, що вже й для kernel-параметрів (дивись
+    // CompileKernelFunction) - "string" -> покажчик, числові псевдоніми
+    // -> Number, bool -> Bool. Немає анотації (ReturnType == null) ->
+    // старий типовий Number (без анотації - без зміни поведінки,
+    // ЖОДНА раніше робоча kernel-функція цим фіксом не ламається).
+    private ValType KernelReturnTypeFromAnnotation(FunctionDeclaration func) => func.ReturnType switch
+    {
+        null => ValType.Number,
+        "string" => ValType.String,
+        "bool" => ValType.Bool,
+        "any" or "i32" or "f64" or "int" or "number" or "size_t" or "u32" or "usize" => ValType.Number,
+        _ => throw new Exception($"native codegen (Фаза N7): тип результату '{func.ReturnType}' функції '{func.Name}' не підтримується для --target nyxos-kernel - лише string/bool/число (напр. -> string)")
+    };
 
     private void CompileBlock(BlockStatement block)
     {
@@ -985,6 +1031,20 @@ public class NativeCodegen
                                 _asm.AppendLine("    cvttsd2si %xmm0, %eax");
                             else if (t != ValType.String && t != ValType.Bool)
                                 throw new Exception("native codegen (Фаза N7): kernel-функції можуть повертати лише число (як C int) чи рядок (як char*)");
+
+                            // Фаза N8.5: якщо функція МАЄ явну анотацію
+                            // результату (-> string тощо) - звіряємо з
+                            // РЕАЛЬНИМ типом значення тут. Без цього
+                            // виклик такої функції з ІНШОГО місця (через
+                            // KernelReturnTypeFromAnnotation) мовчки
+                            // повірив би анотації навіть якщо тіло
+                            // насправді повертає щось інше.
+                            if (_currentKernelFunc?.ReturnType != null)
+                            {
+                                var declared = KernelReturnTypeFromAnnotation(_currentKernelFunc);
+                                if (declared != t)
+                                    throw new Exception($"native codegen (Фаза N8.5): функція '{_currentKernelFunc.Name}' оголошена як -> {_currentKernelFunc.ReturnType}, але цей return дає {t} - виправте анотацію або значення");
+                            }
                         }
                         else if (_isMain)
                         {
@@ -1587,11 +1647,14 @@ public class NativeCodegen
                         // до конвенції ВИРАЗУ цього компілятора: String/
                         // Bool - УЖЕ %eax (нічого робити не треба),
                         // Number - конвертуємо в %xmm0. Для ВІДОМИХ
-                        // (з цього файлу) функцій - СПРОЩЕННЯ: досі
-                        // вважаємо Number (той самий підхід, що решта
-                        // компілятора), для НЕВІДОМИХ (зовнішніх) -
-                        // дивимось у ExternalKernelReturnType.
-                        var retType = isKnownFunc ? ValType.Number : ExternalKernelReturnType(call.FunctionName);
+                        // (з цього файлу) функцій - Фаза N8.5: тепер
+                        // дивимось на явну анотацію результату
+                        // (func f(...) -> string), якщо вона є - без
+                        // анотації, як і раніше, Number. Для НЕВІДОМИХ
+                        // (зовнішніх) - дивимось у ExternalKernelReturnType.
+                        var retType = isKnownFunc
+                            ? (_kernelFuncsByName.TryGetValue(call.FunctionName, out var calledDecl2) ? KernelReturnTypeFromAnnotation(calledDecl2) : ValType.Number)
+                            : ExternalKernelReturnType(call.FunctionName);
                         if (retType == ValType.Number)
                             _asm.AppendLine("    cvtsi2sd %eax, %xmm0");
                         break;
