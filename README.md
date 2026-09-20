@@ -263,6 +263,22 @@ programs/     examples (nx_dashboard — a system dashboard, guess_the_number �
 lib/          standard library of .nx modules (strings, collections, datetime, testing, http_client, telegram, discord) — pulled in via import
 ```
 
+## Native x86 Compilation
+
+Bytecode + VM is the default, but there's a second path:
+`nx compile-native file.nx -o out --target nyxos-kernel` compiles to a
+real, relocatable x86 ELF `.o` object — no VM involved at all. This
+isn't a toy target: individual kernel modules (`kstring.c`,
+`gconsole.c`, `kheap.c`, `timer.c`, `rtc.c`, ...) have been rewritten in
+NyxilumLang, compiled this way, and swapped in for the original `.o` in
+a **real kernel's build** (`build.sh`) — the resulting kernel boots in
+QEMU identically to the C original, verified over serial console each
+time. See [`native-examples/nyxos-kernel/`](native-examples/nyxos-kernel/)
+and `NATIVE_ROADMAP.md` for the file-by-file record, including the
+language gaps this surfaced (no bitwise operators, no pointers/raw
+memory access yet) and how each was worked around without silently
+changing behavior.
+
 ## Commands
 
 | Command | What it does |
@@ -277,6 +293,7 @@ lib/          standard library of .nx modules (strings, collections, datetime, t
 | `nx format file.nx` | format a file (prints to the console) |
 | `nx lint file.nx` | check a file for common mistakes |
 | `nx check file.nx` | check syntax only (without running the code) |
+| `nx compile-native file.nx -o out --target nyxos-kernel` | compile to a native x86 ELF `.o` — see ["Native x86 Compilation"](#native-x86-compilation) |
 | `nx --version` | print the version |
 
 Every detail about packages is in the ["Package Manager"](#package-manager)
