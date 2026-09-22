@@ -2171,45 +2171,64 @@ public class NativeCodegen
             case "<=": _asm.AppendLine("    ucomisd %xmm1, %xmm0"); _asm.AppendLine("    setbe %al"); _asm.AppendLine("    movzbl %al, %eax"); break;
             case ">": _asm.AppendLine("    ucomisd %xmm1, %xmm0"); _asm.AppendLine("    seta %al"); _asm.AppendLine("    movzbl %al, %eax"); break;
             case ">=": _asm.AppendLine("    ucomisd %xmm1, %xmm0"); _asm.AppendLine("    setae %al"); _asm.AppendLine("    movzbl %al, %eax"); break;
-            // Побітові (Фаза N8, 16.09.2026) - чисел-як-double тут НЕМАЄ
-            // побітової інструкції SSE2 (нема "andsd" для цілих бітів
-            // double) - той самий трюк, що вже дає % вище: округлюємо
-            // ОБИДВА операнди в 32-бітні GPR через cvttsd2si (усічення
-            // до нуля - ІДЕНТИЧНО (int) у VirtualMachine.cs, той самий
-            // принцип побайтової відповідності VM/native), робимо
-            // ЦІЛОЧИСЕЛЬНУ операцію, конвертуємо результат назад через
-            // cvtsi2sd. Зсуви - лічильник ОБОВ'ЯЗКОВО в %cl (єдиний
-            // регістр, який x86 shl/sar дозволяють для змінної кількості
-            // бітів) - "sar" (арифметичний, зі знаком), а НЕ "shr"
-            // (логічний), щоб збігатись із C#'s ">>" на int у VM (теж
-            // арифметичний для знакового типу).
+            // Побітові (Фаза N8, 16.09.2026; ВХІДНА конвертація виправлена
+            // у Фазі N10, 22.09.2026 - EmitDoubleToUInt32 нижче) - чисел-
+            // як-double тут НЕМАЄ побітової інструкції SSE2, тож округлюємо
+            // ОБИДВА операнди в 32-бітні GPR, робимо ЦІЛОЧИСЕЛЬНУ операцію,
+            // конвертуємо результат назад ЗВИЧАЙНИМ cvtsi2sd (signed).
+            //
+            // Фаза N10, РЕАЛЬНИЙ БАГ #1 (виправлено): вхід через ПРОСТИЙ
+            // cvttsd2si давав ФІКСОВАНИЙ "integer indefinite" 0x80000000
+            // для будь-якого double з |x| >= 2^31 (напр. акумулятор хешу,
+            // що росте понад 2^31, - задокументовано раніше у Фазі N8.5e,
+            // auth.c) - ВСЯ інформація губилась ще до самої операції.
+            // EmitDoubleToUInt32 виправляє САМЕ це - коректно виділяє
+            // нижні 32 біти будь-якого double з [0, 2^32).
+            //
+            // Фаза N10, РЕАЛЬНИЙ БАГ #2 (знайдений і ВІДКОЧЕНИЙ живим
+            // тестом одразу після першої версії фіксу): вихід НАЗАД у
+            // double спочатку теж переробили на "безанакове" відновлення
+            // (EmitUInt32ToDouble) - але це ЛАМАЛО справжні від'ємні числа
+            // ("-8 >> 1" давало 4294967292 замість -4, бо 0xFFFFFFFC як
+            // бітовий патерн ОДНАКОВИЙ і для -4 signed, і для 4294967292
+            // unsigned - без реального типу немає способу розрізнити ЦІ
+            // ДВА випадки на виході). Вихід ЛИШЕНО звичайним signed
+            // cvtsi2sd (як і VM - C#'s (int) теж signed) - для звичайних
+            // чисел (уся регресія) це ІДЕНТИЧНО старій поведінці; для
+            // великого акумулятора результат виглядатиме "зі знаком
+            // навпаки" при друку (напр. 3000000000 надрукується як
+            // -1294967296), АЛЕ лишається БІТОВО коректним і самоузгодженим
+            // для будь-яких ПОДАЛЬШИХ побітових операцій/порівнянь/peek-
+            // poke - саме так реально використовується хеш у auth.c
+            // (порівнюється й далі хешується, не друкується як "гарне"
+            // десяткове число). Чесно задокументовано, не приховано.
             case "&":
-                _asm.AppendLine("    cvttsd2si %xmm0, %eax");
-                _asm.AppendLine("    cvttsd2si %xmm1, %ecx");
+                EmitDoubleToUInt32("%xmm0", "%eax");
+                EmitDoubleToUInt32("%xmm1", "%ecx");
                 _asm.AppendLine("    and %ecx, %eax");
                 _asm.AppendLine("    cvtsi2sd %eax, %xmm0");
                 break;
             case "|":
-                _asm.AppendLine("    cvttsd2si %xmm0, %eax");
-                _asm.AppendLine("    cvttsd2si %xmm1, %ecx");
+                EmitDoubleToUInt32("%xmm0", "%eax");
+                EmitDoubleToUInt32("%xmm1", "%ecx");
                 _asm.AppendLine("    or %ecx, %eax");
                 _asm.AppendLine("    cvtsi2sd %eax, %xmm0");
                 break;
             case "^":
-                _asm.AppendLine("    cvttsd2si %xmm0, %eax");
-                _asm.AppendLine("    cvttsd2si %xmm1, %ecx");
+                EmitDoubleToUInt32("%xmm0", "%eax");
+                EmitDoubleToUInt32("%xmm1", "%ecx");
                 _asm.AppendLine("    xor %ecx, %eax");
                 _asm.AppendLine("    cvtsi2sd %eax, %xmm0");
                 break;
             case "<<":
-                _asm.AppendLine("    cvttsd2si %xmm0, %eax");
-                _asm.AppendLine("    cvttsd2si %xmm1, %ecx");
+                EmitDoubleToUInt32("%xmm0", "%eax");
+                EmitDoubleToUInt32("%xmm1", "%ecx");
                 _asm.AppendLine("    shl %cl, %eax");
                 _asm.AppendLine("    cvtsi2sd %eax, %xmm0");
                 break;
             case ">>":
-                _asm.AppendLine("    cvttsd2si %xmm0, %eax");
-                _asm.AppendLine("    cvttsd2si %xmm1, %ecx");
+                EmitDoubleToUInt32("%xmm0", "%eax");
+                EmitDoubleToUInt32("%xmm1", "%ecx");
                 _asm.AppendLine("    sar %cl, %eax");
                 _asm.AppendLine("    cvtsi2sd %eax, %xmm0");
                 break;
@@ -2325,8 +2344,18 @@ public class NativeCodegen
                 pxor %xmm0, %xmm0
                 subsd %xmm1, %xmm0          # xmm0 = |xmm0|
             .Lpd_nonneg:
-                cvttsd2si %xmm0, %esi       # ціла частина (обрізана до нуля) - зберігаємо, знадобиться двічі
-
+            """);
+        // Фаза N10 (22.09.2026) - РЕАЛЬНИЙ БАГ, знайдений живим тестом
+        // одразу після виправлення побітових операторів: звичайний
+        // cvttsd2si на |xmm0| >= 2^31 (напр. 3000000000.0) давав
+        // ФІКСОВАНИЙ "integer indefinite" 0x80000000 замість правильних
+        // 32 бітів - print(3000000000.0) друкував "2147483648" МОВЧКИ
+        // НЕВІРНО, і це НЕ мало жодного стосунку до побітових операторів
+        // (той самий баг, просто в ЦІЙ функції). Той самий
+        // EmitDoubleToUInt32, що й побітові оператори вище (тут xmm0
+        // ГАРАНТОВАНО невід'ємний - модуль уже взято вище).
+        EmitDoubleToUInt32("%xmm0", "%esi"); // esi - ціла частина, обрізана до нуля, знадобиться двічі
+        _asm.AppendLine("""
                 mov %esi, %eax
                 mov $print_buf+11, %edi
                 dec %edi
@@ -2348,8 +2377,17 @@ public class NativeCodegen
                 inc %edi
                 jmp .Lpd_printintloop
             .Lpd_printintdone:
-
-                cvtsi2sd %esi, %xmm1
+            """);
+        // esi може мати встановленим старший біт (значення >= 2^31, той
+        // самий Фаза N10 випадок) - звичайний cvtsi2sd прочитав би це ЯК
+        // ВІД'ЄМНЕ (знакова конвертація), зламавши обчислення дробової
+        // частини нижче (на відміну від побітових операторів, тут xmm0 -
+        // КОНКРЕТНЕ відоме значення, яке треба надрукувати ТОЧНО, тому
+        // неоднозначність "signed чи unsigned" з коментаря вище для
+        // побітових операторів тут НЕ застосовна - потрібне справжнє
+        // числове значення esi, а не просто узгоджений бітовий патерн).
+        EmitUInt32ToDouble("%esi", "%xmm1");
+        _asm.AppendLine("""
                 subsd %xmm1, %xmm0          # xmm0 = дробова частина (0 <= x < 1)
 
                 pxor %xmm2, %xmm2
@@ -2564,6 +2602,61 @@ public class NativeCodegen
                 pop %ebp
                 ret
             """);
+    }
+
+    // Фаза N10 (22.09.2026, пряме прохання Sviatoslav'а закрити цю
+    // прогалину по-справжньому в компіляторі): double<->32-біт для
+    // побітових операторів. cvttsd2si на double ПОЗА діапазоном signed
+    // int32 (тобто |x| >= 2^31) дає ФІКСОВАНИЙ "integer indefinite"
+    // патерн 0x80000000, а НЕ обрізку до нижніх 32 бітів - саме це
+    // ламало auth.c-подібний код із акумуляторами, що ростуть понад
+    // 2^31 (задокументовано у Фазі N8.5e, обійдено там 24-бітною
+    // маскою замість справжнього виправлення). Тут - стандартний трюк
+    // GCC/Clang для double<->uint32 БЕЗ SSE4.1 cvttsd2usi (якої немає
+    // в базовому SSE2, на якому тримається увесь компілятор): для
+    // x у [2^31, 2^32) віднімаємо 2^31 (тепер влазить у ЗНАКОВИЙ
+    // діапазон), конвертуємо, повертаємо старший біт назад через xor;
+    // симетрично в інший бік.
+    //
+    // Це НЕ порушує VM-паритет для жодного значення, що раніше
+    // проходило регресійні тести: для x у [-2^31, 2^31) обидва шляхи
+    // (старий і новий) дають ІДЕНТИЧНИЙ результат (гілка "уже влазить"
+    // нижче спрацьовує без жодної зміни). Розбіжність можлива ЛИШЕ для
+    // |x| >= 2^31 - а там VM (C#, unchecked double->int) сама дає
+    // НЕВИЗНАЧЕНУ платформозалежну поведінку, тобто усталеного VM-
+    // еталону, з яким тут можна було б розійтись, просто не існує.
+    private string? _u32ConstLabel;
+    private string U32ConstLabel => _u32ConstLabel ??= EmitDoubleLiteral(2147483648.0); // 2^31, одна спільна константа на весь файл
+
+    private void EmitDoubleToUInt32(string srcXmm, string dstReg)
+    {
+        int id = _labelCounter++;
+        _asm.AppendLine($"    movsd {U32ConstLabel}, %xmm2");
+        _asm.AppendLine($"    ucomisd %xmm2, {srcXmm}");
+        _asm.AppendLine($"    jb .Lu32lo{id}");
+        _asm.AppendLine($"    subsd %xmm2, {srcXmm}");
+        _asm.AppendLine($"    cvttsd2si {srcXmm}, {dstReg}");
+        _asm.AppendLine($"    xor $0x80000000, {dstReg}");
+        _asm.AppendLine($"    jmp .Lu32done{id}");
+        _asm.AppendLine($".Lu32lo{id}:");
+        _asm.AppendLine($"    cvttsd2si {srcXmm}, {dstReg}");
+        _asm.AppendLine($".Lu32done{id}:");
+    }
+
+    private void EmitUInt32ToDouble(string srcReg, string dstXmm)
+    {
+        int id = _labelCounter++;
+        _asm.AppendLine($"    test {srcReg}, {srcReg}");
+        _asm.AppendLine($"    js .Lu32hi{id}");
+        _asm.AppendLine($"    cvtsi2sd {srcReg}, {dstXmm}");
+        _asm.AppendLine($"    jmp .Lu32bdone{id}");
+        _asm.AppendLine($".Lu32hi{id}:");
+        _asm.AppendLine($"    mov {srcReg}, %edx");
+        _asm.AppendLine($"    and $0x7fffffff, %edx");
+        _asm.AppendLine($"    cvtsi2sd %edx, {dstXmm}");
+        _asm.AppendLine($"    movsd {U32ConstLabel}, %xmm2");
+        _asm.AppendLine($"    addsd %xmm2, {dstXmm}");
+        _asm.AppendLine($".Lu32bdone{id}:");
     }
 
     // Записує UTF-8-байти рядка в .rodata як `.byte` (НЕ `.ascii "..."` -
