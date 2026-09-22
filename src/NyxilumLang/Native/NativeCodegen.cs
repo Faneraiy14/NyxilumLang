@@ -67,7 +67,15 @@ public enum NativeTarget { Linux, NyxOS, NyxOSKernel }
 // software-емуляції через пари регістрів (carry-пропагація для +/-,
 // розширене множення/ділення) - якісно інша, набагато більша робота,
 // окрема майбутня фаза, а не просто "ще один розмір".
-enum ValType { Number, Bool, String, Array, Struct, Closure, Int32, UInt32, Int8, UInt8, Int16, UInt16 }
+// Фаза N14 (22.09.2026): Ptr - ОДИН новий тег (не по одному на кожен
+// T) для СПРАВЖНІХ типізованих вказівників ptr<T> - на відміну від
+// String (Фаза N3+, УЖЕ "сирий вказівник", використовується скрізь у
+// файлі як untyped-адреса, лишається БЕЗ ЗМІН), Ptr несе окремо
+// збережений тип ЕЛЕМЕНТА (_ptrElementType/_globalPtrElementType,
+// нижче) - сам enum не може тримати параметр типу, тому елемент
+// зберігається "збоку", той самий патерн, що _varStructName для
+// ValType.Struct.
+enum ValType { Number, Bool, String, Array, Struct, Closure, Int32, UInt32, Int8, UInt8, Int16, UInt16, Ptr }
 
 // NativeCodegen — Фази N1-N3 (NATIVE_ROADMAP.md): справжня x86-компіляція
 // NyxilumLang, БЕЗ жодної VM під час виконання (на відміну від
@@ -109,6 +117,13 @@ public class NativeCodegen
     // щоб знати offset'и полів при member-доступі. НЕ скидається між
     // функціями окремо (скидається разом із _varTypes в CompileFunction).
     private Dictionary<string, string> _varStructName = new();
+    // ЛИШЕ для ValType.Ptr (Фаза N14) - тип ЕЛЕМЕНТА, на який вказує
+    // ця ЛОКАЛЬНА змінна/параметр (ptr<int32> -> ValType.Int32 тощо) -
+    // той самий патерн, що _varStructName вище. Скидається разом із
+    // _varTypes (НЕ для globals/return-типів функцій - ті в
+    // _globalPtrElementType нижче, живуть довше одного компільованого
+    // тіла функції).
+    private Dictionary<string, ValType> _ptrElementType = new();
     // try/catch (Фаза N4) - для КОЖНОГО TryStatement-вузла в ЦІЙ функції
     // (за посиланням на сам AST-вузол, не за іменем - їх немає) offset
     // 16-байтового "кадру обробника" (setjmp/longjmp-стиль, дивись
@@ -133,6 +148,15 @@ public class NativeCodegen
     // заповнюється ОДИН РАЗ у CompileKernelObject.
     private readonly Dictionary<string, ValType> _globalVars = new();
     private readonly StringBuilder _globalData = new();
+    // ЛИШЕ для ValType.Ptr (Фаза N14) - тип елемента для ГЛОБАЛЬНИХ
+    // вказівникових змінних (ІМ'Я змінної) ТА для kernel-функцій, чий
+    // ОГОЛОШЕНИЙ РЕЗУЛЬТАТ - ptr<T> (ІМ'Я функції) - об'єднано в ОДИН
+    // словник, оскільки простори імен змінних/функцій тут і так ніколи
+    // не перетинаються (той самий факт, яким уже користуються
+    // _globalVars/_kernelFuncsByName нарізно). НІКОЛИ не скидається -
+    // заповнюється ОДИН РАЗ (глобальні - у циклі глобальних нижче,
+    // функції - разом із _kernelFuncsByName).
+    private readonly Dictionary<string, ValType> _globalPtrElementType = new();
 
     // Заповнюється ОДИН РАЗ на весь файл у Compile() (НЕ скидається між
     // функціями, на відміну від _varOffsets/_varTypes) - структури
@@ -310,6 +334,7 @@ public class NativeCodegen
         _varOffsets = new Dictionary<string, int>();
         _varTypes = new Dictionary<string, ValType>();
         _varStructName = new Dictionary<string, string>();
+        _ptrElementType = new Dictionary<string, ValType>();
         _tryFrameOffsets = new Dictionary<TryStatement, int>();
         _tryDepth = 0;
         _nextLocalOffset = 0;
@@ -401,6 +426,17 @@ public class NativeCodegen
 
         _kernelFuncsByName = allFuncs.ToDictionary(f => f.Name);
 
+        // Фаза N14: реєструємо тип елемента для ФУНКЦІЙ, що
+        // ОГОЛОШУЮТЬ результат ptr<T> - ОДИН прохід тут, ДО компіляції
+        // будь-якого тіла (функції можуть викликати одна одну в
+        // довільному порядку - реєстрація МАЄ бути готова заздалегідь,
+        // той самий принцип, що _kernelFuncsByName щойно вище).
+        foreach (var f in allFuncs)
+        {
+            if (PtrElementTypeFromAnnotation(f.ReturnType) is { } petReturn)
+                _globalPtrElementType[f.Name] = petReturn;
+        }
+
         // Глобальні змінні верхнього рівня (потрібно для модулів зі
         // станом, напр. gconsole.c - grid/col/row/fg_color/bg_color
         // живуть МІЖ викликами функцій, той самий сенс, що C static).
@@ -434,9 +470,19 @@ public class NativeCodegen
                     // однозначні імена "int8"/"uint8"/.../"uint32" для
                     // справжніх sized-int типів (SizedIntFromAnnotation),
                     // щоб не міняти поведінку вже наявного коду.
+                    _ when PtrElementTypeFromAnnotation(v.TypeAnnotation) is { } petGlobal
+                        => RegisterGlobalPtrType(v.Name, petGlobal),
                     _ => SizedIntFromAnnotation(v.TypeAnnotation)
-                        ?? throw new Exception($"native codegen (Фаза N8.5): тип глобальної '{v.Name}' ('{v.TypeAnnotation}') не підтримується для --target nyxos-kernel - лише string/bool/int8/uint8/int16/uint16/int32/uint32/число")
+                        ?? throw new Exception($"native codegen (Фаза N8.5): тип глобальної '{v.Name}' ('{v.TypeAnnotation}') не підтримується для --target nyxos-kernel - лише string/bool/int8/uint8/int16/uint16/int32/uint32/ptr<T>/число")
                 };
+            }
+            else if (v.Initializer is LiteralExpression { Value: double } && PtrElementTypeFromAnnotation(v.TypeAnnotation) is { } petGlobalLit)
+            {
+                // "var p: ptr<int32> = 0;" - адреса-як-числова-константа
+                // (той самий null-вказівник use case, що String) - той
+                // самий пріоритет анотації над InferExprType, що
+                // int8/16/32 нижче.
+                type = RegisterGlobalPtrType(v.Name, petGlobalLit);
             }
             else if (v.Initializer is LiteralExpression { Value: double } && SizedIntFromAnnotation(v.TypeAnnotation) is { } sizedGlobalType)
             {
@@ -506,6 +552,15 @@ public class NativeCodegen
                     int sizedV = v.Initializer is LiteralExpression { Value: double dSized } ? TruncateConstToIntType(dSized, type) : 0;
                     _globalData.AppendLine($"    .long {sizedV}");
                     break;
+                case ValType.Ptr:
+                    // Фаза N14: немає ініціалізатора -> справжній
+                    // нульовий вказівник (як String вище); з
+                    // ініціалізатором - адреса-як-числова-константа
+                    // (немає обрізки до ширини - адреси завжди повні
+                    // 32 біти, на відміну від sized-int значень вище).
+                    int ptrV = v.Initializer is LiteralExpression { Value: double dPtr } ? unchecked((int)(long)dPtr) : 0;
+                    _globalData.AppendLine($"    .long {ptrV}");
+                    break;
                 default:
                     throw new Exception($"native codegen (Фаза N7): непідтримуваний тип глобальної '{v.Name}'");
             }
@@ -552,6 +607,7 @@ public class NativeCodegen
         _varOffsets = new Dictionary<string, int>();
         _varTypes = new Dictionary<string, ValType>();
         _varStructName = new Dictionary<string, string>();
+        _ptrElementType = new Dictionary<string, ValType>();
         _tryFrameOffsets = new Dictionary<TryStatement, int>();
         _tryDepth = 0;
         _nextLocalOffset = 0;
@@ -579,10 +635,20 @@ public class NativeCodegen
                 _varOffsets[param.Name] = cabiOffset;
                 _varTypes[param.Name] = sizedParamType;
             }
+            else if (PtrElementTypeFromAnnotation(param.Type) is { } petParam)
+            {
+                // Фаза N14: те саме, що string/sized-int вище - сирий
+                // 4-байтовий покажчик, жодної конвертації, лише ще й
+                // запам'ятовуємо тип ЕЛЕМЕНТА для подальшого
+                // ptr[i]/ptr + N.
+                _varOffsets[param.Name] = cabiOffset;
+                _varTypes[param.Name] = ValType.Ptr;
+                _ptrElementType[param.Name] = petParam;
+            }
             else
             {
                 if (param.Type is not ("any" or "i32" or "f64" or "int" or "number" or "size_t" or "u32" or "usize"))
-                    throw new Exception($"native codegen (Фаза N7): kernel-параметр '{param.Name}' типу '{param.Type}' не підтримується - лише string, int8/uint8/int16/uint16/int32/uint32 чи числові типи");
+                    throw new Exception($"native codegen (Фаза N7): kernel-параметр '{param.Name}' типу '{param.Type}' не підтримується - лише string, int8/uint8/int16/uint16/int32/uint32, ptr<T> чи числові типи");
                 numericParams.Add((param.Name, cabiOffset));
                 _nextLocalOffset -= 8;
                 _varOffsets[param.Name] = _nextLocalOffset;
@@ -644,6 +710,17 @@ public class NativeCodegen
                         {
                             _varStructName[v.Name] = si.StructName;
                         }
+                        if (type == ValType.Ptr && v.Initializer != null)
+                        {
+                            // Фаза N14: "var p = otherPtr + 1;" - тип
+                            // ЕЛЕМЕНТА не можна вивести з самого ValType
+                            // (bare enum) - переносимо його з
+                            // ІНІЦІАЛІЗАТОРА, той самий принцип, що
+                            // _varStructName щойно вище для Struct.
+                            var pet = InferPtrElementType(v.Initializer)
+                                ?? throw new Exception($"native codegen (Фаза N14): не вдалося визначити тип елемента вказівника для '{v.Name}'");
+                            _ptrElementType[v.Name] = pet;
+                        }
                         if (!_varOffsets.ContainsKey(v.Name)) // ім'я параметра - НЕ заводимо ще й локальний слот
                         {
                             _nextLocalOffset -= 8;
@@ -703,6 +780,7 @@ public class NativeCodegen
         _varOffsets = new Dictionary<string, int>();
         _varTypes = new Dictionary<string, ValType>();
         _varStructName = new Dictionary<string, string>();
+        _ptrElementType = new Dictionary<string, ValType>();
         _tryFrameOffsets = new Dictionary<TryStatement, int>();
         _tryDepth = 0;
         _nextLocalOffset = 0;
@@ -964,6 +1042,13 @@ public class NativeCodegen
         BinaryExpression { Operator: "+" or "-" } ptrArith when _target == NativeTarget.NyxOSKernel
             && InferExprType(ptrArith.Left) == ValType.String && InferExprType(ptrArith.Right) == ValType.Number
             => ValType.String,
+        // Фаза N14: те саме, що String-арифметика вище, для СПРАВЖНІХ
+        // типізованих вказівників - "typedPtr + N" ЛИШАЄТЬСЯ Ptr (з
+        // ТИМ САМИМ елементом - InferPtrElementType(bin.Left) пропускає
+        // його крізь ланцюжок), не занижується до Number.
+        BinaryExpression { Operator: "+" or "-" } typedPtrArith when _target == NativeTarget.NyxOSKernel
+            && InferExprType(typedPtrArith.Left) == ValType.Ptr && InferExprType(typedPtrArith.Right) == ValType.Number
+            => ValType.Ptr,
         // Фаза N12/N13: арифметика/побітові над sized-int-лівим
         // операндом лишаються ТИМ САМИМ типом (не "занижуються" назад
         // до Number) - саме ЦЕ дозволяє ланцюжок "a + b - c" лишатись
@@ -974,6 +1059,12 @@ public class NativeCodegen
             => InferExprType(intBin.Left),
         BinaryExpression => ValType.Number, // + - * %
         ArrayLiteralExpression => ValType.Array,
+        // Фаза N14: "typedPtr[i]" (масштабоване, типізоване
+        // читання) - ТИП РЕЗУЛЬТАТУ - тип ЕЛЕМЕНТА вказівника, не
+        // завжди Number (перевіряється ПЕРШИМ, до блáнкет-випадку
+        // масивів/рядків нижче).
+        IndexExpression ixPtr when InferExprType(ixPtr.Array) == ValType.Ptr
+            => InferPtrElementType(ixPtr.Array) ?? throw new Exception("native codegen (Фаза N14): не вдалося визначити тип елемента для індексування вказівника"),
         // СПРОЩЕННЯ: масиви лише з Number-елементів (Фаза N3) - інакше
         // довелось би вирішувати проблему змішаних типів без
         // повноцінного tagged union.
@@ -1036,8 +1127,9 @@ public class NativeCodegen
         "string" => ValType.String,
         "bool" => ValType.Bool,
         "any" or "i32" or "f64" or "int" or "number" or "size_t" or "u32" or "usize" => ValType.Number,
+        _ when PtrElementTypeFromAnnotation(func.ReturnType) != null => ValType.Ptr,
         _ => SizedIntFromAnnotation(func.ReturnType)
-            ?? throw new Exception($"native codegen (Фаза N7): тип результату '{func.ReturnType}' функції '{func.Name}' не підтримується для --target nyxos-kernel - лише string/bool/int8/uint8/int16/uint16/int32/uint32/число (напр. -> string)")
+            ?? throw new Exception($"native codegen (Фаза N7): тип результату '{func.ReturnType}' функції '{func.Name}' не підтримується для --target nyxos-kernel - лише string/bool/int8/uint8/int16/uint16/int32/uint32/ptr<T>/число (напр. -> string)")
     };
 
     private void CompileBlock(BlockStatement block)
@@ -1160,8 +1252,8 @@ public class NativeCodegen
                             // (напр. "return a[i] == b[i]" у k_streq).
                             if (t == ValType.Number)
                                 _asm.AppendLine("    cvttsd2si %xmm0, %eax");
-                            else if (t != ValType.String && t != ValType.Bool && !IsSizedIntType(t))
-                                throw new Exception("native codegen (Фаза N7): kernel-функції можуть повертати лише число (як C int), рядок (як char*), чи sized-int типи (int8/uint8/int16/uint16/int32/uint32)");
+                            else if (t != ValType.String && t != ValType.Bool && t != ValType.Ptr && !IsSizedIntType(t))
+                                throw new Exception("native codegen (Фаза N7): kernel-функції можуть повертати лише число (як C int), рядок (як char*), sized-int чи ptr<T> типи");
 
                             // Фаза N8.5: якщо функція МАЄ явну анотацію
                             // результату (-> string тощо) - звіряємо з
@@ -1442,8 +1534,42 @@ public class NativeCodegen
             case IndexExpression idx:
                 {
                     var containerType = InferExprType(idx.Array);
+                    if (containerType == ValType.Ptr)
+                    {
+                        // Фаза N14: "typedPtr[i]" - справжнє масштабоване
+                        // читання, x86-адресація "(%eax,%ecx,SCALE)"
+                        // НАПРЯМУ підтримує масштаб 1/2/4/8 - точнісінько
+                        // ширини всіх наших sized-int типів (1/2/4) і
+                        // Number-double (8) - ОДНА інструкція робить те,
+                        // що ручний "peekNum(ptr + i*4)" робив кількома.
+                        if (InferExprType(idx.Index) != ValType.Number)
+                            throw new Exception("native codegen (Фаза N14): індекс типізованого вказівника має бути числом");
+                        var elemType = InferPtrElementType(idx.Array)
+                            ?? throw new Exception("native codegen (Фаза N14): не вдалося визначити тип елемента для читання ptr[i]");
+                        CompileExpression(idx.Array);                // -> %eax (адреса)
+                        _asm.AppendLine("    push %eax");
+                        CompileExpression(idx.Index);                // -> %xmm0
+                        _asm.AppendLine("    cvttsd2si %xmm0, %ecx");
+                        _asm.AppendLine("    pop %eax");
+                        if (elemType == ValType.Number)
+                        {
+                            _asm.AppendLine("    movsd (%eax,%ecx,8), %xmm0");
+                        }
+                        else
+                        {
+                            var (elemSigned, elemWidth) = IntTypeInfo(elemType);
+                            string loadInstr = elemWidth switch
+                            {
+                                1 => elemSigned ? "movsbl" : "movzbl",
+                                2 => elemSigned ? "movswl" : "movzwl",
+                                _ => "mov"
+                            };
+                            _asm.AppendLine($"    {loadInstr} (%eax,%ecx,{elemWidth}), %eax");
+                        }
+                        break;
+                    }
                     if (containerType != ValType.Array && containerType != ValType.String)
-                        throw new Exception("native codegen: індексування [..] підтримується лише для масивів чи рядків");
+                        throw new Exception("native codegen: індексування [..] підтримується лише для масивів, рядків чи типізованих вказівників");
                     if (InferExprType(idx.Index) != ValType.Number)
                         throw new Exception("native codegen: індекс має бути числом");
                     CompileExpression(idx.Array);                    // -> %eax (вказівник)
@@ -1846,6 +1972,8 @@ public class NativeCodegen
                         if (call.FunctionName == "toNumber" && call.Arguments.Count == 1)
                         {
                             var srcType = InferExprType(call.Arguments[0]);
+                            if (srcType != ValType.Number && !IsSizedIntType(srcType))
+                                throw new Exception($"native codegen (Фаза N12/N14): toNumber() підтримується лише для чисел/sized-int - не {srcType} (адреса вказівника - не число, лишіть її String/Ptr)");
                             CompileExpression(call.Arguments[0]); // -> %eax (sized-int) чи %xmm0 (уже Number)
                             if (IsSizedIntType(srcType))
                             {
@@ -1937,7 +2065,7 @@ public class NativeCodegen
                                     _asm.AppendLine("    cvttsd2si %xmm0, %eax");
                                     _asm.AppendLine("    push %eax");
                                 }
-                                else if (argType == ValType.String || IsSizedIntType(argType))
+                                else if (argType == ValType.String || argType == ValType.Ptr || IsSizedIntType(argType))
                                 {
                                     _asm.AppendLine("    push %eax");
                                 }
@@ -1975,7 +2103,7 @@ public class NativeCodegen
                                 _asm.AppendLine("    cvttsd2si %xmm0, %eax"); // C int - 4 байти, НЕ 8-байтовий Number-слот
                                 _asm.AppendLine("    push %eax");
                             }
-                            else if (argType == ValType.String || IsSizedIntType(argType))
+                            else if (argType == ValType.String || argType == ValType.Ptr || IsSizedIntType(argType))
                             {
                                 _asm.AppendLine("    push %eax"); // вже 4-байтове значення (вказівник чи sized-int)
                             }
@@ -2076,8 +2204,49 @@ public class NativeCodegen
                         // клáсти будь-що в %eax/%xmm0, тому зберігаємо їх
                         // на стеку (LIFO), поки рахуємо RHS.
                         var containerType = InferExprType(idxTarget.Array);
+                        if (containerType == ValType.Ptr)
+                        {
+                            // Фаза N14: "typedPtr[i] = value" - масштабований
+                            // запис, дзеркально до читання вище.
+                            if (InferExprType(idxTarget.Index) != ValType.Number)
+                                throw new Exception("native codegen (Фаза N14): індекс типізованого вказівника має бути числом");
+                            var elemTypeW = InferPtrElementType(idxTarget.Array)
+                                ?? throw new Exception("native codegen (Фаза N14): не вдалося визначити тип елемента для запису ptr[i]=...");
+                            var rhsType = InferExprType(assign.Right);
+                            if (elemTypeW == ValType.Number ? rhsType != ValType.Number
+                                : rhsType != elemTypeW && rhsType != ValType.Number)
+                                throw new Exception($"native codegen (Фаза N14): присвоєння {rhsType} у ptr<{elemTypeW}>[i] не підтримується - конвертуйте явно");
+
+                            CompileExpression(idxTarget.Array);          // -> %eax
+                            _asm.AppendLine("    push %eax");            // [ptr]
+                            CompileExpression(idxTarget.Index);          // -> %xmm0
+                            _asm.AppendLine("    cvttsd2si %xmm0, %ecx");
+                            _asm.AppendLine("    push %ecx");            // [ptr, index]
+                            CompileExpression(assign.Right);             // -> %xmm0 (Number) чи %eax (sized-int)
+                            if (elemTypeW == ValType.Number)
+                            {
+                                _asm.AppendLine("    pop %ecx");
+                                _asm.AppendLine("    pop %eax");
+                                _asm.AppendLine("    movsd %xmm0, (%eax,%ecx,8)");
+                            }
+                            else
+                            {
+                                var (elemSignedW, elemWidthW) = IntTypeInfo(elemTypeW);
+                                if (rhsType == ValType.Number)
+                                {
+                                    EmitDoubleToUInt32("%xmm0", "%eax");
+                                    EmitNarrowExtend(elemWidthW, elemSignedW);
+                                }
+                                _asm.AppendLine("    mov %eax, %edx");   // значення вбік, звільняємо eax
+                                _asm.AppendLine("    pop %ecx");         // індекс
+                                _asm.AppendLine("    pop %eax");         // вказівник
+                                string storeRegW = elemWidthW switch { 1 => "%dl", 2 => "%dx", _ => "%edx" };
+                                _asm.AppendLine($"    mov {storeRegW}, (%eax,%ecx,{elemWidthW})");
+                            }
+                            break;
+                        }
                         if (containerType != ValType.Array && containerType != ValType.String)
-                            throw new Exception("native codegen: індексоване присвоєння підтримується лише для масивів чи рядків");
+                            throw new Exception("native codegen: індексоване присвоєння підтримується лише для масивів, рядків чи типізованих вказівників");
                         if (InferExprType(idxTarget.Index) != ValType.Number)
                             throw new Exception("native codegen: індекс має бути числом");
                         if (InferExprType(assign.Right) != ValType.Number)
@@ -2228,14 +2397,37 @@ public class NativeCodegen
                         _asm.AppendLine("    pop %eax");
                         _asm.AppendLine(bin.Operator == "+" ? "    add %ecx, %eax" : "    sub %ecx, %eax");
                     }
-                    else if (leftType == ValType.String && _target == NativeTarget.NyxOSKernel
-                             && (bin.Operator == "==" || bin.Operator == "!=")
-                             && (InferExprType(bin.Right) == ValType.String || InferExprType(bin.Right) == ValType.Number))
+                    else if (leftType == ValType.Ptr && _target == NativeTarget.NyxOSKernel
+                             && (bin.Operator == "+" || bin.Operator == "-")
+                             && InferExprType(bin.Right) == ValType.Number)
                     {
-                        // Порівняння вказівників (Фаза N8, 16.09.2026) -
-                        // ЛИШЕ ідентичність АДРЕС (та сама "сира адреса в
-                        // %eax"), НЕ порівняння ЗМІСТУ (strcmp) - точнісінько
-                        // те, що потрібне для null-перевірок (kheap.c:
+                        // Фаза N14: те саме, що String-арифметика вище,
+                        // АЛЕ масштабує зсув на sizeof(T) - точнісінько
+                        // як C, а не "адреса + зсув руками" (те, що
+                        // String-шлях вище й далі свідомо лишає ручним).
+                        // Це і є суть "СПРАВЖНІХ" типізованих
+                        // вказівників, а не просто нова назва для
+                        // старого механізму.
+                        var elemType = InferPtrElementType(bin.Left)
+                            ?? throw new Exception($"native codegen (Фаза N14): не вдалося визначити тип елемента вказівника для '{bin.Operator}'");
+                        int elemSize = elemType == ValType.Number ? 8 : IntTypeInfo(elemType).WidthBytes;
+                        CompileExpression(bin.Left);   // адреса -> %eax
+                        _asm.AppendLine("    push %eax");
+                        CompileExpression(bin.Right);  // індекс (Number) -> %xmm0
+                        _asm.AppendLine("    cvttsd2si %xmm0, %ecx");
+                        if (elemSize != 1) _asm.AppendLine($"    imul ${elemSize}, %ecx, %ecx");
+                        _asm.AppendLine("    pop %eax");
+                        _asm.AppendLine(bin.Operator == "+" ? "    add %ecx, %eax" : "    sub %ecx, %eax");
+                    }
+                    else if ((leftType == ValType.String || leftType == ValType.Ptr) && _target == NativeTarget.NyxOSKernel
+                             && (bin.Operator == "==" || bin.Operator == "!=")
+                             && (InferExprType(bin.Right) == ValType.String || InferExprType(bin.Right) == ValType.Ptr || InferExprType(bin.Right) == ValType.Number))
+                    {
+                        // Порівняння вказівників (Фаза N8, 16.09.2026;
+                        // розширено на Ptr у Фазі N14) - ЛИШЕ ідентичність
+                        // АДРЕС (та сама "сира адреса в %eax"), НЕ
+                        // порівняння ЗМІСТУ (strcmp) - точнісінько те, що
+                        // потрібне для null-перевірок (kheap.c:
                         // "current != 0", "header->next == header" тощо).
                         // Правий операнд МОЖЕ бути Number (звичайний
                         // літерал 0 для "порівняй з null") - тоді
@@ -2279,6 +2471,15 @@ public class NativeCodegen
                     else if (leftType == ValType.Closure)
                     {
                         throw new Exception($"native codegen (Фаза N4): оператор '{bin.Operator}' для замикань не підтримується (викличте f(...) замість порівняння/арифметики над самим значенням-функцією)");
+                    }
+                    else if (leftType == ValType.Ptr)
+                    {
+                        // Фаза N14: те саме "чесна помилка, не мовчазна
+                        // хибна поведінка", що String вище - будь-який
+                        // оператор, не спійманий гілками +-/==/!= вище
+                        // (напр. '*', або '+' з НЕ-Number правим
+                        // операндом).
+                        throw new Exception($"native codegen (Фаза N14): оператор '{bin.Operator}' для типізованого вказівника не підтримується (лише +/- зі зсувом-Number, ==/!= з іншим вказівником/Number)");
                     }
                     else
                     {
@@ -2480,6 +2681,56 @@ public class NativeCodegen
         "toU16" => ValType.UInt16,
         "toI32" => ValType.Int32,
         "toU32" => ValType.UInt32,
+        _ => null
+    };
+
+    // Фаза N14: "ptr<T>" - ЄДИНА нова форма анотації (не окреме слово,
+    // як "int32" тощо) - розпізнається ЧИСТО текстовим префіксом/
+    // суфіксом (Parser.cs і так зберігає анотації як вільний рядок,
+    // ЖОДНИХ змін Lexer/Parser не треба, той самий принцип, що всі
+    // sized-int анотації). T - лише ОДИН із уже наявних sized-int
+    // типів чи "number" (String/Bool/вкладені ptr<ptr<T>> елементи -
+    // СВІДОМО поза обсягом першої версії, чесна помилка компіляції).
+    private static ValType? PtrElementTypeFromAnnotation(string? annotation)
+    {
+        if (annotation == null || !annotation.StartsWith("ptr<") || !annotation.EndsWith(">")) return null;
+        string inner = annotation.Substring(4, annotation.Length - 5);
+        return inner == "number"
+            ? ValType.Number
+            : SizedIntFromAnnotation(inner)
+                ?? throw new Exception($"native codegen (Фаза N14): непідтримуваний тип елемента вказівника 'ptr<{inner}>' - лише ptr<number>/ptr<int8>/ptr<uint8>/ptr<int16>/ptr<uint16>/ptr<int32>/ptr<uint32>");
+    }
+
+    // Реєструє тип елемента ЛОКАЛЬНОЇ/параметра (_ptrElementType) чи
+    // ГЛОБАЛЬНОЇ/функції-результату (_globalPtrElementType) і повертає
+    // ValType.Ptr - зручно викликати ПРЯМО всередині switch-виразу
+    // (побічний ефект + повернене значення одним викликом), той самий
+    // трюк, що вже дав компактний "int32"/"uint32"-код у Фазах N12/N13.
+    private ValType RegisterLocalPtrType(string name, ValType elementType)
+    {
+        _ptrElementType[name] = elementType;
+        return ValType.Ptr;
+    }
+
+    private ValType RegisterGlobalPtrType(string name, ValType elementType)
+    {
+        _globalPtrElementType[name] = elementType;
+        return ValType.Ptr;
+    }
+
+    // Тип ЕЛЕМЕНТА (не самого вказівника - той уже ValType.Ptr) для
+    // ДОВІЛЬНОГО виразу, що дає вказівник (Фаза N14) - потрібен окремо
+    // від InferExprType, бо ValType (bare enum) не може нести параметр
+    // типу. Локальна змінна/параметр затіняє глобальну/функцію (той
+    // самий порядок пошуку, що VariableExpression у InferExprType) -
+    // арифметика над вказівником (ptr +- N) ЗБЕРІГАЄ тип елемента
+    // ЛІВОГО операнда (як у C: T* + int лишається T*).
+    private ValType? InferPtrElementType(ExpressionNode expr) => expr switch
+    {
+        VariableExpression v when _ptrElementType.TryGetValue(v.Name, out var lt) => lt,
+        VariableExpression v when _globalPtrElementType.TryGetValue(v.Name, out var gt) => gt,
+        BinaryExpression { Operator: "+" or "-" } bin when InferExprType(bin.Left) == ValType.Ptr => InferPtrElementType(bin.Left),
+        CallExpression call when _globalPtrElementType.TryGetValue(call.FunctionName, out var ct) => ct,
         _ => null
     };
 

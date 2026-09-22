@@ -290,6 +290,22 @@ public class Parser
         {
             var type = Peek().Value;
             Advance();
+            // "ptr<T>" (Фаза N14, нативний компілятор - справжні
+            // типізовані вказівники) - ЄДИНИЙ спеціально розпізнаний
+            // випадок "ім'я<...>", НЕ повноцінні дженерики для всієї
+            // мови (тому саме тут, не окремий загальний механізм) -
+            // "<"/">" тут ті самі Operator-токени, що звичайні
+            // порівняння, лексер їх УЖЕ дає без змін, розпізнаємо лише
+            // за позицією (одразу після "ptr").
+            if (type == "ptr" && Peek().Type == TokenType.Operator && Peek().Value == "<")
+            {
+                Advance();
+                var elementType = ParseType();
+                if (Peek().Type != TokenType.Operator || Peek().Value != ">")
+                    throw new Exception($"Очікується '>' після типу елемента вказівника на рядку {Peek().Line}, стовпець {Peek().Column}");
+                Advance();
+                return $"ptr<{elementType}>";
+            }
             return type;
         }
         else
