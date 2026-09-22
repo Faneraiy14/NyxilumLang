@@ -19,7 +19,7 @@ EXE="${NX_EXE:-$TESTS_DIR/../src/NyxilumLang/bin/Debug/net10.0-windows/Nx.exe}"
 # test_sandbox_symlink.nx / test_db_sandbox_escape.nx — окремі блоки нижче
 # (потребують NX_SANDBOX=1 і готують/прибирають теки/symlink навколо
 # запуску, тут пройшли б без сенсу чи забруднили б диск поза sandbox).
-SKIP="test_graphics2d.nx test_graphics3d.nx calculator.nx test_http_server.nx test_websocket_server.nx bench_loop.nx test_sandbox_symlink.nx test_db_sandbox_escape.nx ws_client_check.nx ws_timeout_recovery_check.nx test_ast_dump.nx"
+SKIP="test_graphics2d.nx test_graphics3d.nx test_graphics_image_sound.nx calculator.nx test_http_server.nx test_websocket_server.nx bench_loop.nx test_sandbox_symlink.nx test_db_sandbox_escape.nx ws_client_check.nx ws_timeout_recovery_check.nx test_ast_dump.nx"
 
 # Тести, де помилка — очікуваний результат.
 EXPECT_ERROR="test_throw_uncaught.nx test_nested_scope_error.nx test_selective_import_missing.nx test_lib_testing_fail.nx test_parser_stack_limits.nx"

@@ -4,6 +4,7 @@
 #if WINDOWS
 using System.Windows.Forms;
 using System.Drawing;
+using System.Media;
 
 namespace NyxilumLang.Runtime.Modules;
 
@@ -22,6 +23,13 @@ public class NxCanvas
 
 public static class GraphicsModule
 {
+    // Крок A плану NyxilumEngine (22.09.2026) - кеш завантажених
+    // зображень ЗА ШЛЯХОМ, щоб повторний loadImage() того самого
+    // файлу в ігровому циклі (типово - на КОЖНОМУ кадрі, той самий
+    // спрайт) не читав диск щоразу - лише при ПЕРШОМУ виклику для
+    // даного шляху.
+    private static readonly Dictionary<string, Image> _imageCache = new();
+
     public static void Register(Dictionary<string, Func<object[], object?>> registry)
     {
         registry["createCanvas"] = args =>
@@ -116,6 +124,59 @@ public static class GraphicsModule
             using var font = new Font("Arial", size);
             using var brush = new SolidBrush(color);
             g.DrawString(text, font, brush, x, y);
+            return null;
+        };
+
+        // loadImage/drawImage/playSound (Крок A плану NyxilumEngine,
+        // 22.09.2026) - передумова рушія: 2D-графіка вже вміла лише
+        // суцільні фігури (drawRect/drawCircle/...), жодних зображень/
+        // звуку не було зовсім. loadImage кешує за ШЛЯХОМ (_imageCache
+        // вище) - повторний виклик того самого шляху НЕ читає диск.
+        registry["loadImage"] = args =>
+        {
+            string path = args[0]?.ToString() ?? "";
+            if (_imageCache.TryGetValue(path, out var cached)) return cached;
+            var img = Image.FromFile(path);
+            _imageCache[path] = img;
+            return img;
+        };
+
+        registry["drawImage"] = args =>
+        {
+            var canvas = (NxCanvas)args[0];
+            var img = (Image)args[1];
+            int x = Convert.ToInt32(args[2]);
+            int y = Convert.ToInt32(args[3]);
+            using var g = Graphics.FromImage(canvas.Buffer);
+            if (args.Length > 5)
+            {
+                int w = Convert.ToInt32(args[4]);
+                int h = Convert.ToInt32(args[5]);
+                g.DrawImage(img, x, y, w, h);
+            }
+            else
+            {
+                g.DrawImage(img, x, y);
+            }
+            return null;
+        };
+
+        // playSound - лише WAV (обмеження самого SoundPlayer, частини
+        // .NET - жодної нової залежності, той самий "нуль зовнішніх
+        // залежностей" принцип, що вже тримає весь нативний компілятор)
+        // - чесно задокументовано, не приховано. Play() (не PlaySync())
+        // - асинхронно, щоб НЕ блокувати ігровий цикл на час звучання -
+        // САМЕ тому НЕ `using`: Play() відтворює у ФОНОВОМУ потоці, і
+        // Dispose() одразу після повернення з цієї функції перервав би
+        // відтворення на середині (реальний, а не гіпотетичний баг,
+        // спійманий ДО живого тесту - `using var` + асинхронний Play()
+        // - класична пастка). SoundPlayer лишається жити до збирання
+        // сміттям - прийнятний компроміс для простої першої версії.
+        registry["playSound"] = args =>
+        {
+            string path = args[0]?.ToString() ?? "";
+            var player = new SoundPlayer(path);
+            player.Play();
             return null;
         };
 

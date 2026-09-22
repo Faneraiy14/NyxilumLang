@@ -1,0 +1,24 @@
+// Крок A плану NyxilumEngine (22.09.2026) - loadImage/drawImage/
+// playSound (GraphicsModule.cs). ПРОПУЩЕНО в run_all.sh (Windows-
+// only, Windows Forms - той самий стан, що test_graphics2d.nx/
+// test_graphics3d.nx) - написано й синтаксично перевірено (nx check)
+// цією сесією, АЛЕ реальний живий запуск (вікно/зображення/звук на
+// екрані) потребує Windows-машини - НЕ побачено власними очима,
+// потребує ручної перевірки Sviatoslav'ом.
+func main() {
+    var canvas = createCanvas("NyxilumEngine - зображення/звук", 320, 240)
+    var img = loadImage("sprite.png")
+    var frame = 0
+
+    while frame < 60 {
+        clearCanvas(canvas, 10, 10, 20)
+        drawImage(canvas, img, 100, 80)
+        drawImage(canvas, img, 10, 10, 48, 48)
+        presentCanvas(canvas)
+        frame = frame + 1
+    }
+
+    playSound("blip.wav")
+    print("зображення/звук: 60 кадрів відмальовано без помилок")
+    closeCanvas(canvas)
+}
