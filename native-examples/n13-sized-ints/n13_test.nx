@@ -1,0 +1,86 @@
+// Фаза N13 - живий freestanding-тест Int8/UInt8/Int16/UInt16 (той самий
+// патерн, що n12-int-types/, лише ІНША ширина). Кожна функція - окрема
+// перевірка, викликається C-гарнесом (harness.c) через C ABI.
+
+func addI8(a: int8, b: int8) -> int8 {
+    return a + b
+}
+
+func addU8(a: uint8, b: uint8) -> uint8 {
+    return a + b
+}
+
+func addI16(a: int16, b: int16) -> int16 {
+    return a + b
+}
+
+func addU16(a: uint16, b: uint16) -> uint16 {
+    return a + b
+}
+
+func divI8(a: int8, b: int8) -> int8 {
+    return a / b
+}
+
+func divU8(a: uint8, b: uint8) -> uint8 {
+    return a / b
+}
+
+func divI16(a: int16, b: int16) -> int16 {
+    return a / b
+}
+
+func divU16(a: uint16, b: uint16) -> uint16 {
+    return a / b
+}
+
+func ltSignedI8(a: int8, b: int8) {
+    if (a < b) {
+        return 1
+    }
+    return 0
+}
+
+func ltUnsignedU8(a: uint8, b: uint8) {
+    if (a < b) {
+        return 1
+    }
+    return 0
+}
+
+func shrI16(a: int16, n: int16) -> int16 {
+    return a >> n
+}
+
+func shrU16(a: uint16, n: uint16) -> uint16 {
+    return a >> n
+}
+
+func notU8(a: uint8) -> uint8 {
+    return ~a
+}
+
+func roundtripSignedI16(x: int16) -> int16 {
+    var n = toNumber(x)
+    var y = toI16(n)
+    return y
+}
+
+func roundtripUnsignedU8(x: uint8) -> uint8 {
+    var n = toNumber(x)
+    var y = toU8(n)
+    return y
+}
+
+// Number-межа з обрізкою: 300.0 приведене до int8 має обгорнутись
+// (300 mod 256 = 44, як signed байт - все ще 44, у діапазоні int8).
+func numberToI8Boundary() -> int8 {
+    var y = toI8(300.0)
+    return y
+}
+
+// Мультиплікація з переповненням вузького типу: 200 * 200 = 40000,
+// далеко за межами uint8 (0-255) - МАЄ обгорнутись за модулем 256.
+func mulU8Overflow(a: uint8, b: uint8) -> uint8 {
+    return a * b
+}
