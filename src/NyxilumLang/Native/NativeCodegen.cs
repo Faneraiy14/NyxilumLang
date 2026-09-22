@@ -54,7 +54,14 @@ public enum NativeTarget { Linux, NyxOS, NyxOSKernel }
 // знадобився б статичний вивід типу РЕЗУЛЬТАТУ виклику будь-якої
 // функції, а не універсальне припущення "усі функції - Number", яке
 // InferExprType(CallExpression) досі робить (Фаза N4+, майбутнє).
-enum ValType { Number, Bool, String, Array, Struct, Closure }
+// Int32/UInt32 (Фаза N12, 22.09.2026) - ЛИШЕ --target nyxos-kernel,
+// той самий принцип, що peek/poke/asm/портовий I/O (Фаза N8-N11):
+// ДОДАНО поруч з double-based Number, ніколи не замінюючи його -
+// справжні 32-бітні GPR-значення (не double з латками), з коректною
+// сигнатурою (signed/unsigned) для /, %, порівнянь, >>. Дивись
+// EmitDoubleToUInt32/EmitUInt32ToDouble нижче для межі з Number-світом
+// (toI32/toU32/toNumber-функції, а НЕ неявна конвертація).
+enum ValType { Number, Bool, String, Array, Struct, Closure, Int32, UInt32 }
 
 // NativeCodegen — Фази N1-N3 (NATIVE_ROADMAP.md): справжня x86-компіляція
 // NyxilumLang, БЕЗ жодної VM під час виконання (на відміну від
@@ -415,9 +422,28 @@ public class NativeCodegen
                     null => ValType.Number,
                     "string" => ValType.String,
                     "bool" => ValType.Bool,
+                    // Фаза N12 (22.09.2026) - "i32"/"u32" ЛИШАЮТЬСЯ
+                    // синонімами Number (як і завжди були) - НОВІ,
+                    // однозначні імена "int32"/"uint32" для справжніх
+                    // цілих типів, щоб не міняти поведінку вже наявного
+                    // коду, що використовує i32/u32 як псевдоніми числа.
+                    "int32" => ValType.Int32,
+                    "uint32" => ValType.UInt32,
                     "any" or "i32" or "f64" or "int" or "number" or "size_t" or "u32" or "usize" => ValType.Number,
-                    _ => throw new Exception($"native codegen (Фаза N8.5): тип глобальної '{v.Name}' ('{v.TypeAnnotation}') не підтримується для --target nyxos-kernel - лише string/bool/число")
+                    _ => throw new Exception($"native codegen (Фаза N8.5): тип глобальної '{v.Name}' ('{v.TypeAnnotation}') не підтримується для --target nyxos-kernel - лише string/bool/int32/uint32/число")
                 };
+            }
+            else if (v.Initializer is LiteralExpression { Value: double } && v.TypeAnnotation == "int32")
+            {
+                // "var x: int32 = 5;" - анотація МАЄ перемогти голе
+                // InferExprType нижче (яке для double-літерала завжди
+                // дало б Number) - інакше анотація тут мовчки
+                // ігнорувалась би, коли є ініціалізатор.
+                type = ValType.Int32;
+            }
+            else if (v.Initializer is LiteralExpression { Value: double } && v.TypeAnnotation == "uint32")
+            {
+                type = ValType.UInt32;
             }
             else if (v.Initializer is LiteralExpression { Value: double or bool or string })
             {
@@ -456,6 +482,17 @@ public class NativeCodegen
                         string strLabel = EmitStringLiteral(sv, nullTerminate: true);
                         _globalData.AppendLine($"    .long {strLabel}");
                     }
+                    break;
+                case ValType.Int32:
+                case ValType.UInt32:
+                    // Немає ініціалізатора -> 0 (як "string" -> null
+                    // вище). З ініціалізатором - лише double-літерал,
+                    // обрізаний до 32-бітного бітового патерна ТУТ, на
+                    // етапі компіляції (unchecked - той самий принцип, що
+                    // й double<->int32 конвертація в рантаймі, лише
+                    // виконана заздалегідь для константи).
+                    int i32v = v.Initializer is LiteralExpression { Value: double d32 } ? unchecked((int)(long)d32) : 0;
+                    _globalData.AppendLine($"    .long {i32v}");
                     break;
                 default:
                     throw new Exception($"native codegen (Фаза N7): непідтримуваний тип глобальної '{v.Name}'");
@@ -520,10 +557,18 @@ public class NativeCodegen
                 _varOffsets[param.Name] = cabiOffset; // сирий покажчик - без конвертації
                 _varTypes[param.Name] = ValType.String;
             }
+            else if (param.Type == "int32" || param.Type == "uint32")
+            {
+                // Фаза N12: C-ABI параметр УЖЕ рівно 4-байтове сире
+                // значення - те саме, що string-параметр (сирий
+                // покажчик), жодної double-конвертації не треба.
+                _varOffsets[param.Name] = cabiOffset;
+                _varTypes[param.Name] = param.Type == "int32" ? ValType.Int32 : ValType.UInt32;
+            }
             else
             {
                 if (param.Type is not ("any" or "i32" or "f64" or "int" or "number" or "size_t" or "u32" or "usize"))
-                    throw new Exception($"native codegen (Фаза N7): kernel-параметр '{param.Name}' типу '{param.Type}' не підтримується - лише string чи числові типи");
+                    throw new Exception($"native codegen (Фаза N7): kernel-параметр '{param.Name}' типу '{param.Type}' не підтримується - лише string, int32/uint32 чи числові типи");
                 numericParams.Add((param.Name, cabiOffset));
                 _nextLocalOffset -= 8;
                 _varOffsets[param.Name] = _nextLocalOffset;
@@ -843,7 +888,13 @@ public class NativeCodegen
                     : throw new Exception($"native codegen: змінна '{v.Name}' використана до оголошення"),
         UnaryExpression { Operator: "-" } u => InferExprType(u.Operand),
         UnaryExpression { Operator: "!" } => ValType.Bool,
-        UnaryExpression { Operator: "~" } => ValType.Number,
+        // Фаза N12: '~' на Int32/UInt32-операнді лишається тим самим
+        // типом (той самий принцип, що унарний '-' вище) - лише "гола"
+        // Number-версія (без реальних цілих типів) типізується як
+        // Number, як і раніше.
+        UnaryExpression { Operator: "~" } uTilde => InferExprType(uTilde.Operand) is ValType.Int32 or ValType.UInt32
+            ? InferExprType(uTilde.Operand)
+            : ValType.Number,
         // peek32/poke32 (Фаза N8, 16.09.2026) - ВБУДОВАНІ інтринзики
         // компілятора (НЕ зовнішні символи ядра - лінкер про них НІЧОГО
         // не знає, компілятор сам вставляє сирі mov-інструкції), тому
@@ -865,6 +916,13 @@ public class NativeCodegen
         // asm(...) (Фаза N11) - той самий клас, що hlt()/inb/outb: завжди
         // Number, результат ніколи реально не використовується.
         CallExpression { FunctionName: "asm" } when _target == NativeTarget.NyxOSKernel => ValType.Number,
+        // toI32/toU32/toNumber (Фаза N12) - явні конвертери на МЕЖІ між
+        // Number-світом (double) і справжніми Int32/UInt32 (GPR) - той
+        // самий "convert once at the boundary" принцип, що numToPtr вище
+        // (НЕ неявна конвертація десь усередині виразу).
+        CallExpression { FunctionName: "toI32" } when _target == NativeTarget.NyxOSKernel => ValType.Int32,
+        CallExpression { FunctionName: "toU32" } when _target == NativeTarget.NyxOSKernel => ValType.UInt32,
+        CallExpression { FunctionName: "toNumber" } when _target == NativeTarget.NyxOSKernel => ValType.Number,
         // Спрощення Фази N3: УСІ функції вважаються Number-, bool-
         // функції поки не підтримуються (дивись ReturnStatement нижче).
         // ВИНЯТОК (Фаза N7): відомі ЗОВНІШНІ примітиви ядра NyxOS (НЕ
@@ -892,6 +950,14 @@ public class NativeCodegen
         BinaryExpression { Operator: "+" or "-" } ptrArith when _target == NativeTarget.NyxOSKernel
             && InferExprType(ptrArith.Left) == ValType.String && InferExprType(ptrArith.Right) == ValType.Number
             => ValType.String,
+        // Фаза N12: арифметика/побітові над Int32/UInt32-лівим операндом
+        // лишаються ТИМ САМИМ типом (не "занижуються" назад до Number) -
+        // саме ЦЕ дозволяє ланцюжок "a + b - c" лишатись у GPR-світі без
+        // жодного double-round-trip на кожному кроці. Порівняння вище
+        // (== < > і т.д.) вже коректно завжди Bool незалежно від типу
+        // операндів.
+        BinaryExpression intBin when InferExprType(intBin.Left) is ValType.Int32 or ValType.UInt32
+            => InferExprType(intBin.Left),
         BinaryExpression => ValType.Number, // + - * %
         ArrayLiteralExpression => ValType.Array,
         // СПРОЩЕННЯ: масиви лише з Number-елементів (Фаза N3) - інакше
@@ -955,8 +1021,10 @@ public class NativeCodegen
         null => ValType.Number,
         "string" => ValType.String,
         "bool" => ValType.Bool,
+        "int32" => ValType.Int32,
+        "uint32" => ValType.UInt32,
         "any" or "i32" or "f64" or "int" or "number" or "size_t" or "u32" or "usize" => ValType.Number,
-        _ => throw new Exception($"native codegen (Фаза N7): тип результату '{func.ReturnType}' функції '{func.Name}' не підтримується для --target nyxos-kernel - лише string/bool/число (напр. -> string)")
+        _ => throw new Exception($"native codegen (Фаза N7): тип результату '{func.ReturnType}' функції '{func.Name}' не підтримується для --target nyxos-kernel - лише string/bool/int32/uint32/число (напр. -> string)")
     };
 
     private void CompileBlock(BlockStatement block)
@@ -1079,8 +1147,8 @@ public class NativeCodegen
                             // (напр. "return a[i] == b[i]" у k_streq).
                             if (t == ValType.Number)
                                 _asm.AppendLine("    cvttsd2si %xmm0, %eax");
-                            else if (t != ValType.String && t != ValType.Bool)
-                                throw new Exception("native codegen (Фаза N7): kernel-функції можуть повертати лише число (як C int) чи рядок (як char*)");
+                            else if (t != ValType.String && t != ValType.Bool && t != ValType.Int32 && t != ValType.UInt32)
+                                throw new Exception("native codegen (Фаза N7): kernel-функції можуть повертати лише число (як C int), рядок (як char*), чи int32/uint32");
 
                             // Фаза N8.5: якщо функція МАЄ явну анотацію
                             // результату (-> string тощо) - звіряємо з
@@ -1595,9 +1663,20 @@ public class NativeCodegen
                     // &|^<<>>) - на Bool/іншому чесна помилка компіляції,
                     // а не спроба вгадати поведінку.
                     var tNot = InferExprType(unaryBitNot.Operand);
+                    if (tNot == ValType.Int32 || tNot == ValType.UInt32)
+                    {
+                        // Фаза N12: операнд уже сире 4-байтове значення в
+                        // %eax (не double) - НІЯКОГО round-trip через
+                        // %xmm0 не треба, на відміну від Number-шляху
+                        // нижче - оце і є реальна перевага справжніх
+                        // цілих типів, не лише "інший ярлик".
+                        CompileExpression(unaryBitNot.Operand);
+                        _asm.AppendLine("    not %eax");
+                        break;
+                    }
                     if (tNot != ValType.Number)
                     {
-                        throw new Exception("native codegen (Фаза N8): '~' підтримується лише для чисел");
+                        throw new Exception("native codegen (Фаза N8): '~' підтримується лише для чисел чи int32/uint32");
                     }
                     CompileExpression(unaryBitNot.Operand);
                     _asm.AppendLine("    cvttsd2si %xmm0, %eax");
@@ -1730,6 +1809,33 @@ public class NativeCodegen
                             _asm.AppendLine("    cvtsi2sd %eax, %xmm0");
                             break;
                         }
+                        if ((call.FunctionName == "toI32" || call.FunctionName == "toU32") && call.Arguments.Count == 1)
+                        {
+                            // Однаковий бітовий шлях для обох (Фаза N12) -
+                            // "обрізати double до нижніх 32 бітів" не
+                            // залежить від того, як ці 32 біти ІНТЕРПРЕТУЮТЬ
+                            // ПІЗНІШЕ (signed чи unsigned) - лише ValType-
+                            // тег результату відрізняється (вирішує
+                            // InferExprType вище), сам код - однаковий.
+                            CompileExpression(call.Arguments[0]); // -> %xmm0 (Number)
+                            EmitDoubleToUInt32("%xmm0", "%eax");
+                            break;
+                        }
+                        if (call.FunctionName == "toNumber" && call.Arguments.Count == 1)
+                        {
+                            var srcType = InferExprType(call.Arguments[0]);
+                            CompileExpression(call.Arguments[0]); // -> %eax (Int32/UInt32) чи %xmm0 (уже Number)
+                            if (srcType == ValType.Int32)
+                            {
+                                _asm.AppendLine("    cvtsi2sd %eax, %xmm0"); // signed-реконструкція
+                            }
+                            else if (srcType == ValType.UInt32)
+                            {
+                                EmitUInt32ToDouble("%eax", "%xmm0"); // unsigned-реконструкція (Фаза N10)
+                            }
+                            // srcType == Number: CompileExpression вже дав %xmm0 - нічого робити не треба
+                            break;
+                        }
                         // asm("...") (Фаза N11, 22.09.2026) - Sviatoslav's
                         // прямо названий пріоритет #1 після "чи може моя
                         // мова замінити C/Assembler?": СПРАВЖНІЙ inline-
@@ -1802,13 +1908,13 @@ public class NativeCodegen
                                     _asm.AppendLine("    cvttsd2si %xmm0, %eax");
                                     _asm.AppendLine("    push %eax");
                                 }
-                                else if (argType == ValType.String)
+                                else if (argType == ValType.String || argType == ValType.Int32 || argType == ValType.UInt32)
                                 {
                                     _asm.AppendLine("    push %eax");
                                 }
                                 else
                                 {
-                                    throw new Exception("native codegen (Фаза N8.5c): аргументи непрямого виклику підтримуються лише числові чи рядкові (вказівники)");
+                                    throw new Exception("native codegen (Фаза N8.5c): аргументи непрямого виклику підтримуються лише числові, рядкові (вказівники) чи int32/uint32");
                                 }
                                 pushedIndirect += 4;
                             }
@@ -1840,13 +1946,13 @@ public class NativeCodegen
                                 _asm.AppendLine("    cvttsd2si %xmm0, %eax"); // C int - 4 байти, НЕ 8-байтовий Number-слот
                                 _asm.AppendLine("    push %eax");
                             }
-                            else if (argType == ValType.String)
+                            else if (argType == ValType.String || argType == ValType.Int32 || argType == ValType.UInt32)
                             {
-                                _asm.AppendLine("    push %eax"); // вже 4-байтовий вказівник
+                                _asm.AppendLine("    push %eax"); // вже 4-байтове значення (вказівник чи int32/uint32)
                             }
                             else
                             {
-                                throw new Exception("native codegen (Фаза N7): аргументи kernel-функцій підтримуються лише числові чи рядкові (вказівники)");
+                                throw new Exception("native codegen (Фаза N7): аргументи kernel-функцій підтримуються лише числові, рядкові (вказівники) чи int32/uint32");
                             }
                             pushedBytes += 4;
                         }
@@ -2067,6 +2173,10 @@ public class NativeCodegen
                     {
                         CompileNumberBinary(bin);
                     }
+                    else if (leftType is ValType.Int32 or ValType.UInt32)
+                    {
+                        CompileIntBinary(bin, leftType);
+                    }
                     else if (leftType == ValType.String && _target == NativeTarget.NyxOSKernel
                              && (bin.Operator == "+" || bin.Operator == "-")
                              && InferExprType(bin.Right) == ValType.Number)
@@ -2271,6 +2381,76 @@ public class NativeCodegen
                 break;
             default:
                 throw new Exception($"native codegen (Фаза N3): оператор '{bin.Operator}' для чисел ще не підтримується");
+        }
+    }
+
+    // Фаза N12 (22.09.2026): арифметика над СПРАВЖНІМИ Int32/UInt32 -
+    // ЖОДНОГО double-round-trip узагалі (на відміну від побітових
+    // операторів CompileNumberBinary вище, які мусять йти через
+    // EmitDoubleToUInt32/EmitUInt32ToDouble, бо Number - це double) -
+    // операнди вже лежать як сирі 4-байтові значення в %eax, звичайні
+    // GPR-інструкції напряму. Це й є справжня, а не "обхідна", заміна
+    // асемблерної цілочисельної арифметики.
+    //
+    // Signed (Int32) vs unsigned (UInt32) розрізняються РІВНО там, де це
+    // реально впливає на результат - ділення/остача (idiv+cdq vs
+    // div+xor %edx,%edx), порівняння (setl/setg/... vs setb/seta/...),
+    // зсув вправо (sar - арифметичний, зберігає знак, vs shr - логічний,
+    // заповнює нулями) - САМЕ ця остання різниця була НЕМОЖЛИВА у Фазі
+    // N10 (там ">>" мусив лишатись ЗАВЖДИ sar, бо double не ніс
+    // інформації про знаковість) - реальні типи тут нарешті закривають
+    // ту прогалину. Додавання/віднімання/множення (add/sub/imul) дають
+    // ІДЕНТИЧНИЙ бітовий результат для обох знаковостей (двійкове
+    // доповнення) - той самий факт, що й у C.
+    private void CompileIntBinary(BinaryExpression bin, ValType intType)
+    {
+        bool isSigned = intType == ValType.Int32;
+        CompileExpression(bin.Left);   // -> %eax (Int32/UInt32 - без double)
+        _asm.AppendLine("    push %eax");
+        var rightType = InferExprType(bin.Right);
+        CompileExpression(bin.Right);
+        if (rightType == ValType.Number)
+        {
+            // Межа Number <-> Int32/UInt32 (Фаза N12) - конвертуємо РІВНО
+            // тут, на межі, той самий "convert once at the boundary"
+            // принцип, що вже є для kernel-параметрів (Фаза N7) і
+            // побітових операторів (Фаза N10) - усередині ж
+            // Int32/UInt32-світу після цього - лише GPR, без SSE2.
+            EmitDoubleToUInt32("%xmm0", "%eax");
+        }
+        else if (rightType != intType)
+        {
+            throw new Exception($"native codegen (Фаза N12): змішування {intType} і {rightType} в операторі '{bin.Operator}' не підтримується - конвертуйте явно (toI32/toU32)");
+        }
+        _asm.AppendLine("    mov %eax, %ecx");   // праве -> ecx
+        _asm.AppendLine("    pop %eax");         // ліве назад -> eax
+        switch (bin.Operator)
+        {
+            case "+": _asm.AppendLine("    add %ecx, %eax"); break;
+            case "-": _asm.AppendLine("    sub %ecx, %eax"); break;
+            case "*": _asm.AppendLine("    imul %ecx, %eax"); break; // однаковий результат для signed/unsigned (нижні 32 біти)
+            case "/":
+                if (isSigned) { _asm.AppendLine("    cdq"); _asm.AppendLine("    idiv %ecx"); }
+                else { _asm.AppendLine("    xor %edx, %edx"); _asm.AppendLine("    div %ecx"); }
+                break;
+            case "%":
+                if (isSigned) { _asm.AppendLine("    cdq"); _asm.AppendLine("    idiv %ecx"); }
+                else { _asm.AppendLine("    xor %edx, %edx"); _asm.AppendLine("    div %ecx"); }
+                _asm.AppendLine("    mov %edx, %eax"); // остача (edx) - результат %, не частка
+                break;
+            case "==": _asm.AppendLine("    cmp %ecx, %eax"); _asm.AppendLine("    sete %al"); _asm.AppendLine("    movzbl %al, %eax"); break;
+            case "!=": _asm.AppendLine("    cmp %ecx, %eax"); _asm.AppendLine("    setne %al"); _asm.AppendLine("    movzbl %al, %eax"); break;
+            case "<": _asm.AppendLine("    cmp %ecx, %eax"); _asm.AppendLine(isSigned ? "    setl %al" : "    setb %al"); _asm.AppendLine("    movzbl %al, %eax"); break;
+            case "<=": _asm.AppendLine("    cmp %ecx, %eax"); _asm.AppendLine(isSigned ? "    setle %al" : "    setbe %al"); _asm.AppendLine("    movzbl %al, %eax"); break;
+            case ">": _asm.AppendLine("    cmp %ecx, %eax"); _asm.AppendLine(isSigned ? "    setg %al" : "    seta %al"); _asm.AppendLine("    movzbl %al, %eax"); break;
+            case ">=": _asm.AppendLine("    cmp %ecx, %eax"); _asm.AppendLine(isSigned ? "    setge %al" : "    setae %al"); _asm.AppendLine("    movzbl %al, %eax"); break;
+            case "&": _asm.AppendLine("    and %ecx, %eax"); break;
+            case "|": _asm.AppendLine("    or %ecx, %eax"); break;
+            case "^": _asm.AppendLine("    xor %ecx, %eax"); break;
+            case "<<": _asm.AppendLine("    shl %cl, %eax"); break;
+            case ">>": _asm.AppendLine(isSigned ? "    sar %cl, %eax" : "    shr %cl, %eax"); break;
+            default:
+                throw new Exception($"native codegen (Фаза N12): оператор '{bin.Operator}' для {intType} ще не підтримується");
         }
     }
 
