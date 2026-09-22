@@ -1,0 +1,17 @@
+// Фаза N15 - живий freestanding-тест naked-функцій. Доводить: (1) НЕ
+// генерується стандартний пролог/епілог (перевіряється структурно, за
+// згенерованим .s - див. README.md); (2) виклик naked-функції з
+// ЗВИЧАЙНОГО коду реально працює - справжній спостережуваний побічний
+// ефект через asm() і ручний повернення через asm("ret").
+
+var marker: int32;
+
+func nakedSetMarker() naked {
+    asm("movl $777, __g_marker")
+    asm("ret")
+}
+
+func callNakedSetMarker() -> int32 {
+    nakedSetMarker()
+    return marker
+}

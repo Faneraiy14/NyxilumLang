@@ -615,6 +615,13 @@ public class NativeCodegen
         _isKernelExport = true;
         _currentKernelFunc = func;
 
+        if (func.IsNaked)
+        {
+            CompileNakedKernelFunction(func);
+            _isKernelExport = false;
+            return;
+        }
+
         var numericParams = new List<(string Name, int CabiOffset)>();
         for (int i = 0; i < func.Parameters.Count; i++)
         {
@@ -690,6 +697,45 @@ public class NativeCodegen
         _asm.AppendLine("    ret");
 
         _isKernelExport = false;
+    }
+
+    // Фаза N15 (22.09.2026): naked-функції - "func handler() naked
+    // {...}" - компілятор НЕ емітує push %ebp/mov %esp,%ebp (пролог)
+    // ЧИ mov %ebp,%esp/pop %ebp/ret (епілог) - лише мітку й тіло. Без
+    // %ebp, встановленого стандартним прологом, ЖОДНЕ %ebp-відносне
+    // звертання (локальні змінні, параметри - _varOffsets всюди в
+    // решті файлу рахує offset'и ВІДНОСНО %ebp) не було б коректним -
+    // тому, на відміну від звичайних kernel-функцій, тіло СВІДОМО
+    // ОБМЕЖЕНЕ лише викликами (ExpressionStatement/CallExpression,
+    // напр. asm(...) чи виклик ЗВИЧАЙНОЇ - НЕ naked - функції, яка
+    // сама коректно встановлює ВЛАСНИЙ %ebp при вході) - чесна помилка
+    // компіляції для будь-якого іншого виду інструкції (var/if/while/
+    // return/...), а не мовчазне порушення пам'яті. Той самий рівень
+    // "повної відповідальності програміста", що GCC/Clang
+    // __attribute__((naked)) - реальний ISR-трамплін пише СИРИЙ asm()
+    // для збереження регістрів/iret, а НЕ звичайний NyxilumLang-код.
+    private void CompileNakedKernelFunction(FunctionDeclaration func)
+    {
+        if (func.Parameters.Count > 0)
+            throw new Exception($"native codegen (Фаза N15): naked-функція '{func.Name}' не може мати параметрів - без стандартного прологу %ebp не встановлено, C-ABI-параметри (cabiOffset відносно %ebp) були б недоступні");
+        if (func.ReturnType != null)
+            throw new Exception($"native codegen (Фаза N15): naked-функція '{func.Name}' не може мати анотацію результату (-> {func.ReturnType}) - return усередині naked-тіла заборонено (компілятор нічого не додає за програміста, лише сирий asm()/виклики)");
+
+        foreach (var stmt in func.Body.Statements)
+        {
+            if (stmt is not ExpressionStatement { Expression: CallExpression })
+                throw new Exception($"native codegen (Фаза N15): тіло naked-функції '{func.Name}' може містити ЛИШЕ виклики (напр. asm(...) чи звичайну функцію) - без прологу %ebp не встановлено, тому локальні змінні/return/умови тощо небезпечні; знайдено '{stmt.GetType().Name}'");
+        }
+
+        _asm.AppendLine($".global {func.Name}");
+        _asm.AppendLine($"{func.Name}:");
+        foreach (var stmt in func.Body.Statements)
+        {
+            CompileStatement(stmt);
+        }
+        // СВІДОМО жодного "ret"/"iret" тут - програміст МАЄ сам
+        // написати його останнім через asm() (asm("iret") тощо) - як і
+        // GCC naked, компілятор нічого не додає за нього.
     }
 
     // Виділяє слот КОЖНІЙ локальній змінній (8 байтів - Фаза N3) і

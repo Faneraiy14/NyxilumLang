@@ -267,10 +267,22 @@ public class Parser
             Advance();
             returnType = ParseType();
         }
-        
+
+        // "naked" (Фаза N15, нативний компілятор) - звичайний
+        // Identifier-токен (НЕ додано до списку ключових слів Lexer'а,
+        // той самий мінімально-інвазивний підхід, що вже дав
+        // "ptr<T>" - розпізнається лише за позицією, тут "звичайна
+        // назва" усюди в решті мови й далі парситься як завжди).
+        bool isNaked = false;
+        if (Peek().Type == TokenType.Identifier && Peek().Value == "naked")
+        {
+            Advance();
+            isNaked = true;
+        }
+
         var body = ParseBlockStatement();
         string fullName = structName != null ? $"{structName}.{name.Value}" : name.Value;
-        return new FunctionDeclaration(fullName, parameters, body, returnType);
+        return new FunctionDeclaration(fullName, parameters, body, returnType, isNaked);
     }
 
     private string ParseType()

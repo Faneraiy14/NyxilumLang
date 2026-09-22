@@ -109,8 +109,13 @@ public class FunctionDeclaration : StatementNode
     public List<FunctionParameter> Parameters { get; } = new();
     public BlockStatement Body { get; }
     public string? ReturnType { get; }
-    public FunctionDeclaration(string name, List<FunctionParameter> parameters, BlockStatement body, string? returnType = null)
-    { Name = name; Parameters = parameters; Body = body; ReturnType = returnType; }
+    // Фаза N15 (нативний компілятор, --target nyxos-kernel лише) -
+    // "func f() naked { ... }": компілятор НЕ генерує стандартний
+    // пролог/епілог (push %ebp/.../pop %ebp;ret) - тіло ПОВНІСТЮ на
+    // відповідальності програміста, у парі з asm() (Фаза N11).
+    public bool IsNaked { get; }
+    public FunctionDeclaration(string name, List<FunctionParameter> parameters, BlockStatement body, string? returnType = null, bool isNaked = false)
+    { Name = name; Parameters = parameters; Body = body; ReturnType = returnType; IsNaked = isNaked; }
     public override string ToString(int indent = 0)
     {
         var pad = new string(' ', indent);
