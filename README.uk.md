@@ -3,7 +3,7 @@
 *[English](README.md)*
 
 Мова програмування власної розробки: компілятор у байткод, стекова віртуальна
-машина та стандартна бібліотека з 166 вбудованих функцій — від математики й
+машина та стандартна бібліотека з 170 вбудованих функцій — від математики й
 рядків до HTTP, графіки та вводу з клавіатури.
 
 **Мова самохостована**: у `selfhosted/` лежить інтерпретатор NyxilumLang,
@@ -52,8 +52,8 @@ Windows:
 powershell -ExecutionPolicy Bypass -File install-nx.ps1
 ```
 
-Linux/Mac (без GUI/графіки — тільки Windows Forms підтримує їх, решта мови
-працює однаково):
+Linux/Mac (GUI працює через власну реалізацію на X11; тільки 2D/3D-графіка
+на канвасі доступна лише на Windows Forms — решта мови працює однаково):
 
 ```bash
 bash install-nx.sh
@@ -95,8 +95,9 @@ nx myprogram.nx
 
 Стандартна бібліотека охоплює математику, рядки (зокрема `trim`, `repeat`,
 `indexOf`, `reverse`), масиви (`slice`, `unique`, `indexOf`, `reverse`),
-мапи, JSON, файли, час, HTTP-запити, 2D-графіку на канвасі, зчитування
-клавіш та GUI-вікна на Windows Forms з робочими кнопками (`guiWindow`,
+мапи, JSON, файли, час, HTTP-запити, 2D-графіку на канвасі (лише Windows
+Forms), зчитування клавіш та GUI-вікна (Windows Forms на Windows, власна
+реалізація на X11 на Linux/Mac) з робочими кнопками (`guiWindow`,
 `guiButton`, `guiOnAction` — клік дійсно викликає NyxilumLang-функцію).
 
 ### Зовнішні процеси
@@ -232,7 +233,7 @@ dbClose(db)
       │
    Parser.cs       рекурсивний спуск -> AST
       │
-   Compiler.cs     AST -> байткод (61 опкод)
+   Compiler.cs     AST -> байткод (67 опкодів)
       │
 VirtualMachine.cs  стекова VM виконує байткод
 ```
@@ -246,7 +247,7 @@ src/NyxilumLang/
   Core/       Lexer.cs, Parser.cs, Token.cs
   AST/        вузли дерева
   Compiler/   Compiler.cs, Bytecode.cs
-  VM/         VirtualMachine.cs — виконання + 166 вбудованих функцій
+  VM/         VirtualMachine.cs — виконання + 170 вбудованих функцій
   Runtime/    NxMap, NxJson, NxFunctionRef, модулі Http/Os/Graphics/Regex/WebSocket
   Tools/      Formatter.cs, Linter.cs
 
@@ -385,7 +386,7 @@ nx main.nx
 bash tests/run_all.sh
 ```
 
-51 тест: рекурсія, замикання, фрейми, мапи, методи, стандартна бібліотека
+67 тестів: рекурсія, замикання, фрейми, мапи, методи, стандартна бібліотека
 мови, `try/catch`, модулі (звичайний і вибірковий import), `lib/testing.nx`,
 `lib/strings.nx`, `lib/collections.nx`, `lib/datetime.nx`, самохостинг,
 `break`/`continue`, глобальні змінні, рівність чисел, умови з дужками,
@@ -420,10 +421,11 @@ nx myprogram.nx
   кожен викликає свою. Це **не замикання**: вкладена функція не бачить
   локальних змінних "батька" (для цього — анонімні лямбди
   `var f = func() {...}`, які саме захоплюють оточення).
-- GUI (`guiWindow`, ...) і 2D/3D-графіка (`createCanvas`, ...) працюють
-  лише на Windows (Windows Forms). На Linux/Mac ці функції недоступні —
-  виклик дає чітку помилку часу виконання, а не крашиться. Решта мови
-  (усе, крім GUI/графіки) кросплатформна, збирається таргетом `net10.0`.
+- 2D/3D-графіка (`createCanvas`, ...) працює лише на Windows (Windows
+  Forms). На Linux/Mac ці функції недоступні — виклик дає чітку помилку
+  часу виконання, а не крашиться. GUI (`guiWindow`, ...) кросплатформний:
+  Windows Forms на Windows, власна реалізація на X11 на Linux/Mac. Решта
+  мови кросплатформна, збирається таргетом `net10.0`.
 - GUI-функції, що чіпають уже створений контрол (`guiSetText`, `guiGetText`,
   `guiAdd`, `guiShow`, `guiOnAction`, `presentCanvas`, `closeCanvas`), не
   можна викликати з воркера (`spawn`) — Windows Forms вимагає, щоб контрол

@@ -3,7 +3,7 @@
 *[Українською](README.uk.md)*
 
 A programming language built from scratch: a bytecode compiler, a stack-based
-virtual machine, and a standard library of 166 built-in functions — everything
+virtual machine, and a standard library of 170 built-in functions — everything
 from math and strings to HTTP, graphics, and keyboard input.
 
 **The language is self-hosted**: `selfhosted/` contains an interpreter for
@@ -52,8 +52,9 @@ Windows:
 powershell -ExecutionPolicy Bypass -File install-nx.ps1
 ```
 
-Linux/Mac (no GUI/graphics — only Windows Forms supports those, the rest of
-the language works the same everywhere):
+Linux/Mac (GUI works via a built-in X11 implementation; only 2D/3D canvas
+graphics is Windows Forms only — the rest of the language works the same
+everywhere):
 
 ```bash
 bash install-nx.sh
@@ -96,8 +97,9 @@ nx myprogram.nx
 
 The standard library covers math, strings (including `trim`, `repeat`,
 `indexOf`, `reverse`), arrays (`slice`, `unique`, `indexOf`, `reverse`),
-maps, JSON, files, time, HTTP requests, 2D canvas graphics, keyboard
-input, and GUI windows on Windows Forms with working buttons (`guiWindow`,
+maps, JSON, files, time, HTTP requests, 2D canvas graphics (Windows Forms
+only), keyboard input, and GUI windows (Windows Forms on Windows, a
+built-in X11 implementation on Linux/Mac) with working buttons (`guiWindow`,
 `guiButton`, `guiOnAction` — the click actually invokes a NyxilumLang function).
 
 ### External Processes
@@ -237,7 +239,7 @@ Source code (.nx)
       │
    Parser.cs       recursive descent -> AST
       │
-   Compiler.cs     AST -> bytecode (61 opcodes)
+   Compiler.cs     AST -> bytecode (67 opcodes)
       │
 VirtualMachine.cs  stack-based VM executes the bytecode
 ```
@@ -252,7 +254,7 @@ src/NyxilumLang/
   Core/       Lexer.cs, Parser.cs, Token.cs
   AST/        tree nodes
   Compiler/   Compiler.cs, Bytecode.cs
-  VM/         VirtualMachine.cs — execution + 166 built-in functions
+  VM/         VirtualMachine.cs — execution + 170 built-in functions
   Runtime/    NxMap, NxJson, NxFunctionRef, Http/Os/Graphics/Regex/WebSocket modules
   Tools/      Formatter.cs, Linter.cs
 
@@ -413,7 +415,7 @@ Two interesting design choices inside:
 bash tests/run_all.sh
 ```
 
-51 tests: recursion, closures, frames, maps, methods, the language's
+67 tests: recursion, closures, frames, maps, methods, the language's
 standard library, `try/catch`, modules (both plain and selective import),
 `lib/testing.nx`, `lib/strings.nx`, `lib/collections.nx`, `lib/datetime.nx`,
 self-hosting, `break`/`continue`, global variables, numeric equality,
@@ -450,11 +452,12 @@ nx myprogram.nx
   nested function can't see the parent's local variables (for that, use
   anonymous lambdas — `var f = func() {...}` — which do capture their
   environment).
-- GUI (`guiWindow`, ...) and 2D/3D graphics (`createCanvas`, ...) only work
-  on Windows (Windows Forms). On Linux/Mac these functions aren't
-  available — calling them gives a clear runtime error rather than
-  crashing. The rest of the language (everything except GUI/graphics) is
-  cross-platform, built with the `net10.0` target.
+- 2D/3D graphics (`createCanvas`, ...) only work on Windows (Windows
+  Forms). On Linux/Mac these functions aren't available — calling them
+  gives a clear runtime error rather than crashing. GUI (`guiWindow`, ...)
+  works cross-platform: Windows Forms on Windows, a built-in X11
+  implementation on Linux/Mac. The rest of the language is cross-platform,
+  built with the `net10.0` target.
 - GUI functions that touch an already-created control (`guiSetText`,
   `guiGetText`, `guiAdd`, `guiShow`, `guiOnAction`, `presentCanvas`,
   `closeCanvas`) can't be called from a worker (`spawn`) — Windows Forms
