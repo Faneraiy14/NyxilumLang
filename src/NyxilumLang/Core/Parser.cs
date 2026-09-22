@@ -329,23 +329,35 @@ public class Parser
     private VariableDeclaration ParseVariableDeclaration()
     {
         Advance();
+
+        // "var volatile x: uint32;" (Фаза N16, нативний компілятор) -
+        // звичайний Identifier-токен (НЕ ключове слово), той самий
+        // мінімально-інвазивний підхід, що вже дав "ptr<T>"/"naked" -
+        // розпізнається лише за позицією (одразу після "var").
+        bool isVolatile = false;
+        if (Peek().Type == TokenType.Identifier && Peek().Value == "volatile")
+        {
+            Advance();
+            isVolatile = true;
+        }
+
         var name = Consume(TokenType.Identifier, "Очікується назва змінної");
-        
+
         string? type = null;
         if (Peek().Type == TokenType.Punctuation && Peek().Value == ":")
         {
             Advance();
             type = ParseType();
         }
-        
+
         ExpressionNode? init = null;
         if (Peek().Type == TokenType.Operator && Peek().Value == "=")
         {
             Advance();
             init = ParseExpression();
         }
-        
-        return new VariableDeclaration(name.Value, init, type);
+
+        return new VariableDeclaration(name.Value, init, type, isVolatile);
     }
 
     private IfStatement ParseIfStatement()

@@ -1,0 +1,18 @@
+// Той самий файл, що n16_test.nx, АЛЕ БЕЗ жодного "volatile" - для
+// побайтового порівняння згенерованого асемблера (доказ, що volatile
+// зараз справді нічого не змінює в кодогені).
+
+var hwStatusReg: int32;
+
+func readStatus() -> int32 {
+    return hwStatusReg
+}
+
+func writeStatus(v: int32) {
+    hwStatusReg = v
+}
+
+func localVolatileRoundtrip(x: int32) -> int32 {
+    var local = x
+    return local
+}

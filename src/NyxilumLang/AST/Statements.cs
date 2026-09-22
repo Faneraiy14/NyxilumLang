@@ -12,13 +12,19 @@ public class VariableDeclaration : StatementNode
     public string Name { get; }
     public ExpressionNode? Initializer { get; }
     public string? TypeAnnotation { get; }
-    public VariableDeclaration(string name, ExpressionNode? init, string? type = null)
-    { Name = name; Initializer = init; TypeAnnotation = type; }
+    // Фаза N16 (нативний компілятор, самодокументація/майбутня
+    // страховка): "var volatile x: uint32;" - НАРАЗІ семантично no-op
+    // (жоден шлях кодогену не переупорядковує/кешує читання-запис) -
+    // чесно позначено, не приховано (дивись коментар над кодогеном).
+    public bool IsVolatile { get; }
+    public VariableDeclaration(string name, ExpressionNode? init, string? type = null, bool isVolatile = false)
+    { Name = name; Initializer = init; TypeAnnotation = type; IsVolatile = isVolatile; }
     public override string ToString(int indent = 0)
     {
         var pad = new string(' ', indent);
         var typeStr = TypeAnnotation != null ? $": {TypeAnnotation}" : "";
-        return $"{pad}Var: {Name}{typeStr}" + (Initializer != null ? $"\n{Initializer.ToString(indent + 2)}" : "");
+        var volStr = IsVolatile ? " volatile" : "";
+        return $"{pad}Var:{volStr} {Name}{typeStr}" + (Initializer != null ? $"\n{Initializer.ToString(indent + 2)}" : "");
     }
 }
 
