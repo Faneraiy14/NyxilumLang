@@ -862,6 +862,9 @@ public class NativeCodegen
         // сну CPU до наступного переривання). Потрібен для auth.c-
         // подібного коду (while (!line_ready) { __asm__("hlt"); }).
         CallExpression { FunctionName: "hlt" } when _target == NativeTarget.NyxOSKernel => ValType.Number,
+        // asm(...) (Фаза N11) - той самий клас, що hlt()/inb/outb: завжди
+        // Number, результат ніколи реально не використовується.
+        CallExpression { FunctionName: "asm" } when _target == NativeTarget.NyxOSKernel => ValType.Number,
         // Спрощення Фази N3: УСІ функції вважаються Number-, bool-
         // функції поки не підтримуються (дивись ReturnStatement нижче).
         // ВИНЯТОК (Фаза N7): відомі ЗОВНІШНІ примітиви ядра NyxOS (НЕ
@@ -1725,6 +1728,40 @@ public class NativeCodegen
                             _asm.AppendLine("    mov %ecx, (%eax)");
                             _asm.AppendLine("    xor %eax, %eax");
                             _asm.AppendLine("    cvtsi2sd %eax, %xmm0");
+                            break;
+                        }
+                        // asm("...") (Фаза N11, 22.09.2026) - Sviatoslav's
+                        // прямо названий пріоритет #1 після "чи може моя
+                        // мова замінити C/Assembler?": СПРАВЖНІЙ inline-
+                        // asm, а не ще один іменований інтринзик на КОЖНУ
+                        // нову інструкцію (cpuid/lgdt/rdtsc/lock cmpxchg/
+                        // rep movsb і т.д. - список, що ніколи не
+                        // закінчується). Кожен аргумент - рядковий ЛІТЕРАЛ
+                        // (відомий на етапі компіляції - НЕ змінна й НЕ
+                        // обчислюваний вираз), і йде в згенерований .s
+                        // ДОСЛІВНО, своїм рядком. Кілька аргументів =
+                        // кілька послідовних інструкцій: asm("cli", "hlt",
+                        // "sti").
+                        //
+                        // СВІДОМО без списку "clobbers" (на відміну від
+                        // GCC/Clang asm volatile) - компілятор НЕ знає (і
+                        // не намагається вгадати), які регістри/прапорці
+                        // змінить довільний текст усередині. Це ТОЧНО
+                        // такий самий рівень довіри/відповідальності
+                        // програміста, що й реальний "голий" inline-asm -
+                        // не хиба, а свідома межа мінімальної першої
+                        // версії. Kernel-target-only (Ring0-код і так
+                        // повністю довірений).
+                        if (call.FunctionName == "asm" && call.Arguments.Count >= 1)
+                        {
+                            foreach (var asmArg in call.Arguments)
+                            {
+                                if (asmArg is not LiteralExpression { Value: string rawInstr })
+                                    throw new Exception("native codegen (Фаза N11): asm(...) приймає лише рядкові літерали, відомі на етапі компіляції - не змінну й не обчислюваний вираз");
+                                _asm.AppendLine($"    {rawInstr}");
+                            }
+                            _asm.AppendLine("    xor %eax, %eax");
+                            _asm.AppendLine("    cvtsi2sd %eax, %xmm0"); // "повертає" 0 - результат ніде реально не використовується, як hlt()/out*
                             break;
                         }
 
