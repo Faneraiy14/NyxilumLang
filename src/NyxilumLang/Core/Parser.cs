@@ -186,7 +186,17 @@ public class Parser
         {
             if (Peek().Type == TokenType.Keyword && Peek().Value == "func")
             {
+                // Методи структури парсяться напряму через
+                // ParseFunctionDeclaration(), в обхід ParseStatement()
+                // (де є єдиний центральний штамп .Line = token.Line, рядок
+                // 105 вище) - без цього Line лишався б 0 за замовчуванням
+                // на КОЖНОМУ методі структури й ламав anylint (NX ast
+                // -> GenuineEmptinessCheck трактує line<1 як "офсет
+                // невідомий", раніше - як "точно порожньо", тепер - як
+                // "не можемо перевірити коментар, пропускаємо").
+                var methodToken = Peek();
                 var method = ParseFunctionDeclaration(name.Value);
+                method.Line = methodToken.Line;
                 methods.Add(method);
             }
             else
