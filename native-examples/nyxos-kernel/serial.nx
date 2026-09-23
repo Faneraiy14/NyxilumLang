@@ -1,0 +1,74 @@
+// serial.nx — переклад src/serial.c (репозиторій NyxOS) на NyxilumLang -
+// COM1 (0x3F8) debug-вивід. Дев'ятий kernel-модуль (кстрінг/gconsole/
+// kheap/pkg/pci/auth/timer/rtc вже перекладені раніше) - обрано за
+// малий розмір (60 рядків C) і чистий port I/O (inb/outb, Фаза N8.5d) -
+// жодних нових мовних примітивів не знадобилось.
+//
+// Порти - десяткові з hex-коментарем (мова НЕ має hex-літералів, той
+// самий підхід, що timer.nx/pci.nx): COM1=1016 (0x3F8), +1..+4 звідти.
+
+func serial_init() {
+    outb(1017, 0)    // COM1+1=0x3F9, 0x00 - вимкнути переривання порту
+    outb(1019, 128)  // COM1+3=0x3FB, 0x80 - DLAB (задати швидкість)
+    outb(1016, 3)    // COM1+0=0x3F8, 0x03 - дільник 3 -> 38400 бод, молодший байт
+    outb(1017, 0)    // COM1+1=0x3F9, 0x00 - старший байт дільника
+    outb(1019, 3)    // COM1+3=0x3FB, 0x03 - 8N1, DLAB вимкнено
+    outb(1018, 199)  // COM1+2=0x3FA, 0xC7 - FIFO увімкнено+очищено, поріг 14 байт
+    outb(1020, 11)   // COM1+4=0x3FC, 0x0B - IRQ увімкнено, RTS/DSR виставлені
+}
+
+func serial_transmit_empty() {
+    return inb(1021) & 32  // COM1+5=0x3FD, 0x20
+}
+
+func serial_putc(c: i32) {
+    while (serial_transmit_empty() == 0) {
+    }
+    outb(1016, c)  // COM1+0=0x3F8
+}
+
+func serial_print(str: string) {
+    var i = 0
+    while (str[i] != 0) {
+        serial_putc(str[i])
+        i = i + 1
+    }
+}
+
+// (a - a%b)/b == trunc(a/b) - той самий трюк, що timer.nx вже
+// встановив (компілятор представляє Number як double - звичайне "/"
+// дало б дробовий результат для НЕточно кратних значень).
+func serial_print_dec(value: i32) {
+    var buf = kmalloc(11)
+    var i = 10
+    buf[i] = 0
+    i = i - 1
+    if (value == 0) {
+        buf[i] = 48  // '0'
+        i = i - 1
+    } else {
+        while (value > 0 && i >= 0) {
+            var digit = value % 10
+            buf[i] = 48 + digit
+            value = (value - digit) / 10
+            i = i - 1
+        }
+    }
+    serial_print(buf + (i + 1))
+}
+
+func serial_print_hex(value: i32) {
+    var digits = "0123456789ABCDEF"
+    var buf = kmalloc(11)
+    buf[0] = 48   // '0'
+    buf[1] = 120  // 'x'
+    var i = 0
+    while (i < 8) {
+        var shift = (7 - i) * 4
+        var nibble = (value >> shift) & 15
+        buf[2 + i] = digits[nibble]
+        i = i + 1
+    }
+    buf[10] = 0
+    serial_print(buf)
+}

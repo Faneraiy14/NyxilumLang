@@ -28,6 +28,12 @@
 - **`kernel_calls_demo.nx`** - невеликий демонстраційний файл (НЕ з
   реального NyxOS) для перевірки виклику однієї kernel-функції з
   іншої й `kmalloc`/`kfree`.
+- **`serial.nx`** - повний переклад `src/serial.c` (COM1 debug-вивід
+  через `inb`/`outb`, Фаза N8.5d) - дев'ятий kernel-модуль. Чистий
+  port I/O, жодних нових мовних примітивів не знадобилось.
+  `serial_print_dec`/`serial_print_hex` - `kmalloc()`-виділений
+  буфер + `(a - a%b)/b`-трюк для цілочисельного ділення (той самий,
+  що timer.nx), замість C-масиву фіксованого розміру.
 
 ## Як перевірити самостійно
 
@@ -67,3 +73,42 @@ nx compile-native kstring.nx -o kstring --target nyxos-kernel
 самому ядрі. Живий тест gconsole З РЕАЛЬНИМ framebuffer - окремий
 майбутній крок (потребує іншої конфігурації QEMU чи реального
 заліза).
+
+## `serial.nx` (23.09.2026) - живий доказ через реальний серійний вивід
+
+`serial.c` (на відміну від kstring/gconsole) - привілейований port
+I/O (`inb`/`outb` на COM1) - той самий клас, що pci.c/auth.c (Фаза
+N8.5c/e) - ізольований freestanding-гарнес принципово НЕ може
+виконати таку інструкцію без root/ioperm, тому ЄДИНИЙ спосіб
+перевірки - реальна підміна `.o` в збірці ядра + QEMU. Підмінено
+`build/serial.o`, перелінковано, завантажено в QEMU (headless,
+серійний порт перенаправлено у файл) - `kernel.c` викликає
+`serial_init()`/`serial_print("NyxOS boot OK\n")`/`serial_print_dec()`
+(реальні `pmm_free_frame_count()`/`pmm_total_frame_count()`) ще ДО
+будь-якого VGA-виводу, тому цей тест НЕ мав "прогалини з
+framebuffer", що вище - лишень port I/O.
+
+**Реальний вивід** (побайтово прочитаний із серійного файла):
+```
+NyxOS boot OK
+[PAGING] Uvimknenyi. Identity-map pershykh 16 MB.
+...
+[PMM] vilnykh kadriv: 63636 z 65268
+```
+(`63636` замість `63637` з оригінального C - природна різниця
+розміру байткоду між C- і NyxilumLang-скомпільованим `serial.o`
+трохи зсуває, скільки сторінок ядро саме займає, НЕ баг у
+`serial_print_dec` - обидва числа коректно надруковані п'ятизначні
+десяткові.) Підміну повернено назад на оригінальний C `.o` одразу
+після перевірки (та сама політика "не постійно", що всі попередні
+kernel-swap тести).
+
+**Методологічна примітка для майбутніх сесій** - у ЦЬОМУ Linux-
+пісочничному середовищі встановлено ЛИШЕ `grub-efi-amd64*` (НЕ
+`grub-pc`) - `grub-mkrescue` тому видає ISO з ЛИШЕ UEFI El Torito-
+записом (`xorriso -report_el_torito plain` покаже `Pltf: UEFI`, без
+BIOS-запису) - `qemu-system-i386` із SeaBIOS дає "Could not read
+from CDROM" на такому ISO. Робочий шлях: `qemu-system-x86_64` (НЕ
+i386) + `-bios /usr/share/ovmf/OVMF.fd` (пакет `ovmf-generic`, лише
+amd64-варіант доступний - ia32 OVMF немає). x86_64 QEMU коректно
+виконує 32-бітний protected-mode multiboot-код ядра без проблем.
