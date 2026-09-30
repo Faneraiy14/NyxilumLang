@@ -32,6 +32,12 @@ func tgGetUpdates(token, offset) {
     var url = "https://api.telegram.org/bot" + token + "/getUpdates?offset=" + toString(offset) + "&timeout=30"
     var res = httpRequest(url, "GET", null)
     var parsed = fromJson(mapGet(res, "body"))
+    // ok:false (невалідний/відкликаний токен, 409 через другий запущений
+    // екземпляр тощо) - кидаємо, а не повертаємо null: інакше tgPollLoop
+    // крутився б без жодної паузи, засипаючи Telegram запитами.
+    if !mapGet(parsed, "ok") {
+        throw "getUpdates: " + toString(mapGet(parsed, "description"))
+    }
     return mapGet(parsed, "result")
 }
 
@@ -54,19 +60,47 @@ func tgChatId(update) {
     return mapGet(chat, "id")
 }
 
+func tgUserId(update) {
+    var message = mapGet(update, "message")
+    if isNull(message) {
+        return null
+    }
+    var from = mapGet(message, "from")
+    if isNull(from) {
+        return null
+    }
+    return mapGet(from, "id")
+}
+
 // Блокує назавжди (як httpServer): на кожен новий апдейт викликає
 // handler(update) і сам просуває offset - викликач лише обробляє логіку
 // одного повідомлення, не думаючи про паги/офсети.
+// Два окремі try: збій мережі на getUpdates -> пауза 5с і повтор (бот не
+// вмирає, коли пропав інтернет); виняток у handler -> лог і перехід до
+// наступного апдейту (offset усе одно просувається, інакше одне "погане"
+// повідомлення прилітало б знову й знову і клало бота по колу).
 func tgPollLoop(token, handler) {
     var offset = 0
     while true {
-        var updates = tgGetUpdates(token, offset)
-        var i = 0
-        while i < len(updates) {
-            var update = updates[i]
-            handler(update)
-            offset = mapGet(update, "update_id") + 1
-            i = i + 1
+        var updates = null
+        try {
+            updates = tgGetUpdates(token, offset)
+        } catch (e) {
+            print("[" + now() + "] getUpdates не вдався: " + toString(e) + " - повтор через 5с")
+            sleep(5000)
+        }
+        if !isNull(updates) {
+            var i = 0
+            while i < len(updates) {
+                var update = updates[i]
+                offset = mapGet(update, "update_id") + 1
+                try {
+                    handler(update)
+                } catch (e) {
+                    print("[" + now() + "] помилка в обробнику: " + toString(e))
+                }
+                i = i + 1
+            }
         }
     }
 }

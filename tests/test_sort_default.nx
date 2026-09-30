@@ -1,0 +1,17 @@
+// sort(arr) без компаратора: природний порядок (числа за значенням,
+// рядки ordinal). Раніше падав з "Index was outside the bounds of the array".
+func check(name, got, expected) {
+    if toJson(got) != toJson(expected) {
+        throw name + ": очікувалось " + toJson(expected) + ", отримано " + toJson(got)
+    }
+    print("OK " + name)
+}
+
+check("числа", sort([10, 2, 33, -1, 2.5]), [-1, 2, 2.5, 10, 33])
+check("рядки", sort(["banana", "apple", "cherry"]), ["apple", "banana", "cherry"])
+check("порожній", sort([]), [])
+var src = [3, 1, 2]
+sort(src)
+check("оригінал не змінюється", src, [3, 1, 2])
+check("з компаратором як раніше", sort([1, 3, 2], func(a, b) { return b - a }), [3, 2, 1])
+print("Усі перевірки sort пройдено")

@@ -270,6 +270,17 @@ public class VirtualMachine
         // Функції вищого порядку над масивами (потребують функцію-значення з Фази 4)
         _nativeFunctions["sort"] = args => {
             var list = new List<object>((List<object>)args[0]);
+            // sort(arr) без компаратора раніше падав з незрозумілим "Index was
+            // outside the bounds of the array" (args[1] не існувало). Тепер -
+            // природний порядок: числа за значенням, решта як рядки (ordinal).
+            if (args.Length < 2 || args[1] == null)
+            {
+                list.Sort((a, b) =>
+                    a is double or int or long && b is double or int or long
+                        ? Convert.ToDouble(a).CompareTo(Convert.ToDouble(b))
+                        : string.CompareOrdinal(a?.ToString(), b?.ToString()));
+                return list;
+            }
             var funcRef = (NxFunctionRef)args[1];
             var vm = Current!;
             list.Sort((a, b) => Math.Sign(Convert.ToDouble(vm.InvokeFunctionValue(funcRef, new object[] { a, b }))));
