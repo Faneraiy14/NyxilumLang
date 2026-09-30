@@ -1,0 +1,17 @@
+// contains(масив, x) раніше порівнював ToString() масиву з x і майже
+// завжди давав False. Тепер шукає елемент тією ж рівністю, що й ==/indexOf.
+func check(name, got, expected) {
+    if got != expected {
+        throw name + ": очікувалось " + expected + ", отримано " + got
+    }
+    print("OK " + name)
+}
+
+check("число є", contains([1, 2], 2), true)
+check("числа нема", contains([1, 2], 3), false)
+check("рядок є", contains(["a", "b"], "b"), true)
+check("порожній", contains([], 1), false)
+check("null", contains([1, null], null), true)
+check("рядок-підрядок як раніше", contains("привіт", "иві"), true)
+check("рядок без підрядка", contains("привіт", "x"), false)
+print("Усі перевірки contains пройдено")

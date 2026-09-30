@@ -1,0 +1,45 @@
+// break/continue/return, що виходять з try всередині циклу, мусять зняти
+// обробник цього try. Раніше обробник лишався висіти, і пізніший throw
+// "ловився" давно завершеним catch - код виконувався по колу кілька разів.
+// Перевіряється окремим блоком у run_all.sh: фінальний throw має бути
+// НЕобробленим, "кінець" - надрукований рівно раз, код виходу 1.
+func firstEven(arr) {
+    for x in arr {
+        try {
+            if x % 2 == 0 { return x }
+        } catch (e) { print("не буває") }
+    }
+    return -1
+}
+
+func main() {
+    var hits = 0
+    for i in 0..5 {
+        try {
+            if i % 2 == 0 { continue }
+            hits = hits + 1
+        } catch (e) { print("stale: " + e) }
+    }
+    print("continue: " + hits)
+    var j = 0
+    while true {
+        try {
+            try {
+                if j == 3 { break }
+            } catch (e) { print("stale: " + e) }
+        } catch (e) { print("stale: " + e) }
+        j = j + 1
+    }
+    print("break: " + j)
+    print("return: " + firstEven([1, 3, 4, 5]))
+    try {
+        for k in 0..3 {
+            try { continue } catch (e) { print("stale: " + e) }
+        }
+        throw "свій"
+    } catch (e) {
+        print("зовнішній catch: " + e)
+    }
+    print("кінець")
+    throw "кінець"
+}

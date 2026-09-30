@@ -118,6 +118,19 @@ public class VirtualMachine
     private SuperOp?[]? _super;
     private readonly bool _jitEnabled = Environment.GetEnvironmentVariable("NX_JIT") != "0";
 
+    // Текстове подання значення для print/toString/конкатенації/join — у тому ж
+    // форматі, що й нативний ARM64-бекенд (Arm64Prelude.nx: __arrToStr,
+    // __mapToStr, __structToStr): [1, a], {k: v}, <struct Name>. Без цього
+    // масив друкувався як "System.Collections.Generic.List`1[...]".
+    public static string FormatValue(object? v) => v switch
+    {
+        null => "null",
+        List<object> list => "[" + string.Join(", ", list.Select(FormatValue)) + "]",
+        NxMap map => "{" + string.Join(", ", map.Entries.Select(e => FormatValue(e.Key) + ": " + FormatValue(e.Value))) + "}",
+        Dictionary<string, object> st when st.TryGetValue("__type", out var t) => "<struct " + t + ">",
+        _ => v.ToString() ?? "null"
+    };
+
     private void UnwindToHandler(object? errorValue)
     {
         var handler = _handlers.Pop();
@@ -165,7 +178,7 @@ public class VirtualMachine
         _nativeFunctions["randomDouble"] = args => PopNumVal(args[0]) + (Random.Shared.NextDouble() * (PopNumVal(args[1]) - PopNumVal(args[0])));
 
         // Conversions & Types
-        _nativeFunctions["toString"] = args => args[0]?.ToString() ?? "null";
+        _nativeFunctions["toString"] = args => FormatValue(args[0]);
         _nativeFunctions["toInt"] = args => TruncToInt(args[0]);
         _nativeFunctions["toDouble"] = args => Convert.ToDouble(args[0]);
         _nativeFunctions["typeOf"] = args => args[0] switch {
@@ -347,7 +360,11 @@ public class VirtualMachine
         _nativeFunctions["replace"] = args => (args[0]?.ToString() ?? "").Replace(args[1]?.ToString() ?? "", args[2]?.ToString() ?? "");
         _nativeFunctions["toUpper"] = args => (args[0]?.ToString() ?? "").ToUpper();
         _nativeFunctions["toLower"] = args => (args[0]?.ToString() ?? "").ToLower();
-        _nativeFunctions["contains"] = args => (args[0]?.ToString() ?? "").Contains(args[1]?.ToString() ?? "");
+        // contains(масив, x) — пошук елемента за тією ж рівністю, що й indexOf/==;
+        // contains(рядок, підрядок) — пошук підрядка.
+        _nativeFunctions["contains"] = args => args[0] is List<object> list
+            ? list.Any(x => ValuesEqual(x, args[1]))
+            : (args[0]?.ToString() ?? "").Contains(args[1]?.ToString() ?? "");
         _nativeFunctions["startsWith"] = args => (args[0]?.ToString() ?? "").StartsWith(args[1]?.ToString() ?? "");
         _nativeFunctions["endsWith"] = args => (args[0]?.ToString() ?? "").EndsWith(args[1]?.ToString() ?? "");
         _nativeFunctions["trim"] = args => (args[0]?.ToString() ?? "").Trim();
@@ -379,7 +396,7 @@ public class VirtualMachine
         _nativeFunctions["join"] = args => {
             var list = (List<object>)args[0];
             string sep = args[1]?.ToString() ?? "";
-            return string.Join(sep, list);
+            return string.Join(sep, list.Select(FormatValue));
         };
 
         // Arrays
@@ -944,7 +961,7 @@ public class VirtualMachine
                         // це робить print), а не валить програму NullReference:
                         // "текст" + f(), де f нічого не повернула, — надто
                         // звичайна ситуація, щоб бути аварійною.
-                        if (a is string || b is string) _stack.Push((a?.ToString() ?? "null") + (b?.ToString() ?? "null"));
+                        if (a is string || b is string) _stack.Push(FormatValue(a) + FormatValue(b));
                         else _stack.Push(Convert.ToDouble(a) + Convert.ToDouble(b));
                     }
                     break;
@@ -1000,7 +1017,7 @@ public class VirtualMachine
                     int addr2 = ReadInt16();
                     if (!Convert.ToBoolean(_stack.Pop())) _ip = addr2;
                     break;
-                case OpCode.PRINT: Console.WriteLine(_stack.Pop()); break;
+                case OpCode.PRINT: { var printed = _stack.Pop(); Console.WriteLine(printed == null ? null : FormatValue(printed)); } break;
                 
                 // ВВІД
                 case OpCode.READ_LINE: _stack.Push(Console.ReadLine() ?? ""); break;

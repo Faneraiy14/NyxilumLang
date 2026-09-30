@@ -2,8 +2,6 @@
 // expect-exit: 1
 // Потік керування крізь try: return/break/continue з try, помилки
 // рантайму ловляться як рядки, вкладені try, rethrow.
-// Еталон - 17_try_flow.expected: VM тут має баг (continue з try не знімає
-// обробник, і фінальний throw "ловиться" кілька разів по колу).
 func safeDiv(a, b) {
     try {
         if b == 0 {
@@ -65,6 +63,16 @@ func main() {
         throw [1, 2, 3]
     } catch (arr) {
         print(len(arr))
+    }
+    try {
+        try {
+            hits = hits + 1
+        } catch (e) {
+            print("не буває")
+        }
+        throw "свій"
+    } catch (e) {
+        print("зовнішній: " + e)
     }
     throw "кінець"
 }

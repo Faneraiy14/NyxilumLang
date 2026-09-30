@@ -145,8 +145,14 @@ public class Compiler
     {
         public List<int> BreakJumps = new();     // патчаться на адресу після циклу
         public List<int> ContinueJumps = new();  // патчаться на адресу наступної ітерації
+        public int TryDepth;                     // скільки try було відкрито на вході в цикл
     }
     private readonly Stack<LoopContext> _loops = new();
+    // Кількість try-блоків, у тілі яких зараз компілюємо код. break/continue,
+    // що виходять з try всередині циклу, мусять зняти обробники цих try
+    // (TRY_END) — інакше вони лишаються в _handlers VM і пізніше "ловлять"
+    // чужий throw, повертаючи виконання в давно завершений catch.
+    private int _tryDepth;
 
     // Глобальні var (верхній рівень файлу). Заповнюється ПЕРЕД компіляцією
     // тіл функцій, щоб функція, оголошена ДЕ ЗАВГОДНО у файлі, бачила
@@ -489,7 +495,7 @@ public class Compiler
                 _bytecode.Emit(OpCode.JUMP_IF_FALSE, 0);
                 int jumpPos2 = _bytecode.Code.Count - 2;
 
-                _loops.Push(new LoopContext());
+                _loops.Push(new LoopContext { TryDepth = _tryDepth });
                 CompileStatement(w.Body);
                 var whileLoop = _loops.Pop();
 
@@ -529,7 +535,7 @@ public class Compiler
                     _bytecode.Emit(OpCode.ARRAY_GET);
                     _bytecode.Emit(OpCode.STORE_VAR, _vars[f.VariableName]);
 
-                    _loops.Push(new LoopContext());
+                    _loops.Push(new LoopContext { TryDepth = _tryDepth });
                     CompileStatement(f.Body);
                     var forEachLoop = _loops.Pop();
 
@@ -560,7 +566,7 @@ public class Compiler
                 _bytecode.Emit(OpCode.JUMP_IF_FALSE, 0);
                 int forJump = _bytecode.Code.Count - 2;
 
-                _loops.Push(new LoopContext());
+                _loops.Push(new LoopContext { TryDepth = _tryDepth });
                 CompileStatement(f.Body);
                 var forLoop = _loops.Pop();
 
@@ -599,12 +605,18 @@ public class Compiler
                     _bytecode!.Emit(OpCode.TRY_BEGIN, 0, catchVarSlot);
                     int catchAddrPatchPos = _bytecode.Code.Count - 4;
 
+                    _tryDepth++;
                     CompileStatement(t.TryBlock);
+                    _tryDepth--;
                     _bytecode.Emit(OpCode.TRY_END);
                     _bytecode.Emit(OpCode.JUMP, 0);
                     int jumpOverCatchPos = _bytecode.Code.Count - 2;
 
                     PatchJump(catchAddrPatchPos);
+                    // Вкладений try з тим самим ім'ям змінної catch перепризначив
+                    // _vars[ім'я] на СВІЙ слот — повертаємо наш, куди VM реально
+                    // кладе помилку, інакше catch читав би чужий слот.
+                    _vars[t.CatchVariableName] = catchVarSlot;
                     CompileStatement(t.CatchBlock);
                     PatchJump(jumpOverCatchPos);
                 }
@@ -612,12 +624,14 @@ public class Compiler
             case BreakStatement:
                 if (_loops.Count == 0)
                     throw new Exception("'break' можна використовувати лише всередині циклу");
+                EmitTryEndsForLoopExit();
                 _bytecode!.Emit(OpCode.JUMP, 0);
                 _loops.Peek().BreakJumps.Add(_bytecode.Code.Count - 2);
                 break;
             case ContinueStatement:
                 if (_loops.Count == 0)
                     throw new Exception("'continue' можна використовувати лише всередині циклу");
+                EmitTryEndsForLoopExit();
                 _bytecode!.Emit(OpCode.JUMP, 0);
                 _loops.Peek().ContinueJumps.Add(_bytecode.Code.Count - 2);
                 break;
@@ -626,6 +640,14 @@ public class Compiler
                 _bytecode!.Emit(OpCode.THROW);
                 break;
         }
+    }
+
+    // Знімає обробники всіх try, відкритих усередині найближчого циклу,
+    // перед тим як break/continue вистрибне з них.
+    private void EmitTryEndsForLoopExit()
+    {
+        for (int i = _loops.Peek().TryDepth; i < _tryDepth; i++)
+            _bytecode!.Emit(OpCode.TRY_END);
     }
 
     private void PatchJump(int pos)

@@ -1,0 +1,27 @@
+// print/toString/конкатенація/join масивів, мап і структур. Раніше VM
+// друкувала назву C#-типу ("System.Collections.Generic.List`1[...]",
+// "NyxilumLang.Runtime.NxMap"). Формат має збігатися з нативним ARM64-
+// бекендом (Arm64Prelude.nx: __arrToStr/__mapToStr/__structToStr).
+struct Point { x: number }
+
+func check(name, got, expected) {
+    if got != expected {
+        throw name + ": очікувалось '" + expected + "', отримано '" + got + "'"
+    }
+    print("OK " + name)
+}
+
+check("масив", toString([1, "a", 2.5]), "[1, a, 2.5]")
+check("вкладений масив і null", toString([[1, 2], null, true]), "[[1, 2], null, True]")
+check("порожній масив", toString([]), "[]")
+var m = newMap()
+mapSet(m, "k", 1)
+mapSet(m, 2, [3])
+check("мапа", toString(m), "{k: 1, 2: [3]}")
+check("порожня мапа", toString(newMap()), "{}")
+check("структура", toString(Point { x: 1 }), "<struct Point>")
+check("конкатенація", "a=" + [1, 2], "a=[1, 2]")
+check("join вкладених", join([[1], [2, 3]], ";"), "[1];[2, 3]")
+print([1, "a"])
+print(m)
+print("Усі перевірки toString пройдено")
