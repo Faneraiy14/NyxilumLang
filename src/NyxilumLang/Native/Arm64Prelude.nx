@@ -418,9 +418,9 @@ func __pow(a, b) {
     return r
 }
 
-// Ціле з [a, b) - як Random.Next(a, b) у VM
+// Ціле з [a, b] - ОБИДВІ межі включно, як randomInt у VM
 func randomInt(a, b) {
-    return a + floor(__random32() / 4294967296 * (b - a))
+    return a + floor(__random32() / 4294967296 * (b - a + 1))
 }
 
 func randomDouble() {
