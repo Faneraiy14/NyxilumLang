@@ -84,6 +84,45 @@ func tgUserId(update) {
     return mapGet(from, "id")
 }
 
+// Мова Telegram людини (language_code: "uk", "ru", "en-US"...) або null
+func tgUserLang(update) {
+    var source = mapGet(update, "message")
+    if isNull(source) {
+        source = mapGet(update, "callback_query")
+    }
+    if isNull(source) {
+        return null
+    }
+    var from = mapGet(source, "from")
+    if isNull(from) {
+        return null
+    }
+    return mapGet(from, "language_code")
+}
+
+// Меню команд бота (кнопка "Меню" в Telegram). commands - масив пар
+// [команда без "/", опис]; langCode - "uk"/"ru"/"en"... або null (для всіх
+// мов, для яких нема окремого списку). Людина бачить список своєю мовою
+// Telegram - замість ручного /setcommands у BotFather.
+func tgSetMyCommands(token, commands, langCode) {
+    var list = []
+    var i = 0
+    while i < len(commands) {
+        var c = newMap()
+        mapSet(c, "command", commands[i][0])
+        mapSet(c, "description", commands[i][1])
+        append(list, c)
+        i = i + 1
+    }
+    var data = newMap()
+    mapSet(data, "commands", list)
+    if !isNull(langCode) {
+        mapSet(data, "language_code", langCode)
+    }
+    var res = httpRequest("https://api.telegram.org/bot" + token + "/setMyCommands", "POST", toJson(data))
+    return fromJson(mapGet(res, "body"))
+}
+
 // ---------------------------------------------------------------- inline-кнопки
 // Кнопка під повідомленням: text - що бачить людина, data - рядок до 64
 // байт, який бот отримає в callback_query при натисканні.
