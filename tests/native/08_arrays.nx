@@ -1,0 +1,14 @@
+// Етап 3: масиви (heap через brk) - літерал, читання, запис, сума в циклі
+func main() {
+    var arr = [5, 10, 15, 20]
+    print(arr[0])
+    print(arr[3])
+    arr[1] = 100
+    var i = 0
+    var sum = 0
+    while i < 4 {
+        sum = sum + arr[i]
+        i = i + 1
+    }
+    print(sum)
+}

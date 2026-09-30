@@ -1,0 +1,8 @@
+// Етап 3: замикання (захоплення за значенням)
+func main() {
+    var base = 10
+    var addBase = func(n) { return n + base }
+    print(addBase(5))
+    base = 1000
+    print(addBase(5))
+}

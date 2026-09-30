@@ -1,0 +1,28 @@
+// Етап 4: try/catch/throw (числові значення), вкладені try
+func risky(n) {
+    if n > 5 {
+        throw n
+    }
+    return n * 2
+}
+
+func main() {
+    try {
+        print(risky(2))
+        print(risky(9))
+        print("не має надрукуватись")
+    } catch (e) {
+        print(e)
+    }
+    try {
+        try {
+            throw 7
+        } catch (inner) {
+            print(inner + 1)
+            throw 100
+        }
+    } catch (outer) {
+        print(outer)
+    }
+    print("кінець")
+}

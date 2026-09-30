@@ -281,6 +281,22 @@ language gaps this surfaced (no bitwise operators, no pointers/raw
 memory access yet) and how each was worked around without silently
 changing behavior.
 
+## Native ARM64 Compilation (Android / Linux phones)
+
+`nx compile-native file.nx -o out --target linux-arm64` (alias
+`android-arm64`) compiles the same language subset as the x86 Linux
+target — numbers, bool, strings, arrays, structs with methods, closures,
+recursion, `if`/`while`/`break`/`continue`, `try`/`catch`/`throw` — into
+a **static AArch64 ELF with no libc and no VM**: raw Linux syscalls
+(`svc #0`), its own `brk`-based heap and number printing. Android is
+Linux underneath, so the same binary runs on a phone (Termux or
+`adb shell`); segments are 16 KB-aligned for Android 15 devices.
+Needs `binutils-aarch64-linux-gnu`; test on a PC with `qemu-aarch64`.
+
+`tests/native/run_native.sh` runs every `tests/native/*.nx` in the VM,
+as an x86 binary and as an ARM64 binary (via `qemu-aarch64`) and
+requires byte-identical output and exit codes; CI runs it on every push.
+
 ## Commands
 
 | Command | What it does |
@@ -296,6 +312,7 @@ changing behavior.
 | `nx lint file.nx` | check a file for common mistakes |
 | `nx check file.nx` | check syntax only (without running the code) |
 | `nx compile-native file.nx -o out --target nyxos-kernel` | compile to a native x86 ELF `.o` — see ["Native x86 Compilation"](#native-x86-compilation) |
+| `nx compile-native file.nx -o out --target linux-arm64` | compile to a native ARM64 ELF for Android/Linux phones — see ["Native ARM64 Compilation"](#native-arm64-compilation-android--linux-phones) |
 | `nx --version` | print the version |
 
 Every detail about packages is in the ["Package Manager"](#package-manager)

@@ -78,7 +78,9 @@ public class Nx
                     {
                         "nyxos" => NyxilumLang.Native.NativeTarget.NyxOS,
                         "nyxos-kernel" => NyxilumLang.Native.NativeTarget.NyxOSKernel,
-                        _ => NyxilumLang.Native.NativeTarget.Linux,
+                        "linux" => NyxilumLang.Native.NativeTarget.Linux,
+                        "linux-arm64" or "android-arm64" => NyxilumLang.Native.NativeTarget.LinuxArm64,
+                        var unknown => UnknownNativeTarget(unknown),
                     };
                 }
             }
@@ -274,6 +276,13 @@ public class Nx
     // символами (немає main/_start, немає syscall'ів) - призначений
     // влитись у РЕАЛЬНУ збірку ядра NyxOS (Ring0) поряд з рештою .o
     // файлів (build.sh у репозиторії NyxOS), НЕ лінкується тут узагалі.
+    private static NyxilumLang.Native.NativeTarget UnknownNativeTarget(string name)
+    {
+        Console.WriteLine($"Error: невідома ціль '{name}'. Доступні: linux, linux-arm64 (= android-arm64), nyxos, nyxos-kernel");
+        Environment.Exit(1);
+        return NyxilumLang.Native.NativeTarget.Linux;
+    }
+
     private static void RunCompileNative(string path, string? outPath, NyxilumLang.Native.NativeTarget target)
     {
         if (!File.Exists(path))
@@ -293,6 +302,19 @@ public class Nx
             var tokens = lexer.Tokenize();
             var parser = new Parser(tokens);
             var program = parser.ParseProgram();
+
+            if (target == NyxilumLang.Native.NativeTarget.LinuxArm64)
+            {
+                // ARM64 (телефони Android / Linux на ARM): статичний ELF без libc.
+                // max-page-size=16384 - Android 15 має 16-KB сторінки пам'яті.
+                string armAsm = new NyxilumLang.Native.NativeCodegenArm64().Compile(program);
+                File.WriteAllText(asmPath, armAsm);
+                Console.WriteLine($"Асемблер записано: {asmPath}");
+                RunShell("aarch64-linux-gnu-as", $"{asmPath} -o {objPath}");
+                RunShell("aarch64-linux-gnu-ld", $"-static -z max-page-size=16384 {objPath} -o {outPath}");
+                Console.WriteLine($"✅ Скомпільовано в ARM64 ELF-бінарник: {outPath} (Android: Termux чи adb shell)");
+                return;
+            }
 
             var codegen = new NyxilumLang.Native.NativeCodegen();
             string asmText = codegen.Compile(program, target);

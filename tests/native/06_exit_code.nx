@@ -1,0 +1,6 @@
+// Етап 2: return із main() - код виходу процесу
+// expect-exit: 3
+func main() {
+    print("виходжу з кодом 3")
+    return 3
+}

@@ -80,6 +80,16 @@ jobs:
           NX_TEST_MYSQL_URL: mysql://root:nxpass@127.0.0.1:3306/nxtest?ssl=true
         run: NX_EXE="$(pwd)/src/NyxilumLang/bin/Release/net10.0/Nx" bash tests/run_all.sh
 
+      # Нативні бекенди: кожен tests/native/*.nx виконується у VM, у x86-
+      # і ARM64-бінарнику (останній - через qemu-aarch64), вивід і код
+      # виходу мають збігатися побайтово. as/ld для i386 уже є на раннері.
+      - name: Install ARM64 toolchain
+        run: sudo apt-get update && sudo apt-get install -y binutils-aarch64-linux-gnu qemu-user
+
+      - name: Run native backend tests (VM = x86 = ARM64)
+        working-directory: NyxilumLang
+        run: NX="$(pwd)/src/NyxilumLang/bin/Release/net10.0/Nx" bash tests/native/run_native.sh
+
   build-windows:
     # Окрема перевірка, що WinForms-гілка (#if WINDOWS: guiWindow,
     # createCanvas тощо) досі компілюється — run_all.sh її не зачіпає,

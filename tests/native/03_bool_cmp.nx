@@ -1,0 +1,14 @@
+// Етап 1: порівняння, логіка, print(bool)
+func main() {
+    print(3 < 5)
+    print(3 > 5)
+    print(2 == 2)
+    print(2 != 2)
+    print(4 <= 4)
+    print(4 >= 5)
+    var t = true
+    var f = false
+    print(t && f)
+    print(t || f)
+    print(!f)
+}

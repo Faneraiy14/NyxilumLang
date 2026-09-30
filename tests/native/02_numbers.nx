@@ -1,0 +1,16 @@
+// Етап 1: арифметика над double, унарний мінус, % (двійково-точні дроби -
+// print_double ще не дає коротких round-trip записів для 0.1 тощо)
+func main() {
+    print(2 + 3)
+    print(10 - 25)
+    print(6 * 7)
+    print(7 / 2)
+    print(17 % 5)
+    print(-4.5)
+    var x = 3.5
+    x = x * 2 + 1.25
+    print(x)
+    print(-x)
+    print(1000000)
+    print(0.5 + 0.25)
+}

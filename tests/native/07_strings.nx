@@ -1,0 +1,12 @@
+// Етап 3: рядки як змінні, перевизначення
+func main() {
+    var s = "перший"
+    print(s)
+    s = "другий 🗼"
+    print(s)
+    var i = 0
+    while i < 2 {
+        print(s)
+        i = i + 1
+    }
+}

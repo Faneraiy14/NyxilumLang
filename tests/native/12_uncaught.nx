@@ -1,0 +1,5 @@
+// Етап 4: необроблений throw -> код виходу 1
+func main() {
+    print("до throw")
+    throw 42
+}

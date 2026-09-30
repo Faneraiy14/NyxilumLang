@@ -1,0 +1,23 @@
+// Етап 3: структури, поля, методи
+struct Point {
+    x: number
+    y: number
+
+    func Point.len2() {
+        return self.x * self.x + self.y * self.y
+    }
+
+    func Point.shift(d) {
+        self.x = self.x + d
+        return self.x
+    }
+}
+
+func main() {
+    var p = Point { x: 3, y: 4 }
+    print(p.x)
+    print(p.len2())
+    print(p.shift(10))
+    p.y = 0.5
+    print(p.y)
+}
