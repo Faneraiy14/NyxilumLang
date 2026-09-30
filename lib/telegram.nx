@@ -239,6 +239,17 @@ func tgEditMessage(token, chatId, messageId, text, rows) {
     return fromJson(mapGet(res, "body"))
 }
 
+// Прибрати кнопки з повідомлення (текст лишається) - напр. зі старого
+// меню, коли бот уже показав нове
+func tgRemoveButtons(token, chatId, messageId) {
+    var data = newMap()
+    mapSet(data, "chat_id", chatId)
+    mapSet(data, "message_id", messageId)
+    mapSet(data, "reply_markup", tgKeyboard([]))
+    var res = httpRequest("https://api.telegram.org/bot" + token + "/editMessageReplyMarkup", "POST", toJson(data))
+    return fromJson(mapGet(res, "body"))
+}
+
 // Обов'язкова відповідь на натискання кнопки (інакше в Telegram крутиться
 // годинник на кнопці). text - необов'язкове коротке спливаюче повідомлення.
 func tgAnswerCallback(token, callbackId, text) {
