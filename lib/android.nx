@@ -151,8 +151,21 @@ func clockAlarm(hour, minute, label, days) {
 }
 // Таймер у системному "Годиннику" на seconds секунд
 func clockTimer(seconds, label) { androidSend(["CLOCK_TIMER", seconds, label]) }
-// Вимкнути будильник "Годинника" за назвою (підтримують не всі годинники)
+// Вимкнути будильник "Годинника" за назвою (підтримують не всі годинники;
+// Samsung - ні, лише відкриває список)
 func clockDismiss(label) { androidSend(["CLOCK_DISMISS", label]) }
+// Відкрити список будильників "Годинника"
+func clockShowAlarms() { androidSend(["CLOCK_SHOW"]) }
+
+// Зсув часового поясу телефона від UTC у секундах (напр. 10800 = UTC+3)
+func phoneTzOffset() {
+    var r = __andRequest(["TZ"])
+    return toDouble(r[1])
+}
+
+// Сповіщення в шторці (працює й з фону); натискання відкриває список
+// будильників "Годинника". id - щоб наступне з тим самим id замінювало попереднє.
+func notify(id, title, text) { androidSend(["NOTIFY", id, title, text]) }
 
 // ------------------------------------------------------------ сховище
 

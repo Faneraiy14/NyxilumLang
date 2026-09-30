@@ -198,6 +198,14 @@ func tgButton(text, data) {
     return b
 }
 
+// Кнопка-посилання: відкриває url (лише http/https - так вимагає Telegram)
+func tgUrlButton(text, url) {
+    var b = newMap()
+    mapSet(b, "text", text)
+    mapSet(b, "url", url)
+    return b
+}
+
 func tgKeyboard(rows) {
     var markup = newMap()
     mapSet(markup, "inline_keyboard", rows)

@@ -106,6 +106,18 @@ public final class NxBridge {
                 case "CLOCK_DISMISS":
                     clockDismiss(ctx, arg(f, 1));
                     break;
+                case "CLOCK_SHOW":
+                    startClock(ctx, new Intent(AlarmClock.ACTION_SHOW_ALARMS), "список будильників");
+                    break;
+                case "TZ": {
+                    // зсув часового поясу ТЕЛЕФОНА від UTC у секундах (з літнім часом)
+                    long nowMs = System.currentTimeMillis();
+                    send(new String[]{"REPLY", String.valueOf(java.util.TimeZone.getDefault().getOffset(nowMs) / 1000)});
+                    break;
+                }
+                case "NOTIFY":
+                    notifyInfo(ctx, arg(f, 1), arg(f, 2), arg(f, 3));
+                    break;
                 case "STORE_SET":
                     prefs().edit().putString(arg(f, 1), arg(f, 2)).apply();
                     break;
@@ -216,6 +228,25 @@ public final class NxBridge {
         } catch (Exception e) {
             Log.e(TAG, "Годинник: " + what + " не вдалося", e);
         }
+    }
+
+    // Звичайне сповіщення (id - щоб оновлювати те саме); натискання
+    // відкриває список будильників "Годинника"
+    static void notifyInfo(Context ctx, String id, String title, String text) {
+        android.app.NotificationManager nm = (android.app.NotificationManager) ctx.getSystemService(Context.NOTIFICATION_SERVICE);
+        if (nm.getNotificationChannel("nx_info") == null)
+            nm.createNotificationChannel(new android.app.NotificationChannel("nx_info", "Повідомлення", android.app.NotificationManager.IMPORTANCE_DEFAULT));
+        PendingIntent pi = PendingIntent.getActivity(ctx, 1,
+                new Intent(AlarmClock.ACTION_SHOW_ALARMS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK), PendingIntent.FLAG_IMMUTABLE);
+        android.app.Notification n = new android.app.Notification.Builder(ctx, "nx_info")
+                .setSmallIcon(android.R.drawable.ic_lock_idle_alarm)
+                .setContentTitle(title)
+                .setContentText(text)
+                .setStyle(new android.app.Notification.BigTextStyle().bigText(text))
+                .setContentIntent(pi)
+                .setAutoCancel(true)
+                .build();
+        nm.notify(("info:" + id).hashCode(), n);
     }
 
     // ------------------------------------------------------------ мережа, сховище
