@@ -196,7 +196,8 @@ public class Compiler
         "dbOpen", "dbClose", "dbSet", "dbGet", "dbHas", "dbDelete", "dbKeys", "dbCount", "dbCheckpoint",
         "procStart", "procRun", "procWait", "procIsRunning", "procKill", "procPid", "procExitCode",
         "procOutput", "procErrorOutput",
-        "zipExtract", "zipEntries", "zipExtractEntry", "zipCreate"
+        "zipExtract", "zipEntries", "zipExtractEntry", "zipCreate",
+        "tcpConnect", "tcpSend", "tcpReceive", "tcpStartTls", "tcpClose"
     };
 
     // knownGlobals — імена глобальних змінних, оголошених РАНІШЕ, поза цим

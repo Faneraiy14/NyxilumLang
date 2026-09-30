@@ -1,0 +1,626 @@
+// lib/mysql.nx — клієнт MySQL / MariaDB на чистій NyxilumLang (протокол
+// client/server 4.1+) поверх голого TCP (tcpConnect/.../tcpStartTls).
+// Авторизація: mysql_native_password (SHA-1), caching_sha2_password (SHA-256,
+// за замовчуванням у MySQL 8), AuthSwitchRequest між ними.
+// TLS: ?ssl=true - шифрувати без перевірки сертифіката (MySQL 8 генерує
+// самопідписаний сам); ?ssl=verify - з перевіркою сертифіката й хоста.
+// Запити з параметрами - prepared statements (COM_STMT_PREPARE/EXECUTE):
+// значення йдуть окремо від SQL, тож SQL-ін'єкція через параметр неможлива.
+//
+//   var db = mysqlConnect("mysql://user:pass@host:3306/dbname?ssl=true")
+//   mysqlExec(db, "INSERT INTO notes(title) VALUES (?)", ["Привіт"])   -> 1
+//   var rows = mysqlQuery(db, "SELECT id, title FROM notes WHERE id > ?", [0])
+//   // rows: [{id: 1, title: "Привіт"}]
+//   mysqlClose(db)
+//
+// Типи результату: цілі, DECIMAL, FLOAT/DOUBLE -> число (⚠️ BIGINT/DECIMAL
+// точні лише до 2^53), NULL -> null, DATE/DATETIME/TIMESTAMP -> рядок
+// "YYYY-MM-DD[ HH:MM:SS[.ffffff]]", TIME -> "[-]HH:MM:SS", решта -> рядок.
+//
+// ⚠️ caching_sha2_password: ПЕРШИЙ вхід користувача після рестарту сервера
+// ("full authentication") вимагає TLS (?ssl=true) - шифрування паролем
+// відкритим RSA-ключем сервера (без TLS) не реалізоване. Після одного
+// успішного входу сервер кешує пароль, і далі працює й без TLS.
+// Пакети > 16 MB не підтримуються.
+import "bytes.nx"
+import "crypto.nx"
+import "url.nx"
+
+// ---------------------------------------------------------------- пакети
+
+// Пакет: 3 байти довжини (LE) + 1 байт sequence id + дані
+func myReadPacket(conn) {
+    var sock = mapGet(conn, "sock")
+    var head = tcpReceive(sock, 4)
+    var length = readU24le(head, 0)
+    mapSet(conn, "seq", (head[3] + 1) % 256)
+    if length == 0 {
+        return []
+    }
+    return tcpReceive(sock, length)
+}
+
+func myWritePacket(conn, payload) {
+    var out = u24le(len(payload))
+    append(out, mapGet(conn, "seq"))
+    bytesAppend(out, payload)
+    tcpSend(mapGet(conn, "sock"), out)
+    mapSet(conn, "seq", (mapGet(conn, "seq") + 1) % 256)
+}
+
+// Нова команда - sequence id з нуля
+func myCommand(conn, payload) {
+    mapSet(conn, "seq", 0)
+    myWritePacket(conn, payload)
+}
+
+// Length-encoded integer: [значення, offset після нього]
+func myLenenc(b, off) {
+    var first = b[off]
+    if first < 251 {
+        return [first, off + 1]
+    }
+    if first == 252 {
+        return [readU16le(b, off + 1), off + 3]
+    }
+    if first == 253 {
+        return [readU24le(b, off + 1), off + 4]
+    }
+    return [readU64le(b, off + 1), off + 9]
+}
+
+// Length-encoded рядок як байти: [байти, offset після]
+func myLenencBytes(b, off) {
+    var l = myLenenc(b, off)
+    return [slice(b, l[1], l[1] + l[0]), l[1] + l[0]]
+}
+
+func myLenencPrefix(n) {
+    if n < 251 {
+        return [n]
+    }
+    if n < 65536 {
+        return bytesConcat([252], u16le(n))
+    }
+    return bytesConcat([253], u24le(n))
+}
+
+func myCString(b, off) {
+    var end = off
+    while end < len(b) && b[end] != 0 {
+        end = end + 1
+    }
+    return [utf8Decode(slice(b, off, end)), end + 1]
+}
+
+// ERR-пакет: 0xFF, код (2), '#', SQLSTATE (5), повідомлення
+func myErrorText(p) {
+    var code = readU16le(p, 1)
+    var off = 3
+    var state = ""
+    if len(p) > 3 && p[3] == 35 {
+        state = utf8Decode(slice(p, 4, 9))
+        off = 9
+    }
+    var text = "MySQL: " + utf8Decode(slice(p, off, len(p))) + " [" + toString(code)
+    if state != "" {
+        text = text + "/" + state
+    }
+    return text + "]"
+}
+
+func myIsEof(p) {
+    return len(p) > 0 && len(p) < 9 && p[0] == 254
+}
+
+// OK-пакет: 0x00, affected_rows (lenenc), last_insert_id (lenenc), ...
+func myOkInfo(p) {
+    var a = myLenenc(p, 1)
+    var id = myLenenc(p, a[1])
+    var info = newMap()
+    mapSet(info, "affected", a[0])
+    mapSet(info, "insertId", id[0])
+    return info
+}
+
+// ---------------------------------------------------------------- авторизація
+
+// SHA1(pw) XOR SHA1(scramble + SHA1(SHA1(pw)))
+func myNativeScramble(password, scramble) {
+    if password == "" {
+        return []
+    }
+    var h1 = sha1(utf8Encode(password))
+    var h2 = sha1(h1)
+    return bytesXor(h1, sha1(bytesConcat(scramble, h2)))
+}
+
+// SHA256(pw) XOR SHA256(SHA256(SHA256(pw)) + scramble)
+func myCachingSha2Scramble(password, scramble) {
+    if password == "" {
+        return []
+    }
+    var h1 = sha256(utf8Encode(password))
+    var h2 = sha256(h1)
+    return bytesXor(h1, sha256(bytesConcat(h2, scramble)))
+}
+
+func myAuthResponse(plugin, password, scramble) {
+    if plugin == "caching_sha2_password" {
+        return myCachingSha2Scramble(password, scramble)
+    }
+    if plugin == "mysql_native_password" {
+        return myNativeScramble(password, scramble)
+    }
+    throw "MySQL: непідтримуваний метод авторизації " + plugin
+}
+
+// Після HandshakeResponse: OK / ERR / AuthSwitch / caching_sha2 AuthMoreData
+func myFinishAuth(conn, plugin, password, scramble) {
+    while true {
+        var p = myReadPacket(conn)
+        var head = p[0]
+        if head == 0 {
+            return null
+        }
+        if head == 255 {
+            throw myErrorText(p)
+        }
+        if head == 254 {
+            // AuthSwitchRequest: назва плагіна + новий scramble
+            var r = myCString(p, 1)
+            plugin = r[0]
+            scramble = slice(p, r[1], len(p))
+            if len(scramble) > 0 && scramble[len(scramble) - 1] == 0 {
+                scramble = slice(scramble, 0, len(scramble) - 1)
+            }
+            myWritePacket(conn, myAuthResponse(plugin, password, scramble))
+        } else if head == 1 {
+            // caching_sha2: 3 - fast auth ок (далі прийде OK); 4 - потрібен
+            // повний вхід з паролем
+            if len(p) > 1 && p[1] == 4 {
+                if !mapGet(conn, "tls") {
+                    throw "MySQL: серверу потрібен повний вхід (caching_sha2_password, пароль ще не в кеші сервера) - підключись із ?ssl=true"
+                }
+                myWritePacket(conn, bytesConcat(utf8Encode(password), [0]))
+            }
+        } else {
+            throw "MySQL: неочікувана відповідь під час авторизації"
+        }
+    }
+}
+
+// ---------------------------------------------------------------- підключення
+
+var MY_CLIENT_LONG_PASSWORD = 1
+var MY_CLIENT_LONG_FLAG = 4
+var MY_CLIENT_CONNECT_WITH_DB = 8
+var MY_CLIENT_PROTOCOL_41 = 512
+var MY_CLIENT_SSL = 2048
+var MY_CLIENT_TRANSACTIONS = 8192
+var MY_CLIENT_SECURE_CONNECTION = 32768
+var MY_CLIENT_MULTI_RESULTS = 131072
+var MY_CLIENT_PLUGIN_AUTH = 524288
+
+func mysqlConnect(url) {
+    var cfg = dbParseUrl(url, 3306, "root")
+    var sock = tcpConnect(mapGet(cfg, "host"), mapGet(cfg, "port"))
+    var conn = newMap()
+    mapSet(conn, "sock", sock)
+    mapSet(conn, "seq", 0)
+    mapSet(conn, "tls", false)
+
+    // --- Initial Handshake v10 від сервера
+    var p = myReadPacket(conn)
+    if p[0] == 255 {
+        tcpClose(sock)
+        throw myErrorText(p)
+    }
+    var ver = myCString(p, 1)
+    mapSet(conn, "serverVersion", ver[0])
+    var off = ver[1] + 4
+    var scramble = slice(p, off, off + 8)
+    off = off + 9
+    var capsLow = readU16le(p, off)
+    off = off + 2 + 1 + 2
+    // верхні 16 біт прапорців не потрібні (і могли б перевищити int32 -
+    // побітові операції VM "насичують" такі числа); CLIENT_SSL - у нижніх
+    off = off + 2
+    var authDataLen = p[off]
+    off = off + 1 + 10
+    var part2Len = max([13, authDataLen - 8])
+    bytesAppend(scramble, slice(p, off, off + part2Len - 1))
+    off = off + part2Len
+    var plugin = "mysql_native_password"
+    if off < len(p) {
+        plugin = myCString(p, off)[0]
+    }
+
+    var flags = MY_CLIENT_LONG_PASSWORD | MY_CLIENT_LONG_FLAG | MY_CLIENT_CONNECT_WITH_DB | MY_CLIENT_PROTOCOL_41 | MY_CLIENT_TRANSACTIONS | MY_CLIENT_SECURE_CONNECTION | MY_CLIENT_MULTI_RESULTS | MY_CLIENT_PLUGIN_AUTH
+    var ssl = "false"
+    if mapHas(cfg, "ssl") {
+        ssl = mapGet(cfg, "ssl")
+    }
+    var wantTls = ssl == "true" || ssl == "verify"
+    if wantTls {
+        if (capsLow & MY_CLIENT_SSL) == 0 {
+            tcpClose(sock)
+            throw "MySQL: сервер не підтримує TLS, а в URL ssl=" + ssl
+        }
+        flags = flags | MY_CLIENT_SSL
+    }
+
+    // перші 32 байти HandshakeResponse41: прапорці, max packet, charset
+    // utf8mb4_general_ci (45 - є і в MySQL, і в MariaDB), 23 нулі
+    var prefix = u32le(flags)
+    bytesAppend(prefix, u32le(16777215))
+    append(prefix, 45)
+    var z = 0
+    while z < 23 {
+        append(prefix, 0)
+        z = z + 1
+    }
+
+    if wantTls {
+        // SSLRequest = той самий префікс без решти, потім TLS-рукостискання
+        myWritePacket(conn, prefix)
+        tcpStartTls(sock, mapGet(cfg, "host"), ssl == "verify")
+        mapSet(conn, "tls", true)
+    }
+
+    var password = mapGet(cfg, "password")
+    var auth = myAuthResponse(plugin, password, scramble)
+    var resp = slice(prefix, 0, len(prefix))
+    bytesAppend(resp, utf8Encode(mapGet(cfg, "user")))
+    append(resp, 0)
+    append(resp, len(auth))
+    bytesAppend(resp, auth)
+    bytesAppend(resp, utf8Encode(mapGet(cfg, "database")))
+    append(resp, 0)
+    bytesAppend(resp, asciiBytes(plugin))
+    append(resp, 0)
+    myWritePacket(conn, resp)
+
+    try {
+        myFinishAuth(conn, plugin, password, scramble)
+    } catch (e) {
+        tcpClose(sock)
+        throw e
+    }
+    return conn
+}
+
+func mysqlClose(conn) {
+    try {
+        myCommand(conn, [1])
+    } catch (e) {
+    }
+    tcpClose(mapGet(conn, "sock"))
+}
+
+// ---------------------------------------------------------------- результати
+
+// Column Definition 41 -> {name, type, unsigned}
+func myColumnDef(p) {
+    var off = 0
+    var k = 0
+    while k < 4 {
+        off = myLenencBytes(p, off)[1]
+        k = k + 1
+    }
+    var nameR = myLenencBytes(p, off)
+    off = myLenencBytes(p, nameR[1])[1]
+    off = myLenenc(p, off)[1]
+    var col = newMap()
+    mapSet(col, "name", utf8Decode(nameR[0]))
+    mapSet(col, "type", p[off + 6])
+    mapSet(col, "unsigned", (readU16le(p, off + 7) & 32) != 0)
+    return col
+}
+
+// Типи: 0 DECIMAL, 1 TINY, 2 SHORT, 3 LONG, 4 FLOAT, 5 DOUBLE, 8 LONGLONG,
+// 9 INT24, 13 YEAR, 246 NEWDECIMAL - числа
+func myIsNumericType(t) {
+    return t == 0 || t == 1 || t == 2 || t == 3 || t == 4 || t == 5 || t == 8 || t == 9 || t == 13 || t == 246
+}
+
+func myTextValue(bytes, col) {
+    var text = utf8Decode(bytes)
+    if myIsNumericType(mapGet(col, "type")) {
+        return toDouble(text)
+    }
+    return text
+}
+
+func myPad2(n) {
+    if n < 10 {
+        return "0" + toString(n)
+    }
+    return toString(n)
+}
+
+func myPadN(n, width) {
+    var s = toString(n)
+    while len(s) < width {
+        s = "0" + s
+    }
+    return s
+}
+
+// Одне значення бінарного рядка результату: [значення, новий offset]
+func myBinaryValue(p, off, col) {
+    var t = mapGet(col, "type")
+    var unsigned = mapGet(col, "unsigned")
+    if t == 1 {
+        var v1 = p[off]
+        if !unsigned && v1 >= 128 {
+            v1 = v1 - 256
+        }
+        return [v1, off + 1]
+    }
+    if t == 2 || t == 13 {
+        var v2 = readU16le(p, off)
+        if !unsigned && t == 2 && v2 >= 32768 {
+            v2 = v2 - 65536
+        }
+        return [v2, off + 2]
+    }
+    if t == 3 || t == 9 {
+        var v4 = readU32le(p, off)
+        if !unsigned && v4 >= 2147483648 {
+            v4 = v4 - 4294967296
+        }
+        return [v4, off + 4]
+    }
+    if t == 8 {
+        var lo = readU32le(p, off)
+        var hi = readU32le(p, off + 4)
+        if !unsigned && hi >= 2147483648 {
+            // доповнення до двох по половинах: -(~v + 1) без проміжного
+            // числа ~2^64, яке double не вміщує точно
+            return [0 - ((4294967295 - hi) * 4294967296 + (4294967295 - lo) + 1), off + 8]
+        }
+        return [hi * 4294967296 + lo, off + 8]
+    }
+    if t == 4 {
+        return [readF32le(p, off), off + 4]
+    }
+    if t == 5 {
+        return [readF64le(p, off), off + 8]
+    }
+    if t == 7 || t == 10 || t == 12 {
+        // DATE/DATETIME/TIMESTAMP: довжина 0/4/7/11
+        var l = p[off]
+        var d = off + 1
+        if l == 0 {
+            return ["0000-00-00 00:00:00", d]
+        }
+        var s = myPadN(readU16le(p, d), 4) + "-" + myPad2(p[d + 2]) + "-" + myPad2(p[d + 3])
+        if l >= 7 {
+            s = s + " " + myPad2(p[d + 4]) + ":" + myPad2(p[d + 5]) + ":" + myPad2(p[d + 6])
+        } else if t != 10 {
+            // DATETIME/TIMESTAMP з часом 00:00:00 сервер шле скорочено (4 байти)
+            s = s + " 00:00:00"
+        }
+        if l >= 11 {
+            s = s + "." + myPadN(readU32le(p, d + 7), 6)
+        }
+        return [s, d + l]
+    }
+    if t == 11 {
+        // TIME: довжина 0/8/12; знак, дні, год, хв, сек, [мкс]
+        var tl = p[off]
+        var td = off + 1
+        if tl == 0 {
+            return ["00:00:00", td]
+        }
+        var hours = readU32le(p, td + 1) * 24 + p[td + 5]
+        var ts = myPad2(hours) + ":" + myPad2(p[td + 6]) + ":" + myPad2(p[td + 7])
+        if p[td] == 1 {
+            ts = "-" + ts
+        }
+        if tl >= 12 {
+            ts = ts + "." + myPadN(readU32le(p, td + 8), 6)
+        }
+        return [ts, td + tl]
+    }
+    // решта (VARCHAR, TEXT, BLOB, DECIMAL, JSON, ENUM...) - length-encoded
+    var r = myLenencBytes(p, off)
+    if t == 0 || t == 246 {
+        return [toDouble(utf8Decode(r[0])), r[1]]
+    }
+    return [utf8Decode(r[0]), r[1]]
+}
+
+// Читає визначення колонок (+ EOF), повертає масив col
+func myReadColumns(conn, count) {
+    var cols = []
+    var i = 0
+    while i < count {
+        append(cols, myColumnDef(myReadPacket(conn)))
+        i = i + 1
+    }
+    myReadPacket(conn)
+    return cols
+}
+
+func myResult(rows, affected, insertId) {
+    var r = newMap()
+    mapSet(r, "rows", rows)
+    mapSet(r, "affected", affected)
+    mapSet(r, "insertId", insertId)
+    return r
+}
+
+// COM_QUERY - без параметрів, текстовий протокол
+func myRunText(conn, sql) {
+    myCommand(conn, bytesConcat([3], utf8Encode(sql)))
+    var p = myReadPacket(conn)
+    if p[0] == 255 {
+        throw myErrorText(p)
+    }
+    if p[0] == 0 {
+        var ok = myOkInfo(p)
+        return myResult([], mapGet(ok, "affected"), mapGet(ok, "insertId"))
+    }
+    var cols = myReadColumns(conn, myLenenc(p, 0)[0])
+    var rows = []
+    while true {
+        var rp = myReadPacket(conn)
+        if myIsEof(rp) {
+            break
+        }
+        if rp[0] == 255 {
+            throw myErrorText(rp)
+        }
+        var row = newMap()
+        var off = 0
+        var c = 0
+        while c < len(cols) {
+            if rp[off] == 251 {
+                mapSet(row, mapGet(cols[c], "name"), null)
+                off = off + 1
+            } else {
+                var v = myLenencBytes(rp, off)
+                mapSet(row, mapGet(cols[c], "name"), myTextValue(v[0], cols[c]))
+                off = v[1]
+            }
+            c = c + 1
+        }
+        append(rows, row)
+    }
+    return myResult(rows, 0, 0)
+}
+
+// COM_STMT_PREPARE + EXECUTE (параметри як рядки) + CLOSE
+func myRunPrepared(conn, sql, params) {
+    myCommand(conn, bytesConcat([22], utf8Encode(sql)))
+    var p = myReadPacket(conn)
+    if p[0] == 255 {
+        throw myErrorText(p)
+    }
+    var stmtId = readU32le(p, 1)
+    var numCols = readU16le(p, 5)
+    var numParams = readU16le(p, 7)
+    if numParams > 0 {
+        myReadColumns(conn, numParams)
+    }
+    if numCols > 0 {
+        myReadColumns(conn, numCols)
+    }
+    if numParams != len(params) {
+        myCommand(conn, bytesConcat([25], u32le(stmtId)))
+        throw "MySQL: у запиті " + toString(numParams) + " знаків ?, а передано " + toString(len(params)) + " параметрів"
+    }
+
+    var exec = [23]
+    bytesAppend(exec, u32le(stmtId))
+    append(exec, 0)
+    bytesAppend(exec, u32le(1))
+    if numParams > 0 {
+        var bitmap = []
+        var bi = 0
+        while bi < floor((numParams + 7) / 8) {
+            append(bitmap, 0)
+            bi = bi + 1
+        }
+        var i = 0
+        while i < numParams {
+            if isNull(params[i]) {
+                var idx = floor(i / 8)
+                bitmap[idx] = bitmap[idx] | pow(2, i % 8)
+            }
+            i = i + 1
+        }
+        bytesAppend(exec, bitmap)
+        append(exec, 1)
+        i = 0
+        while i < numParams {
+            // MYSQL_TYPE_VAR_STRING (253) - сервер сам приведе рядок до типу колонки
+            bytesAppend(exec, [253, 0])
+            i = i + 1
+        }
+        i = 0
+        while i < numParams {
+            if !isNull(params[i]) {
+                var value = params[i]
+                if value == true {
+                    value = 1
+                } else if value == false {
+                    value = 0
+                }
+                var vb = utf8Encode(toString(value))
+                bytesAppend(exec, myLenencPrefix(len(vb)))
+                bytesAppend(exec, vb)
+            }
+            i = i + 1
+        }
+    }
+    myCommand(conn, exec)
+
+    var result = null
+    var rp = myReadPacket(conn)
+    if rp[0] == 255 {
+        myCommand(conn, bytesConcat([25], u32le(stmtId)))
+        throw myErrorText(rp)
+    }
+    if rp[0] == 0 {
+        var ok = myOkInfo(rp)
+        result = myResult([], mapGet(ok, "affected"), mapGet(ok, "insertId"))
+    } else {
+        var cols = myReadColumns(conn, myLenenc(rp, 0)[0])
+        var rows = []
+        while true {
+            var row = myReadPacket(conn)
+            if myIsEof(row) {
+                break
+            }
+            if row[0] == 255 {
+                throw myErrorText(row)
+            }
+            // 0x00, NULL-бітмапа (зсув 2 біти), значення
+            var nullBytes = floor((len(cols) + 9) / 8)
+            var off = 1 + nullBytes
+            var m = newMap()
+            var c = 0
+            while c < len(cols) {
+                var bit = c + 2
+                if (row[1 + floor(bit / 8)] & pow(2, bit % 8)) != 0 {
+                    mapSet(m, mapGet(cols[c], "name"), null)
+                } else {
+                    var v = myBinaryValue(row, off, cols[c])
+                    mapSet(m, mapGet(cols[c], "name"), v[0])
+                    off = v[1]
+                }
+                c = c + 1
+            }
+            append(rows, m)
+        }
+        result = myResult(rows, 0, 0)
+    }
+    // COM_STMT_CLOSE - сервер нічого не відповідає
+    myCommand(conn, bytesConcat([25], u32le(stmtId)))
+    return result
+}
+
+func myRun(conn, sql, params) {
+    if len(params) == 0 {
+        return myRunText(conn, sql)
+    }
+    return myRunPrepared(conn, sql, params)
+}
+
+// SELECT -> масив мап {колонка: значення}
+func mysqlQuery(conn, sql, params) {
+    return mapGet(myRun(conn, sql, params), "rows")
+}
+
+// INSERT/UPDATE/DELETE/DDL -> кількість змінених рядків
+func mysqlExec(conn, sql, params) {
+    return mapGet(myRun(conn, sql, params), "affected")
+}
+
+// id щойно вставленого рядка (AUTO_INCREMENT)
+func mysqlInsert(conn, sql, params) {
+    return mapGet(myRun(conn, sql, params), "insertId")
+}

@@ -240,7 +240,9 @@ func main() {
 Методи названої структури підтягуються автоматично разом з нею. Якщо переліченого імені нема у файлі — помилка одразу при запуску (ще до виконання коду). Функції з іменем на `_` (напр. `_helper`) вважаються приватними хелперами модуля й тягнуться завжди, навіть якщо їх не перелічено — так публічна функція з того ж файлу може викликати свій внутрішній хелпер незалежно від того, що саме імпортує викликач.
 
 ### Стандартна бібліотека (`lib/`)
-У теці `lib/` в корені репозиторію лежать готові `.nx`-модулі — підключаються звичайним `import` за відносним шляхом (`../lib/...` з файлу в `tests/`, або `lib/...`, якщо скрипт лежить поруч із самою `lib/`):
+У теці `lib/` в корені репозиторію лежать готові `.nx`-модулі — підключаються звичайним `import` за відносним шляхом (`../lib/...` з файлу в `tests/`, або `lib/...`, якщо скрипт лежить поруч із самою `lib/`).
+
+⚠️ Вибірковий `import "lib/x.nx" { a, b }` вливає ЛИШЕ перелічені імена (плюс функції, що починаються з `_`) - внутрішні функції модуля й те, що він сам імпортує, губляться. Тому модулі, які спираються на власні хелпери чи інші модулі (`telegram`, `postgres`, `mysql`, `crypto`), підключай повністю, без `{ ... }`:
 
 - **`lib/datetime.nx`** — арифметика дат з правильними високосними роками (алгоритм Говарда Гіннанта, чиста NyxilumLang): `daysFromCivil(y,m,d)`/`civilFromDays(z)` (дата <-> днів від епохи), `isLeapYear(y)`, `dayOfWeek(y,m,d)` (0=неділя), `dayName(weekday)`, `addDays(y,m,d,n)`, `diffDays(y1,m1,d1,y2,m2,d2)`, `formatDate(y,m,d)`, `parseDate(s)`, `todayCivil()`.
 - **`lib/strings.nx`** — `capitalize(s)`, `titleCase(s)`, `isBlank(s)`, `isEmpty(s)`, `padLeft(s, len, ch)`, `padRight(s, len, ch)`, `countOccurrences(s, sub)`.
@@ -267,7 +269,7 @@ func main() {
   ```
 - **`lib/telegram.nx`** — обгортка над [Telegram Bot API](https://core.telegram.org/bots/api) (звичайний HTTPS+JSON, без WebSocket - тому повністю реалізований на самій NyxilumLang): `tgGetMe(token)`, `tgSendMessage(token, chatId, text)`, `tgGetUpdates(token, offset)`, `tgMessageText(update)`, `tgChatId(update)`, і блокуючий `tgPollLoop(token, handler)` для готового бота одним викликом. Токен читай через `osEnv("TELEGRAM_BOT_TOKEN")`, ніколи не хардкодь у скрипті. Повний робочий приклад ехо-бота: `programs/telegram_echo_bot.nx`.
   ```nx
-  import "lib/telegram.nx" { tgPollLoop, tgMessageText, tgChatId, tgSendMessage }
+  import "lib/telegram.nx"
 
   func main() {
       var token = osEnv("TELEGRAM_BOT_TOKEN")
@@ -293,6 +295,23 @@ func main() {
   }
   ```
   Не забудь увімкнути "Message Content Intent" у Discord Developer Portal - без нього `content` завжди порожній.
+
+- **`lib/bytes.nx`** — байти як масив чисел 0..255 (той самий формат, що в `tcpSend`/`tcpReceive`): `utf8Encode(s)`/`utf8Decode(bytes)` (з емодзі; невалідний UTF-8 -> U+FFFD), `asciiBytes(s)`, `base64Encode`/`base64Decode`, `bytesToHex`/`hexToBytes`, `bytesConcat`, `bytesAppend` (на місці), `bytesEqual`, `bytesXor`, цілі числа BE/LE (`u16be`, `u32be`, `readU32be`, `readI32be`, `u16le`, `u24le`, `u32le`, `readU16le`/`readU24le`/`readU32le`/`readU64le`), IEEE-754 `readF32le`/`readF64le`.
+- **`lib/crypto.nx`** — хеші на ЧИСТІЙ NyxilumLang, без нативного коду: `sha1`, `sha256`, `md5`, `hmacSha256(key, msg)`, `pbkdf2Sha256(password, salt, iterations, dkLen)`, `randomBytes(n)` (⚠️ не криптографічний генератор - лише для nonce). Для паролів і протоколів, не для масових даних: у VM SHA-256 ~4 мс на 64-байтовий блок.
+- **`lib/postgres.nx`** — клієнт PostgreSQL (протокол v3) на чистій NyxilumLang поверх `tcp*`: авторизація trust / cleartext / MD5 / SCRAM-SHA-256, TLS (`?sslmode=require` - без перевірки сертифіката, як у libpq; `?sslmode=verify-full` - з перевіркою), параметри `$1..$n` окремо від SQL (захист від SQL-ін'єкцій). Типи: bool, цілі/float/numeric -> число, NULL -> `null`, решта -> рядок. ⚠️ Перше SCRAM-підключення рахує PBKDF2 ~40 с (далі кеш на весь процес).
+  ```nx
+  import "lib/postgres.nx"
+
+  func main() {
+      var db = pgConnect(osEnv("DATABASE_URL"))   // postgres://user:pass@host:5432/db?sslmode=require
+      pgExec(db, "INSERT INTO notes(title) VALUES ($1)", ["Привіт"])
+      var rows = pgQuery(db, "SELECT id, title FROM notes WHERE id > $1", [0])
+      print(toJson(rows))   // [{"id":1,"title":"Привіт"}]
+      pgClose(db)
+  }
+  ```
+- **`lib/mysql.nx`** — клієнт MySQL / MariaDB на чистій NyxilumLang: `mysql_native_password` і `caching_sha2_password` (MySQL 8), AuthSwitch, TLS (`?ssl=true` / `?ssl=verify`), параметри `?` через prepared statements. `mysqlConnect(url)`, `mysqlQuery(db, sql, params)` -> масив мап, `mysqlExec` -> кількість змінених рядків, `mysqlInsert` -> id нового рядка, `mysqlClose`. DATE/DATETIME -> рядок `"YYYY-MM-DD HH:MM:SS"`. ⚠️ MySQL 8: перший вхід користувача після рестарту сервера вимагає `?ssl=true`.
+- **`lib/url.nx`** — `dbParseUrl(url, defaultPort, defaultUser)` і `urlPercentDecode(s)` (пароль з `@`/`:`/кирилицею - через `%40`, `%3A`, `%D0%9F`...).
 
 ### Функції вищого порядку та JSON
 ```nx
@@ -482,6 +501,9 @@ closeCanvas(canvas)
 - `httpServer(port, handler, wsHandler?)` - HTTP-сервер; `handler(request)` викликається на кожен звичайний запит з ОДНІЄЮ мапою `{path, method, body, query, headers}` (`body` - тіло POST/PUT-запиту, `headers` - мапа заголовків запиту). Відповідь - звичайний рядок (статус 200, `text/html`) або мапа `{status?, body?, contentType?}` для повного контролю. Опційний третій аргумент `wsHandler(ws, request)` - запити з `Upgrade: websocket` приймаються як WebSocket-з'єднання (той самий `ws`, що й у `wsConnect()` - усередині працюють ті самі `wsSend`/`wsReceive`/`wsClose`); кожне з'єднання виконується в окремому потоці зі своєю VM, тож довгоживучий WS не блокує прийом інших клієнтів. Блокує назавжди (Ctrl+C для зупинки)
 - `regexTest(s, pattern)` - чи збігається рядок з regex-шаблоном (bool); `regexMatch(s, pattern)` - перший збіг або `null`; `regexFindAll(s, pattern)` - масив усіх збігів; `regexReplace(s, pattern, replacement)` - заміна всіх збігів
 - `guiWindow(title, w, h)`, `guiButton(text, x, y, w, h)`, `guiShow(win)` - GUI (експериментально)
+- `tcpConnect(host, port)` -> з'єднання; `tcpSend(conn, bytes)`; `tcpReceive(conn, n)` - рівно `n` байт (чекає; кидає, якщо з'єднання закрилось); `tcpStartTls(conn, host, verify?)` - увімкнути TLS посеред з'єднання (`verify=false` - без перевірки сертифіката); `tcpClose(conn)`. Байти - масив чисел 0..255. Навмисно лише "двері" в мережу: протоколи (`lib/postgres.nx`, `lib/mysql.nx`) і крипта (`lib/crypto.nx`) написані на самій NyxilumLang
+- `httpServer` слухає лише `localhost`; `NX_HTTP_HOST=0.0.0.0` у середовищі - усі інтерфейси (потрібно в Docker/на хостингах на кшталт Render)
+- ⚠️ `substring(s, start, length)` - третій аргумент ДОВЖИНА (як у C#), а `slice(arr, start, end)` - третій аргумент КІНЕЦЬ
 
 ## Як запустити
 Після встановлення (див. INSTALL.md) команда `nx` доступна на будь-якій

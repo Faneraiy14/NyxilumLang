@@ -1,0 +1,399 @@
+// lib/crypto.nx — хеші й похідні ключів на ЧИСТІЙ NyxilumLang (жодного
+// нативного коду): SHA-1, SHA-256, MD5, HMAC-SHA256, PBKDF2-HMAC-SHA256.
+// Потрібні драйверам БД для авторизації: MySQL mysql_native_password (SHA-1)
+// і caching_sha2_password (SHA-256), Postgres MD5 і SCRAM-SHA-256 (HMAC,
+// PBKDF2). Байти - масив чисел 0..255 (див. lib/bytes.nx).
+//
+// ⚠️ Для паролів/протоколів, не для масових даних: інтерпретована VM у
+// рази повільніша за нативну крипту.
+//
+// Модель чисел: побітові оператори VM працюють із 32-бітним int ЗІ ЗНАКОМ,
+// а число поза діапазоном int32 перед побітовою операцією НАСИЧУЄТЬСЯ
+// (4294967295 -> 2147483647), а не обгортається. Тому кожне 32-бітне слово
+// тут тримається в діапазоні int32 зі знаком через w32(), а логічного
+// зсуву >>> у мові нема - його замінює ushr().
+import "bytes.nx"
+
+// Звести ціле (до 2^53) до 32-бітного int зі знаком - як переповнення uint32.
+func w32(x) {
+    var r = x % 4294967296
+    if r >= 2147483648 {
+        r = r - 4294967296
+    }
+    if r < -2147483648 {
+        r = r + 4294967296
+    }
+    return r
+}
+
+// Логічний (беззнаковий) зсув вправо, n = 1..31. Маска 2^(32-n)-1 завжди
+// <= 2^31-1, тож влазить у int32 без насичення.
+func ushr(x, n) {
+    return (x >> n) & (pow(2, 32 - n) - 1)
+}
+
+func rotr(x, n) {
+    return ushr(x, n) | (x << (32 - n))
+}
+
+func rotl(x, n) {
+    return (x << n) | ushr(x, 32 - n)
+}
+
+// Байти -> 32-бітне слово (big-endian / little-endian)
+func wordBe(b, off) {
+    return w32(b[off] * 16777216 + b[off + 1] * 65536 + b[off + 2] * 256 + b[off + 3])
+}
+
+func wordLe(b, off) {
+    return w32(b[off] + b[off + 1] * 256 + b[off + 2] * 65536 + b[off + 3] * 16777216)
+}
+
+func wordsToBytesBe(words) {
+    var out = []
+    var i = 0
+    while i < len(words) {
+        bytesAppend(out, u32be(words[i]))
+        i = i + 1
+    }
+    return out
+}
+
+func wordsToBytesLe(words) {
+    var out = []
+    var i = 0
+    while i < len(words) {
+        bytesAppend(out, u32le(words[i]))
+        i = i + 1
+    }
+    return out
+}
+
+// Доповнення Merkle–Damgård: 0x80, нулі, довжина в БІТАХ (64 біти).
+// totalLen - повна довжина повідомлення в байтах (разом із тим, що вже
+// оброблено до msg - потрібно для HMAC із попередньо обчисленим станом).
+func mdPad(msg, totalLen, bigEndian) {
+    var out = slice(msg, 0, len(msg))
+    append(out, 128)
+    while len(out) % 64 != 56 {
+        append(out, 0)
+    }
+    var bits = totalLen * 8
+    var hi = floor(bits / 4294967296)
+    var lo = bits % 4294967296
+    if bigEndian {
+        bytesAppend(out, u32be(hi))
+        bytesAppend(out, u32be(lo))
+    } else {
+        bytesAppend(out, u32le(lo))
+        bytesAppend(out, u32le(hi))
+    }
+    return out
+}
+
+// ================================ SHA-256 (FIPS 180-4)
+
+var SHA256_K = mapArr([1116352408, 1899447441, 3049323471, 3921009573, 961987163, 1508970993, 2453635748, 2870763221, 3624381080, 310598401, 607225278, 1426881987, 1925078388, 2162078206, 2614888103, 3248222580, 3835390401, 4022224774, 264347078, 604807628, 770255983, 1249150122, 1555081692, 1996064986, 2554220882, 2821834349, 2952996808, 3210313671, 3336571891, 3584528711, 113926993, 338241895, 666307205, 773529912, 1294757372, 1396182291, 1695183700, 1986661051, 2177026350, 2456956037, 2730485921, 2820302411, 3259730800, 3345764771, 3516065817, 3600352804, 4094571909, 275423344, 430227734, 506948616, 659060556, 883997877, 958139571, 1322822218, 1537002063, 1747873779, 1955562222, 2024104815, 2227730452, 2361852424, 2428436474, 2756734187, 3204031479, 3329325298], w32)
+
+var SHA256_H0 = mapArr([1779033703, 3144134277, 1013904242, 2773480762, 1359893119, 2600822924, 528734635, 1541459225], w32)
+
+// Один 64-байтовий блок b[off..off+63] -> оновлює state (8 слів) НА МІСЦІ.
+// Навмисно "розгорнутий" код: rotr/ushr/w32 вписані прямо у вирази (маски
+// 2^(32-n)-1 - готовими числами). Виклик функції у VM дорогий, а тут їх
+// було ~900 на блок - PBKDF2 на 4096 ітерацій (Postgres SCRAM) рахувався
+// 68 с; читабельні версії rotr/ushr/w32 вище лишаються для решти коду.
+func sha256Compress(state, b, off) {
+    var w = []
+    var i = 0
+    while i < 16 {
+        var p = off + i * 4
+        var word = b[p] * 16777216 + b[p + 1] * 65536 + b[p + 2] * 256 + b[p + 3]
+        if word >= 2147483648 {
+            word = word - 4294967296
+        }
+        append(w, word)
+        i = i + 1
+    }
+    while i < 64 {
+        var x = w[i - 15]
+        var y = w[i - 2]
+        var nw = w[i - 16] + (((((x) >> 7) & 33554431) | ((x) << 25)) ^ ((((x) >> 18) & 16383) | ((x) << 14)) ^ (((x) >> 3) & 536870911)) + w[i - 7] + (((((y) >> 17) & 32767) | ((y) << 15)) ^ ((((y) >> 19) & 8191) | ((y) << 13)) ^ (((y) >> 10) & 4194303))
+        nw = nw % 4294967296
+        if nw >= 2147483648 {
+            nw = nw - 4294967296
+        } else if nw < -2147483648 {
+            nw = nw + 4294967296
+        }
+        append(w, nw)
+        i = i + 1
+    }
+
+    var a = state[0]
+    var bb = state[1]
+    var c = state[2]
+    var d = state[3]
+    var e = state[4]
+    var f = state[5]
+    var g = state[6]
+    var h = state[7]
+    i = 0
+    while i < 64 {
+        var t1 = h + (((((e) >> 6) & 67108863) | ((e) << 26)) ^ ((((e) >> 11) & 2097151) | ((e) << 21)) ^ ((((e) >> 25) & 127) | ((e) << 7))) + ((e & f) ^ (~e & g)) + SHA256_K[i] + w[i]
+        t1 = t1 % 4294967296
+        if t1 >= 2147483648 {
+            t1 = t1 - 4294967296
+        } else if t1 < -2147483648 {
+            t1 = t1 + 4294967296
+        }
+        var t2 = (((((a) >> 2) & 1073741823) | ((a) << 30)) ^ ((((a) >> 13) & 524287) | ((a) << 19)) ^ ((((a) >> 22) & 1023) | ((a) << 10))) + ((a & bb) ^ (a & c) ^ (bb & c))
+        t2 = t2 % 4294967296
+        if t2 >= 2147483648 {
+            t2 = t2 - 4294967296
+        } else if t2 < -2147483648 {
+            t2 = t2 + 4294967296
+        }
+        h = g
+        g = f
+        f = e
+        e = d + t1
+        e = e % 4294967296
+        if e >= 2147483648 {
+            e = e - 4294967296
+        } else if e < -2147483648 {
+            e = e + 4294967296
+        }
+        d = c
+        c = bb
+        bb = a
+        a = t1 + t2
+        a = a % 4294967296
+        if a >= 2147483648 {
+            a = a - 4294967296
+        } else if a < -2147483648 {
+            a = a + 4294967296
+        }
+        i = i + 1
+    }
+    state[0] = w32(state[0] + a)
+    state[1] = w32(state[1] + bb)
+    state[2] = w32(state[2] + c)
+    state[3] = w32(state[3] + d)
+    state[4] = w32(state[4] + e)
+    state[5] = w32(state[5] + f)
+    state[6] = w32(state[6] + g)
+    state[7] = w32(state[7] + h)
+}
+
+// Доробити хеш від стану state, коли prefixLen байтів уже оброблено.
+func sha256Finish(state, prefixLen, msg) {
+    var st = slice(state, 0, 8)
+    var padded = mdPad(msg, prefixLen + len(msg), true)
+    var off = 0
+    while off < len(padded) {
+        sha256Compress(st, padded, off)
+        off = off + 64
+    }
+    return wordsToBytesBe(st)
+}
+
+func sha256(msg) {
+    return sha256Finish(SHA256_H0, 0, msg)
+}
+
+// ================================ HMAC-SHA256 (RFC 2104) + PBKDF2 (RFC 8018)
+
+// Попередньо стиснуті блоки key^ipad і key^opad - HMAC від одного ключа з
+// різними повідомленнями (PBKDF2: тисячі разів) коштує 2 стиснення замість 4.
+func hmacSha256Prepare(key) {
+    var k = key
+    if len(k) > 64 {
+        k = sha256(k)
+    }
+    var ipad = []
+    var opad = []
+    var i = 0
+    while i < 64 {
+        var kb = 0
+        if i < len(k) {
+            kb = k[i]
+        }
+        append(ipad, kb ^ 54)
+        append(opad, kb ^ 92)
+        i = i + 1
+    }
+    var inner = slice(SHA256_H0, 0, 8)
+    sha256Compress(inner, ipad, 0)
+    var outer = slice(SHA256_H0, 0, 8)
+    sha256Compress(outer, opad, 0)
+    return [inner, outer]
+}
+
+func hmacSha256With(prep, msg) {
+    var innerHash = sha256Finish(prep[0], 64, msg)
+    return sha256Finish(prep[1], 64, innerHash)
+}
+
+func hmacSha256(key, msg) {
+    return hmacSha256With(hmacSha256Prepare(key), msg)
+}
+
+func pbkdf2Sha256(password, salt, iterations, dkLen) {
+    var prep = hmacSha256Prepare(password)
+    var out = []
+    var block = 1
+    while len(out) < dkLen {
+        var u = hmacSha256With(prep, bytesConcat(salt, u32be(block)))
+        var t = slice(u, 0, len(u))
+        var i = 1
+        while i < iterations {
+            u = hmacSha256With(prep, u)
+            var j = 0
+            while j < 32 {
+                t[j] = t[j] ^ u[j]
+                j = j + 1
+            }
+            i = i + 1
+        }
+        bytesAppend(out, t)
+        block = block + 1
+    }
+    return slice(out, 0, dkLen)
+}
+
+// ================================ SHA-1 (FIPS 180-4)
+
+var SHA1_H0 = mapArr([1732584193, 4023233417, 2562383102, 271733878, 3285377520], w32)
+var SHA1_K = mapArr([1518500249, 1859775393, 2400959708, 3395469782], w32)
+
+func sha1(msg) {
+    var st = slice(SHA1_H0, 0, 5)
+    var padded = mdPad(msg, len(msg), true)
+    var off = 0
+    while off < len(padded) {
+        var w = []
+        var i = 0
+        while i < 16 {
+            append(w, wordBe(padded, off + i * 4))
+            i = i + 1
+        }
+        while i < 80 {
+            append(w, rotl(w[i - 3] ^ w[i - 8] ^ w[i - 14] ^ w[i - 16], 1))
+            i = i + 1
+        }
+        var a = st[0]
+        var b = st[1]
+        var c = st[2]
+        var d = st[3]
+        var e = st[4]
+        i = 0
+        while i < 80 {
+            var f = 0
+            var k = 0
+            if i < 20 {
+                f = (b & c) | (~b & d)
+                k = SHA1_K[0]
+            } else if i < 40 {
+                f = b ^ c ^ d
+                k = SHA1_K[1]
+            } else if i < 60 {
+                f = (b & c) | (b & d) | (c & d)
+                k = SHA1_K[2]
+            } else {
+                f = b ^ c ^ d
+                k = SHA1_K[3]
+            }
+            var temp = w32(rotl(a, 5) + f + e + k + w[i])
+            e = d
+            d = c
+            c = rotl(b, 30)
+            b = a
+            a = temp
+            i = i + 1
+        }
+        st[0] = w32(st[0] + a)
+        st[1] = w32(st[1] + b)
+        st[2] = w32(st[2] + c)
+        st[3] = w32(st[3] + d)
+        st[4] = w32(st[4] + e)
+        off = off + 64
+    }
+    return wordsToBytesBe(st)
+}
+
+// ================================ MD5 (RFC 1321) - лише для старої Postgres-авторизації
+
+var MD5_S = [7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 5, 9, 14, 20, 5, 9, 14, 20, 5, 9, 14, 20, 5, 9, 14, 20, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23, 6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21]
+
+// T[i] = floor(|sin(i+1)| * 2^32) - саме так константи визначені в RFC 1321
+func md5Table() {
+    var t = []
+    var i = 0
+    while i < 64 {
+        append(t, w32(floor(abs(sin(i + 1)) * 4294967296)))
+        i = i + 1
+    }
+    return t
+}
+
+var MD5_T = md5Table()
+
+func md5(msg) {
+    var st = mapArr([1732584193, 4023233417, 2562383102, 271733878], w32)
+    var padded = mdPad(msg, len(msg), false)
+    var off = 0
+    while off < len(padded) {
+        var m = []
+        var i = 0
+        while i < 16 {
+            append(m, wordLe(padded, off + i * 4))
+            i = i + 1
+        }
+        var a = st[0]
+        var b = st[1]
+        var c = st[2]
+        var d = st[3]
+        i = 0
+        while i < 64 {
+            var f = 0
+            var g = 0
+            if i < 16 {
+                f = (b & c) | (~b & d)
+                g = i
+            } else if i < 32 {
+                f = (b & d) | (c & ~d)
+                g = (5 * i + 1) % 16
+            } else if i < 48 {
+                f = b ^ c ^ d
+                g = (3 * i + 5) % 16
+            } else {
+                f = c ^ (b | ~d)
+                g = (7 * i) % 16
+            }
+            var sum = w32(f + a + MD5_T[i] + m[g])
+            a = d
+            d = c
+            c = b
+            b = w32(b + rotl(sum, MD5_S[i]))
+            i = i + 1
+        }
+        st[0] = w32(st[0] + a)
+        st[1] = w32(st[1] + b)
+        st[2] = w32(st[2] + c)
+        st[3] = w32(st[3] + d)
+        off = off + 64
+    }
+    return wordsToBytesLe(st)
+}
+
+// Випадкові байти для nonce (SCRAM). ⚠️ randomInt - НЕ криптографічний
+// генератор; для nonce клієнта в SCRAM це прийнятно (пароль він не
+// розкриває), але не використовуй для ключів чи токенів.
+func randomBytes(n) {
+    var out = []
+    var i = 0
+    while i < n {
+        append(out, randomInt(0, 255))
+        i = i + 1
+    }
+    return out
+}

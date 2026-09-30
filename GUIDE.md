@@ -256,7 +256,9 @@ can call its internal helper regardless of what the caller actually imports.
 ### Standard Library (`lib/`)
 The `lib/` directory at the repo root contains ready-made `.nx` modules —
 pulled in with a regular `import` using a relative path (`../lib/...` from
-a file in `tests/`, or `lib/...` if the script sits next to `lib/` itself):
+a file in `tests/`, or `lib/...` if the script sits next to `lib/` itself).
+
+⚠️ A selective `import "lib/x.nx" { a, b }` merges ONLY the listed names (plus functions starting with `_`) - the module's internal helpers and whatever it imports itself are dropped. So import modules that rely on their own helpers or other modules (`telegram`, `postgres`, `mysql`, `crypto`) in full, without `{ ... }`:
 
 - **`lib/datetime.nx`** — date arithmetic with correct leap years (Howard Hinnant's algorithm, pure NyxilumLang): `daysFromCivil(y,m,d)`/`civilFromDays(z)` (date <-> days since epoch), `isLeapYear(y)`, `dayOfWeek(y,m,d)` (0=Sunday), `dayName(weekday)`, `addDays(y,m,d,n)`, `diffDays(y1,m1,d1,y2,m2,d2)`, `formatDate(y,m,d)`, `parseDate(s)`, `todayCivil()`.
 - **`lib/strings.nx`** — `capitalize(s)`, `titleCase(s)`, `isBlank(s)`, `isEmpty(s)`, `padLeft(s, len, ch)`, `padRight(s, len, ch)`, `countOccurrences(s, sub)`.
@@ -283,7 +285,7 @@ a file in `tests/`, or `lib/...` if the script sits next to `lib/` itself):
   ```
 - **`lib/telegram.nx`** — a wrapper over the [Telegram Bot API](https://core.telegram.org/bots/api) (plain HTTPS+JSON, no WebSocket — so it's fully implemented in NyxilumLang itself): `tgGetMe(token)`, `tgSendMessage(token, chatId, text)`, `tgGetUpdates(token, offset)`, `tgMessageText(update)`, `tgChatId(update)`, and a blocking `tgPollLoop(token, handler)` for a ready-made bot in a single call. Read the token via `osEnv("TELEGRAM_BOT_TOKEN")`, never hardcode it in the script. Full working echo-bot example: `programs/telegram_echo_bot.nx`.
   ```nx
-  import "lib/telegram.nx" { tgPollLoop, tgMessageText, tgChatId, tgSendMessage }
+  import "lib/telegram.nx"
 
   func main() {
       var token = osEnv("TELEGRAM_BOT_TOKEN")
@@ -309,6 +311,23 @@ a file in `tests/`, or `lib/...` if the script sits next to `lib/` itself):
   }
   ```
   Don't forget to enable "Message Content Intent" in the Discord Developer Portal — without it, `content` is always empty.
+
+- **`lib/bytes.nx`** — bytes as an array of numbers 0..255 (the same format `tcpSend`/`tcpReceive` use): `utf8Encode(s)`/`utf8Decode(bytes)` (emoji-safe; invalid UTF-8 -> U+FFFD), `asciiBytes(s)`, `base64Encode`/`base64Decode`, `bytesToHex`/`hexToBytes`, `bytesConcat`, `bytesAppend` (in place), `bytesEqual`, `bytesXor`, BE/LE integers (`u16be`, `u32be`, `readU32be`, `readI32be`, `u16le`, `u24le`, `u32le`, `readU16le`/`readU24le`/`readU32le`/`readU64le`), IEEE-754 `readF32le`/`readF64le`.
+- **`lib/crypto.nx`** — hashes in PURE NyxilumLang, no native code: `sha1`, `sha256`, `md5`, `hmacSha256(key, msg)`, `pbkdf2Sha256(password, salt, iterations, dkLen)`, `randomBytes(n)` (⚠️ not a cryptographic RNG - nonces only). For passwords and protocols, not bulk data: SHA-256 in the VM is ~4 ms per 64-byte block.
+- **`lib/postgres.nx`** — PostgreSQL client (protocol v3) in pure NyxilumLang on top of `tcp*`: trust / cleartext / MD5 / SCRAM-SHA-256 auth, TLS (`?sslmode=require` - no certificate check, like libpq; `?sslmode=verify-full` - verified), `$1..$n` parameters sent separately from SQL (SQL-injection safe). Types: bool, integers/float/numeric -> number, NULL -> `null`, the rest -> string. ⚠️ The first SCRAM connection computes PBKDF2 in ~40 s (cached for the whole process afterwards).
+  ```nx
+  import "lib/postgres.nx"
+
+  func main() {
+      var db = pgConnect(osEnv("DATABASE_URL"))   // postgres://user:pass@host:5432/db?sslmode=require
+      pgExec(db, "INSERT INTO notes(title) VALUES ($1)", ["Hello"])
+      var rows = pgQuery(db, "SELECT id, title FROM notes WHERE id > $1", [0])
+      print(toJson(rows))   // [{"id":1,"title":"Hello"}]
+      pgClose(db)
+  }
+  ```
+- **`lib/mysql.nx`** — MySQL / MariaDB client in pure NyxilumLang: `mysql_native_password` and `caching_sha2_password` (MySQL 8), AuthSwitch, TLS (`?ssl=true` / `?ssl=verify`), `?` parameters via prepared statements. `mysqlConnect(url)`, `mysqlQuery(db, sql, params)` -> array of maps, `mysqlExec` -> affected rows, `mysqlInsert` -> new row id, `mysqlClose`. DATE/DATETIME -> `"YYYY-MM-DD HH:MM:SS"` string. ⚠️ MySQL 8: a user's first login after a server restart requires `?ssl=true`.
+- **`lib/url.nx`** — `dbParseUrl(url, defaultPort, defaultUser)` and `urlPercentDecode(s)` (passwords with `@`/`:`/non-ASCII via `%40`, `%3A`, ...).
 
 ### Higher-Order Functions and JSON
 ```nx
@@ -503,6 +522,9 @@ closeCanvas(canvas)
 - `httpServer(port, handler, wsHandler?)` - an HTTP server; `handler(request)` is invoked for every regular request with a SINGLE map `{path, method, body, query, headers}` (`body` - the POST/PUT request body, `headers` - a map of request headers). The response is either a plain string (status 200, `text/html`) or a map `{status?, body?, contentType?}` for full control. The optional third argument `wsHandler(ws, request)` - requests with `Upgrade: websocket` are accepted as WebSocket connections (the same `ws` as in `wsConnect()` - the same `wsSend`/`wsReceive`/`wsClose` work on it); each connection runs on its own thread with its own VM, so a long-lived WS doesn't block other clients from connecting. Blocks forever (Ctrl+C to stop)
 - `regexTest(s, pattern)` - whether the string matches the regex pattern (bool); `regexMatch(s, pattern)` - the first match or `null`; `regexFindAll(s, pattern)` - array of all matches; `regexReplace(s, pattern, replacement)` - replaces all matches
 - `guiWindow(title, w, h)`, `guiButton(text, x, y, w, h)`, `guiShow(win)` - GUI (experimental)
+- `tcpConnect(host, port)` -> connection; `tcpSend(conn, bytes)`; `tcpReceive(conn, n)` - exactly `n` bytes (blocks; throws if the connection closed); `tcpStartTls(conn, host, verify?)` - upgrade to TLS mid-connection (`verify=false` - skip certificate check); `tcpClose(conn)`. Bytes are arrays of numbers 0..255. Deliberately just the network "door": protocols (`lib/postgres.nx`, `lib/mysql.nx`) and crypto (`lib/crypto.nx`) are written in NyxilumLang itself
+- `httpServer` listens on `localhost` only; `NX_HTTP_HOST=0.0.0.0` in the environment - all interfaces (needed in Docker / on hosts like Render)
+- ⚠️ `substring(s, start, length)` - the third argument is a LENGTH (like C#), while `slice(arr, start, end)` takes an END index
 
 ## How to Run
 After installation (see INSTALL.md), the `nx` command is available on any

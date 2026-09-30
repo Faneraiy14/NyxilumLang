@@ -2,7 +2,7 @@
 // Запуск: TELEGRAM_BOT_TOKEN=токен_від_BotFather nx programs/telegram_echo_bot.nx
 // Токен НІКОЛИ не хардкодиться тут - читається з середовища, щоб не потрапив
 // у git разом зі скриптом.
-import "../lib/telegram.nx" { tgGetMe, tgSendMessage, tgPollLoop, tgMessageText, tgChatId }
+import "../lib/telegram.nx"
 
 func main() {
     var token = osEnv("TELEGRAM_BOT_TOKEN")

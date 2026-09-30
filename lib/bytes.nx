@@ -1,0 +1,342 @@
+// lib/bytes.nx — робота з байтами на чистій NyxilumLang. Байти - звичайний
+// масив чисел 0..255 (той самий формат, що приймає/віддає tcpSend/tcpReceive).
+// Написано для драйверів БД (lib/postgres.nx, lib/mysql.nx) і крипти
+// (lib/crypto.nx), але годиться для будь-якого бінарного протоколу.
+
+// Рядок -> UTF-8 байти. charCode віддає UTF-16 code unit, тож сурогатні
+// пари (емодзі) збираємо в один code point вручну.
+func utf8Encode(s) {
+    var out = []
+    var n = len(s)
+    var i = 0
+    while i < n {
+        var c = charCode(substring(s, i, 1))
+        if c >= 55296 && c <= 56319 && i + 1 < n {
+            var lo = charCode(substring(s, i + 1, 1))
+            if lo >= 56320 && lo <= 57343 {
+                c = 65536 + (c - 55296) * 1024 + (lo - 56320)
+                i = i + 1
+            }
+        }
+        if c < 128 {
+            append(out, c)
+        } else if c < 2048 {
+            append(out, 192 + floor(c / 64))
+            append(out, 128 + c % 64)
+        } else if c < 65536 {
+            append(out, 224 + floor(c / 4096))
+            append(out, 128 + floor(c / 64) % 64)
+            append(out, 128 + c % 64)
+        } else {
+            append(out, 240 + floor(c / 262144))
+            append(out, 128 + floor(c / 4096) % 64)
+            append(out, 128 + floor(c / 64) % 64)
+            append(out, 128 + c % 64)
+        }
+        i = i + 1
+    }
+    return out
+}
+
+// Code point -> рядок (fromCharCode приймає лише UTF-16 code unit, тож для
+// > 0xFFFF складаємо сурогатну пару).
+func codePointToString(cp) {
+    if cp < 65536 {
+        return fromCharCode(cp)
+    }
+    var v = cp - 65536
+    return fromCharCode(55296 + floor(v / 1024)) + fromCharCode(56320 + v % 1024)
+}
+
+// UTF-8 байти -> рядок. Невалідна послідовність -> U+FFFD, а не падіння
+// (дані з мережі бувають будь-якими).
+func utf8Decode(bytes) {
+    var parts = []
+    var n = len(bytes)
+    var i = 0
+    while i < n {
+        var b = bytes[i]
+        var cp = 65533
+        var extra = 0
+        if b < 128 {
+            cp = b
+        } else if b >= 194 && b < 224 {
+            cp = b - 192
+            extra = 1
+        } else if b >= 224 && b < 240 {
+            cp = b - 224
+            extra = 2
+        } else if b >= 240 && b < 245 {
+            cp = b - 240
+            extra = 3
+        }
+        var ok = i + extra < n
+        var k = 1
+        while ok && k <= extra {
+            var cont = bytes[i + k]
+            if cont < 128 || cont > 191 {
+                ok = false
+            } else {
+                cp = cp * 64 + (cont - 128)
+            }
+            k = k + 1
+        }
+        if !ok {
+            cp = 65533
+            extra = 0
+        }
+        append(parts, codePointToString(cp))
+        i = i + 1 + extra
+    }
+    return join(parts, "")
+}
+
+// Лише для рядків, що гарантовано ASCII (назви протокольних полів тощо) -
+// швидше за utf8Encode.
+func asciiBytes(s) {
+    var out = []
+    var i = 0
+    while i < len(s) {
+        append(out, charCode(substring(s, i, 1)))
+        i = i + 1
+    }
+    return out
+}
+
+func bytesConcat(a, b) {
+    var out = slice(a, 0, len(a))
+    var i = 0
+    while i < len(b) {
+        append(out, b[i])
+        i = i + 1
+    }
+    return out
+}
+
+// Дописати b у кінець a НА МІСЦІ (без копії a) - для побудови пакетів.
+func bytesAppend(a, b) {
+    var i = 0
+    while i < len(b) {
+        append(a, b[i])
+        i = i + 1
+    }
+    return a
+}
+
+func bytesEqual(a, b) {
+    if len(a) != len(b) {
+        return false
+    }
+    var i = 0
+    while i < len(a) {
+        if a[i] != b[i] {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+func bytesXor(a, b) {
+    var out = []
+    var i = 0
+    while i < len(a) {
+        append(out, a[i] ^ b[i])
+        i = i + 1
+    }
+    return out
+}
+
+var HEX_DIGITS = "0123456789abcdef"
+
+func bytesToHex(bytes) {
+    var parts = []
+    var i = 0
+    while i < len(bytes) {
+        var b = bytes[i]
+        var hi = floor(b / 16)
+        append(parts, substring(HEX_DIGITS, hi, 1) + substring(HEX_DIGITS, b % 16, 1))
+        i = i + 1
+    }
+    return join(parts, "")
+}
+
+func hexToBytes(hex) {
+    var h = toLower(hex)
+    var out = []
+    var i = 0
+    while i + 1 < len(h) {
+        append(out, indexOf(HEX_DIGITS, substring(h, i, 1)) * 16 + indexOf(HEX_DIGITS, substring(h, i + 1, 1)))
+        i = i + 2
+    }
+    return out
+}
+
+// ---- цілі числа в байтах (BE - network order, як у Postgres; LE - як у MySQL)
+
+func u16be(n) {
+    return [floor(n / 256) % 256, n % 256]
+}
+
+func u32be(n) {
+    var v = n
+    if v < 0 {
+        v = v + 4294967296
+    }
+    return [floor(v / 16777216) % 256, floor(v / 65536) % 256, floor(v / 256) % 256, v % 256]
+}
+
+func readU16be(b, off) {
+    return b[off] * 256 + b[off + 1]
+}
+
+func readU32be(b, off) {
+    return b[off] * 16777216 + b[off + 1] * 65536 + b[off + 2] * 256 + b[off + 3]
+}
+
+// Зі знаком (Postgres int32 може бути -1 = NULL-колонка)
+func readI32be(b, off) {
+    var v = readU32be(b, off)
+    if v >= 2147483648 {
+        return v - 4294967296
+    }
+    return v
+}
+
+func u16le(n) {
+    return [n % 256, floor(n / 256) % 256]
+}
+
+func u24le(n) {
+    return [n % 256, floor(n / 256) % 256, floor(n / 65536) % 256]
+}
+
+func u32le(n) {
+    var v = n
+    if v < 0 {
+        v = v + 4294967296
+    }
+    return [v % 256, floor(v / 256) % 256, floor(v / 65536) % 256, floor(v / 16777216) % 256]
+}
+
+func readU16le(b, off) {
+    return b[off] + b[off + 1] * 256
+}
+
+func readU24le(b, off) {
+    return b[off] + b[off + 1] * 256 + b[off + 2] * 65536
+}
+
+func readU32le(b, off) {
+    return b[off] + b[off + 1] * 256 + b[off + 2] * 65536 + b[off + 3] * 16777216
+}
+
+// 64-біт little-endian (MySQL affected_rows/BIGINT) - точно до 2^53
+func readU64le(b, off) {
+    return readU32le(b, off) + readU32le(b, off + 4) * 4294967296
+}
+
+// ---- base64 (RFC 4648)
+
+var B64_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+
+func base64Encode(bytes) {
+    var parts = []
+    var n = len(bytes)
+    var i = 0
+    while i < n {
+        var b0 = bytes[i]
+        var b1 = 0
+        var b2 = 0
+        if i + 1 < n {
+            b1 = bytes[i + 1]
+        }
+        if i + 2 < n {
+            b2 = bytes[i + 2]
+        }
+        var triple = b0 * 65536 + b1 * 256 + b2
+        var c0 = floor(triple / 262144) % 64
+        var c1 = floor(triple / 4096) % 64
+        var c2 = floor(triple / 64) % 64
+        var c3 = triple % 64
+        append(parts, substring(B64_ALPHABET, c0, 1) + substring(B64_ALPHABET, c1, 1))
+        if i + 1 < n {
+            append(parts, substring(B64_ALPHABET, c2, 1))
+        } else {
+            append(parts, "=")
+        }
+        if i + 2 < n {
+            append(parts, substring(B64_ALPHABET, c3, 1))
+        } else {
+            append(parts, "=")
+        }
+        i = i + 3
+    }
+    return join(parts, "")
+}
+
+func base64Decode(s) {
+    var out = []
+    var acc = 0
+    var bits = 0
+    var i = 0
+    while i < len(s) {
+        var ch = substring(s, i, 1)
+        var v = indexOf(B64_ALPHABET, ch)
+        if ch == "=" {
+            break
+        }
+        if v >= 0 {
+            acc = acc * 64 + v
+            bits = bits + 6
+            if bits >= 8 {
+                bits = bits - 8
+                var p = pow(2, bits)
+                append(out, floor(acc / p) % 256)
+                acc = acc % p
+            }
+        }
+        i = i + 1
+    }
+    return out
+}
+
+// ---- IEEE-754 з little-endian байтів (MySQL FLOAT/DOUBLE у бінарному протоколі)
+
+func readF64le(b, off) {
+    var sign = 1
+    if b[off + 7] >= 128 {
+        sign = -1
+    }
+    var exp = (b[off + 7] % 128) * 16 + floor(b[off + 6] / 16)
+    var mant = (b[off + 6] % 16) * 281474976710656 + b[off + 5] * 1099511627776 + b[off + 4] * 4294967296 + readU32le(b, off)
+    if exp == 0 {
+        return sign * mant * pow(2, -1074)
+    }
+    if exp == 2047 {
+        if mant == 0 {
+            return sign * pow(10, 400)
+        }
+        return pow(10, 400) - pow(10, 400)
+    }
+    return sign * (1 + mant / 4503599627370496) * pow(2, exp - 1023)
+}
+
+func readF32le(b, off) {
+    var sign = 1
+    if b[off + 3] >= 128 {
+        sign = -1
+    }
+    var exp = (b[off + 3] % 128) * 2 + floor(b[off + 2] / 128)
+    var mant = (b[off + 2] % 128) * 65536 + b[off + 1] * 256 + b[off]
+    if exp == 0 {
+        return sign * mant * pow(2, -149)
+    }
+    if exp == 255 {
+        if mant == 0 {
+            return sign * pow(10, 400)
+        }
+        return pow(10, 400) - pow(10, 400)
+    }
+    return sign * (1 + mant / 8388608) * pow(2, exp - 127)
+}

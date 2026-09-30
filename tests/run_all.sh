@@ -25,6 +25,10 @@ SKIP="test_graphics2d.nx test_graphics3d.nx test_graphics_image_sound.nx calcula
 EXPECT_ERROR="test_throw_uncaught.nx test_nested_scope_error.nx test_selective_import_missing.nx test_lib_testing_fail.nx test_parser_stack_limits.nx"
 
 TIMEOUT_SEC=25
+# Повільні тести зі своїм тайм-аутом: test_postgres.nx - перше підключення
+# SCRAM-SHA-256 рахує PBKDF2 (4096 ітерацій) на чистій NyxilumLang, ~40 с.
+SLOW="test_postgres.nx"
+SLOW_TIMEOUT_SEC=180
 
 cd "$TESTS_DIR" || exit 1
 
@@ -52,7 +56,11 @@ for f in *.nx; do
         continue
     fi
 
-    out=$(timeout "$TIMEOUT_SEC" "$EXE" "$f" 2>&1)
+    limit=$TIMEOUT_SEC
+    if in_list "$f" "$SLOW"; then
+        limit=$SLOW_TIMEOUT_SEC
+    fi
+    out=$(timeout "$limit" "$EXE" "$f" 2>&1)
     code=$?
 
     if echo "$out" | grep -qiE "Runtime Error|Parse Error|Unhandled exception"; then
@@ -62,7 +70,7 @@ for f in *.nx; do
     fi
 
     if [ $code -eq 124 ]; then
-        echo "⏱️  $f — таймаут (${TIMEOUT_SEC}с)"
+        echo "⏱️  $f — таймаут (${limit}с)"
         fail=$((fail+1)); failed+=("$f — таймаут")
         continue
     fi

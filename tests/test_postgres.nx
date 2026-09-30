@@ -1,0 +1,38 @@
+// lib/postgres.nx проти справжнього Postgres. Без NX_TEST_PG_URL - пропуск
+// (у CI задається service-контейнером, локально - напр.
+// NX_TEST_PG_URL=postgres://postgres:pass@localhost:5432/postgres).
+import "../lib/testing.nx" { assertEqual, assertTrue }
+import "../lib/postgres.nx"
+
+func main() {
+    var url = osEnv("NX_TEST_PG_URL")
+    if url == "" {
+        print("NX_TEST_PG_URL не задано - тест Postgres пропущено")
+        return null
+    }
+    var db = pgConnect(url)
+    pgExec(db, "DROP TABLE IF EXISTS nx_test_notes", [])
+    pgExec(db, "CREATE TABLE nx_test_notes (id serial PRIMARY KEY, title text, n int, price numeric, ok bool, note text)", [])
+    assertEqual(pgExec(db, "INSERT INTO nx_test_notes(title, n, price, ok, note) VALUES ($1, $2, $3, $4, $5), ($6, $7, $8, $9, $10)", ["Привіт 🗼", 42, 3.5, true, null, "'; DROP TABLE nx_test_notes; --", -7, 0, false, "O'Reilly"]), 2, "INSERT 2 рядки")
+    var rows = pgQuery(db, "SELECT id, title, n, price, ok, note FROM nx_test_notes ORDER BY id", [])
+    assertEqual(len(rows), 2, "2 рядки")
+    assertEqual(mapGet(rows[0], "title"), "Привіт 🗼", "кирилиця/емодзі")
+    assertEqual(mapGet(rows[0], "n"), 42, "int")
+    assertEqual(mapGet(rows[0], "price"), 3.5, "numeric")
+    assertEqual(mapGet(rows[0], "ok"), true, "bool")
+    assertTrue(isNull(mapGet(rows[0], "note")), "NULL")
+    assertEqual(mapGet(rows[1], "title"), "'; DROP TABLE nx_test_notes; --", "ін'єкція лишилась даними")
+    assertEqual(mapGet(rows[1], "note"), "O'Reilly", "лапки")
+    assertEqual(pgExec(db, "UPDATE nx_test_notes SET n = n + $1", [1]), 2, "UPDATE")
+    var failed = false
+    try {
+        pgQuery(db, "SELECT * FROM nx_no_such_table", [])
+    } catch (e) {
+        failed = true
+    }
+    assertTrue(failed, "помилка SQL -> виняток")
+    assertEqual(mapGet(pgQuery(db, "SELECT 1 + $1::int AS x", [1])[0], "x"), 2, "з'єднання живе після помилки")
+    pgExec(db, "DROP TABLE nx_test_notes", [])
+    pgClose(db)
+    print("Усі перевірки Postgres пройдено")
+}

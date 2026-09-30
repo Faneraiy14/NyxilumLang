@@ -1,0 +1,395 @@
+// lib/postgres.nx — клієнт PostgreSQL на чистій NyxilumLang (протокол v3)
+// поверх голого TCP (tcpConnect/tcpSend/tcpReceive/tcpStartTls/tcpClose).
+// Авторизація: trust, cleartext, MD5, SCRAM-SHA-256.
+// TLS (як у libpq): ?sslmode=require - шифрувати без перевірки сертифіката
+// (самопідписані сертифікати БД - норма); ?sslmode=verify-full - шифрувати
+// й перевіряти сертифікат та ім'я хоста.
+// Запити - extended protocol з параметрами $1..$n (значення йдуть окремо від
+// SQL, тож SQL-ін'єкція через параметр неможлива).
+//
+//   var db = pgConnect("postgres://user:pass@host:5432/dbname?sslmode=require")
+//   pgExec(db, "INSERT INTO notes(title) VALUES ($1)", ["Привіт"])   -> 1
+//   var rows = pgQuery(db, "SELECT id, title FROM notes WHERE id > $1", [0])
+//   // rows: [{id: 1, title: "Привіт"}]
+//   pgClose(db)
+//
+// Типи результату: bool -> true/false, int2/4/8, float4/8, numeric, oid ->
+// число (⚠️ int8/numeric точні лише до 2^53), NULL -> null, решта -> рядок.
+//
+// ⚠️ SCRAM: PBKDF2 на 4096 ітерацій у VM рахується ~35 с. Результат
+// кешується на весь час роботи процесу (SCRAM це дозволяє), тож повільне
+// лише ПЕРШЕ підключення з даним паролем. SASLprep пароля не виконується -
+// ASCII і звичайні Unicode-паролі працюють, екзотичні (з нормалізацією) ні.
+import "bytes.nx"
+import "crypto.nx"
+import "url.nx"
+
+// ---------------------------------------------------------------- повідомлення
+
+func pgCString(s) {
+    var b = utf8Encode(s)
+    append(b, 0)
+    return b
+}
+
+// Повідомлення клієнта: тип (1 байт) + Int32 довжина (разом із собою) + тіло
+func pgMessage(type, body) {
+    var out = asciiBytes(type)
+    bytesAppend(out, u32be(len(body) + 4))
+    bytesAppend(out, body)
+    return out
+}
+
+// {type, body} наступного повідомлення сервера
+func pgReceive(conn) {
+    var sock = mapGet(conn, "sock")
+    var head = tcpReceive(sock, 5)
+    var length = readU32be(head, 1)
+    var body = []
+    if length > 4 {
+        body = tcpReceive(sock, length - 4)
+    }
+    var msg = newMap()
+    mapSet(msg, "type", fromCharCode(head[0]))
+    mapSet(msg, "body", body)
+    return msg
+}
+
+// Рядок, що закінчується нулем, з body[off..]: [рядок, offset після нуля]
+func pgReadCString(body, off) {
+    var end = off
+    while body[end] != 0 {
+        end = end + 1
+    }
+    return [utf8Decode(slice(body, off, end)), end + 1]
+}
+
+// ErrorResponse/NoticeResponse: поля (код-байт, рядок) до нульового байта
+func pgErrorText(body) {
+    var message = ""
+    var sqlstate = ""
+    var detail = ""
+    var off = 0
+    while off < len(body) && body[off] != 0 {
+        var code = fromCharCode(body[off])
+        var r = pgReadCString(body, off + 1)
+        if code == "M" {
+            message = r[0]
+        } else if code == "C" {
+            sqlstate = r[0]
+        } else if code == "D" {
+            detail = r[0]
+        }
+        off = r[1]
+    }
+    var text = "Postgres: " + message
+    if sqlstate != "" {
+        text = text + " [" + sqlstate + "]"
+    }
+    if detail != "" {
+        text = text + " - " + detail
+    }
+    return text
+}
+
+// ---------------------------------------------------------------- SCRAM-SHA-256 (RFC 5802/7677)
+
+// Кеш SaltedPassword на весь процес: ключ - (salt, ітерації, sha256 пароля)
+var PG_SCRAM_CACHE = newMap()
+
+func pgScramSaltedPassword(password, saltB64, iterations) {
+    var key = saltB64 + ":" + toString(iterations) + ":" + bytesToHex(sha256(utf8Encode(password)))
+    if mapHas(PG_SCRAM_CACHE, key) {
+        return mapGet(PG_SCRAM_CACHE, key)
+    }
+    var salted = pbkdf2Sha256(utf8Encode(password), base64Decode(saltB64), iterations, 32)
+    mapSet(PG_SCRAM_CACHE, key, salted)
+    return salted
+}
+
+func pgScramAttr(msg, name) {
+    var parts = split(msg, ",")
+    var i = 0
+    while i < len(parts) {
+        if startsWith(parts[i], name + "=") {
+            return substring(parts[i], len(name) + 1)
+        }
+        i = i + 1
+    }
+    return null
+}
+
+func pgAuthScram(conn, password) {
+    var sock = mapGet(conn, "sock")
+    var clientNonce = base64Encode(randomBytes(18))
+    var clientFirstBare = "n=,r=" + clientNonce
+    var clientFirst = asciiBytes("n,," + clientFirstBare)
+
+    var initial = pgCString("SCRAM-SHA-256")
+    bytesAppend(initial, u32be(len(clientFirst)))
+    bytesAppend(initial, clientFirst)
+    tcpSend(sock, pgMessage("p", initial))
+
+    var cont = pgExpectAuth(conn, 11)
+    var serverFirst = utf8Decode(slice(cont, 4, len(cont)))
+    var nonce = pgScramAttr(serverFirst, "r")
+    if isNull(nonce) || !startsWith(nonce, clientNonce) {
+        throw "Postgres SCRAM: сервер повернув некоректний nonce"
+    }
+    var saltB64 = pgScramAttr(serverFirst, "s")
+    var iterations = toInt(pgScramAttr(serverFirst, "i"))
+
+    var salted = pgScramSaltedPassword(password, saltB64, iterations)
+    var clientKey = hmacSha256(salted, asciiBytes("Client Key"))
+    var storedKey = sha256(clientKey)
+    var clientFinalNoProof = "c=biws,r=" + nonce
+    var authMessage = utf8Encode(clientFirstBare + "," + serverFirst + "," + clientFinalNoProof)
+    var clientSignature = hmacSha256(storedKey, authMessage)
+    var proof = bytesXor(clientKey, clientSignature)
+    tcpSend(sock, pgMessage("p", asciiBytes(clientFinalNoProof + ",p=" + base64Encode(proof))))
+
+    var final = pgExpectAuth(conn, 12)
+    var serverKey = hmacSha256(salted, asciiBytes("Server Key"))
+    var expected = base64Encode(hmacSha256(serverKey, authMessage))
+    var got = pgScramAttr(utf8Decode(slice(final, 4, len(final))), "v")
+    // перевірка, що сервер теж знає пароль (захист від підробленого сервера)
+    if got != expected {
+        throw "Postgres SCRAM: підпис сервера не збігся"
+    }
+}
+
+// Чекає Authentication-повідомлення з кодом `code`, повертає його тіло
+func pgExpectAuth(conn, code) {
+    var msg = pgReceive(conn)
+    var type = mapGet(msg, "type")
+    var body = mapGet(msg, "body")
+    if type == "E" {
+        throw pgErrorText(body)
+    }
+    if type != "R" || readU32be(body, 0) != code {
+        throw "Postgres: неочікувана відповідь під час авторизації (" + type + ")"
+    }
+    return body
+}
+
+// ---------------------------------------------------------------- підключення
+
+func pgConnect(url) {
+    var cfg = dbParseUrl(url, 5432, "postgres")
+    if !mapHas(cfg, "sslmode") {
+        mapSet(cfg, "sslmode", "disable")
+    }
+    var sock = tcpConnect(mapGet(cfg, "host"), mapGet(cfg, "port"))
+    var conn = newMap()
+    mapSet(conn, "sock", sock)
+    mapSet(conn, "params", newMap())
+
+    var sslmode = mapGet(cfg, "sslmode")
+    if sslmode == "require" || sslmode == "prefer" || sslmode == "verify-full" {
+        // SSLRequest: Int32 8, Int32 80877103; відповідь - один байт S/N
+        var req = u32be(8)
+        bytesAppend(req, u32be(80877103))
+        tcpSend(sock, req)
+        var answer = fromCharCode(tcpReceive(sock, 1)[0])
+        if answer == "S" {
+            tcpStartTls(sock, mapGet(cfg, "host"), sslmode == "verify-full")
+        } else if sslmode != "prefer" {
+            tcpClose(sock)
+            throw "Postgres: сервер не підтримує TLS, а sslmode=" + sslmode
+        }
+    }
+
+    // StartupMessage: протокол 3.0 + пари параметрів + фінальний нуль
+    var body = u32be(196608)
+    bytesAppend(body, pgCString("user"))
+    bytesAppend(body, pgCString(mapGet(cfg, "user")))
+    bytesAppend(body, pgCString("database"))
+    bytesAppend(body, pgCString(mapGet(cfg, "database")))
+    bytesAppend(body, pgCString("client_encoding"))
+    bytesAppend(body, pgCString("UTF8"))
+    append(body, 0)
+    var startup = u32be(len(body) + 4)
+    bytesAppend(startup, body)
+    tcpSend(sock, startup)
+
+    var password = mapGet(cfg, "password")
+    while true {
+        var msg = pgReceive(conn)
+        var type = mapGet(msg, "type")
+        var mbody = mapGet(msg, "body")
+        if type == "R" {
+            var code = readU32be(mbody, 0)
+            if code == 3 {
+                tcpSend(sock, pgMessage("p", pgCString(password)))
+            } else if code == 5 {
+                // md5(md5(password + user) + salt), з префіксом "md5"
+                var inner = bytesToHex(md5(utf8Encode(password + mapGet(cfg, "user"))))
+                var outer = bytesToHex(md5(bytesConcat(asciiBytes(inner), slice(mbody, 4, 8))))
+                tcpSend(sock, pgMessage("p", pgCString("md5" + outer)))
+            } else if code == 10 {
+                var mechs = utf8Decode(slice(mbody, 4, len(mbody)))
+                if indexOf(mechs, "SCRAM-SHA-256") < 0 {
+                    throw "Postgres: сервер не пропонує SCRAM-SHA-256"
+                }
+                pgAuthScram(conn, password)
+            } else if code != 0 {
+                throw "Postgres: непідтримуваний метод авторизації (код " + toString(code) + ")"
+            }
+        } else if type == "S" {
+            var name = pgReadCString(mbody, 0)
+            var value = pgReadCString(mbody, name[1])
+            mapSet(mapGet(conn, "params"), name[0], value[0])
+        } else if type == "E" {
+            tcpClose(sock)
+            throw pgErrorText(mbody)
+        } else if type == "Z" {
+            return conn
+        }
+        // K (BackendKeyData), N (Notice) - пропускаємо
+    }
+}
+
+func pgClose(conn) {
+    var sock = mapGet(conn, "sock")
+    try {
+        tcpSend(sock, pgMessage("X", []))
+    } catch (e) {
+    }
+    tcpClose(sock)
+}
+
+// ---------------------------------------------------------------- запити
+
+func pgParamBytes(value) {
+    if value == true {
+        return asciiBytes("true")
+    }
+    if value == false {
+        return asciiBytes("false")
+    }
+    return utf8Encode(toString(value))
+}
+
+// Типи за OID: 16 bool; 20/21/23 int8/int2/int4; 26 oid; 700/701 float4/8;
+// 1700 numeric
+func pgConvert(text, oid) {
+    if oid == 16 {
+        return text == "t"
+    }
+    if oid == 20 || oid == 21 || oid == 23 || oid == 26 || oid == 700 || oid == 701 || oid == 1700 {
+        if text == "NaN" {
+            return text
+        }
+        return toDouble(text)
+    }
+    return text
+}
+
+// Один цикл Parse/Bind/Describe/Execute/Sync. Повертає {rows, affected}.
+func pgRun(conn, sql, params) {
+    var sock = mapGet(conn, "sock")
+    var packet = []
+
+    var parse = pgCString("")
+    bytesAppend(parse, pgCString(sql))
+    bytesAppend(parse, u16be(0))
+    bytesAppend(packet, pgMessage("P", parse))
+
+    var bind = pgCString("")
+    bytesAppend(bind, pgCString(""))
+    bytesAppend(bind, u16be(0))
+    bytesAppend(bind, u16be(len(params)))
+    var i = 0
+    while i < len(params) {
+        if isNull(params[i]) {
+            bytesAppend(bind, [255, 255, 255, 255])
+        } else {
+            var pb = pgParamBytes(params[i])
+            bytesAppend(bind, u32be(len(pb)))
+            bytesAppend(bind, pb)
+        }
+        i = i + 1
+    }
+    bytesAppend(bind, u16be(0))
+    bytesAppend(packet, pgMessage("B", bind))
+
+    var describe = asciiBytes("P")
+    bytesAppend(describe, pgCString(""))
+    bytesAppend(packet, pgMessage("D", describe))
+
+    var execute = pgCString("")
+    bytesAppend(execute, u32be(0))
+    bytesAppend(packet, pgMessage("E", execute))
+    bytesAppend(packet, pgMessage("S", []))
+    tcpSend(sock, packet)
+
+    var names = []
+    var oids = []
+    var rows = []
+    var affected = 0
+    var error = null
+    while true {
+        var msg = pgReceive(conn)
+        var type = mapGet(msg, "type")
+        var body = mapGet(msg, "body")
+        if type == "T" {
+            var n = readU16be(body, 0)
+            var off = 2
+            var k = 0
+            while k < n {
+                var r = pgReadCString(body, off)
+                append(names, r[0])
+                off = r[1]
+                append(oids, readU32be(body, off + 6))
+                off = off + 18
+                k = k + 1
+            }
+        } else if type == "D" {
+            var cols = readU16be(body, 0)
+            var off2 = 2
+            var row = newMap()
+            var c = 0
+            while c < cols {
+                var clen = readI32be(body, off2)
+                off2 = off2 + 4
+                if clen < 0 {
+                    mapSet(row, names[c], null)
+                } else {
+                    mapSet(row, names[c], pgConvert(utf8Decode(slice(body, off2, off2 + clen)), oids[c]))
+                    off2 = off2 + clen
+                }
+                c = c + 1
+            }
+            append(rows, row)
+        } else if type == "C" {
+            // "INSERT 0 3" / "UPDATE 2" / "DELETE 1" / "SELECT 5" - число в кінці
+            var tag = split(pgReadCString(body, 0)[0], " ")
+            var last = tag[len(tag) - 1]
+            if regexTest(last, "^[0-9]+$") {
+                affected = toInt(last)
+            }
+        } else if type == "E" {
+            // після помилки сервер пропускає все до Sync і шле Z - дочитуємо
+            error = pgErrorText(body)
+        } else if type == "Z" {
+            if !isNull(error) {
+                throw error
+            }
+            var result = newMap()
+            mapSet(result, "rows", rows)
+            mapSet(result, "affected", affected)
+            return result
+        }
+        // 1 ParseComplete, 2 BindComplete, n NoData, I EmptyQuery, N Notice - пропускаємо
+    }
+}
+
+// SELECT (або будь-що з RETURNING) -> масив мап {колонка: значення}
+func pgQuery(conn, sql, params) {
+    return mapGet(pgRun(conn, sql, params), "rows")
+}
+
+// INSERT/UPDATE/DELETE/DDL -> кількість змінених рядків
+func pgExec(conn, sql, params) {
+    return mapGet(pgRun(conn, sql, params), "affected")
+}

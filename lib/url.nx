@@ -1,0 +1,90 @@
+// lib/url.nx — розбір URL підключення до БД (postgres://, mysql://) з
+// percent-декодуванням (пароль з "@", ":" чи кирилицею пишеться як %40, %3A,
+// %D0%9F...). Спільний для lib/postgres.nx і lib/mysql.nx.
+import "bytes.nx"
+
+func urlPercentDecode(s) {
+    if indexOf(s, "%") < 0 {
+        return s
+    }
+    var out = []
+    var i = 0
+    while i < len(s) {
+        var ch = substring(s, i, 1)
+        if ch == "%" && i + 2 < len(s) {
+            bytesAppend(out, hexToBytes(substring(s, i + 1, 2)))
+            i = i + 3
+        } else {
+            bytesAppend(out, utf8Encode(ch))
+            i = i + 1
+        }
+    }
+    return utf8Decode(out)
+}
+
+// scheme://user:pass@host:port/db?key=value&... -> мапа {user, password,
+// host, port, database, <query-параметри>}. database за замовчуванням = user.
+func dbParseUrl(url, defaultPort, defaultUser) {
+    var rest = url
+    var schemeEnd = indexOf(rest, "://")
+    if schemeEnd >= 0 {
+        rest = substring(rest, schemeEnd + 3)
+    }
+    var cfg = newMap()
+    mapSet(cfg, "user", defaultUser)
+    mapSet(cfg, "password", "")
+    mapSet(cfg, "port", defaultPort)
+
+    var q = indexOf(rest, "?")
+    if q >= 0 {
+        var params = split(substring(rest, q + 1), "&")
+        var i = 0
+        while i < len(params) {
+            var kv = split(params[i], "=")
+            if len(kv) == 2 {
+                mapSet(cfg, kv[0], urlPercentDecode(kv[1]))
+            }
+            i = i + 1
+        }
+        rest = substring(rest, 0, q)
+    }
+
+    var at = -1
+    var j = 0
+    while j < len(rest) {
+        if substring(rest, j, 1) == "@" {
+            at = j
+        }
+        j = j + 1
+    }
+    if at >= 0 {
+        var cred = substring(rest, 0, at)
+        rest = substring(rest, at + 1)
+        var colon = indexOf(cred, ":")
+        if colon >= 0 {
+            mapSet(cfg, "user", urlPercentDecode(substring(cred, 0, colon)))
+            mapSet(cfg, "password", urlPercentDecode(substring(cred, colon + 1)))
+        } else {
+            mapSet(cfg, "user", urlPercentDecode(cred))
+        }
+    }
+
+    var slash = indexOf(rest, "/")
+    var hostPort = rest
+    mapSet(cfg, "database", mapGet(cfg, "user"))
+    if slash >= 0 {
+        hostPort = substring(rest, 0, slash)
+        var dbName = substring(rest, slash + 1)
+        if dbName != "" {
+            mapSet(cfg, "database", urlPercentDecode(dbName))
+        }
+    }
+    var pc = indexOf(hostPort, ":")
+    if pc >= 0 {
+        mapSet(cfg, "host", substring(hostPort, 0, pc))
+        mapSet(cfg, "port", toInt(substring(hostPort, pc + 1)))
+    } else {
+        mapSet(cfg, "host", hostPort)
+    }
+    return cfg
+}

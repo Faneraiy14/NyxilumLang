@@ -1,0 +1,26 @@
+// lib/bytes.nx + lib/crypto.nx - на еталонних векторах (FIPS 180, RFC 1321,
+// RFC 4231, RFC 7914/8018, RFC 4648). Уся крипта - чиста NyxilumLang.
+import "../lib/testing.nx" { assertEqual, assertTrue }
+import "../lib/bytes.nx"
+import "../lib/crypto.nx"
+
+func main() {
+    assertEqual(bytesToHex(utf8Encode("Маяк 🗼")), "d09cd0b0d18fd0ba20f09f97bc", "utf8Encode кирилиця+емодзі")
+    assertEqual(utf8Decode(utf8Encode("Маяк 🗼 ok")), "Маяк 🗼 ok", "utf8 roundtrip")
+    assertEqual(utf8Decode([104, 255, 105]), "h" + fromCharCode(65533) + "i", "невалідний UTF-8 -> U+FFFD")
+    assertEqual(base64Encode(asciiBytes("foobar")), "Zm9vYmFy", "base64 foobar")
+    assertEqual(base64Encode(asciiBytes("fo")), "Zm8=", "base64 padding")
+    assertEqual(utf8Decode(base64Decode("Zm9vYg==")), "foob", "base64Decode")
+    assertEqual(readI32be(u32be(-1), 0), -1, "i32 be -1")
+    assertEqual(readF64le(hexToBytes("1f85eb51b81e0940"), 0), 3.14, "f64 3.14")
+    assertEqual(readF32le(hexToBytes("0000c03f"), 0), 1.5, "f32 1.5")
+
+    assertEqual(bytesToHex(sha256([])), "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "sha256('')")
+    assertEqual(bytesToHex(sha256(asciiBytes("abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq"))), "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1", "sha256 2 блоки")
+    assertEqual(bytesToHex(sha1(asciiBytes("abc"))), "a9993e364706816aba3e25717850c26c9cd0d89d", "sha1(abc)")
+    assertEqual(bytesToHex(md5(asciiBytes("The quick brown fox jumps over the lazy dog"))), "9e107d9d372bb6826bd81d3542a419d6", "md5(fox)")
+    assertEqual(bytesToHex(hmacSha256(asciiBytes("Jefe"), asciiBytes("what do ya want for nothing?"))), "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843", "HMAC RFC 4231 #2")
+    assertEqual(bytesToHex(pbkdf2Sha256(asciiBytes("password"), asciiBytes("salt"), 1, 32)), "120fb6cffcf8b32c43e7225256c4f837a86548c92ccc35480805987cb70be17b", "PBKDF2 c=1")
+    assertEqual(bytesToHex(pbkdf2Sha256(asciiBytes("password"), asciiBytes("salt"), 2, 32)), "ae4d0c95af6b46d32d0adff928f06dd02a303f8ef3c251dfd6e2d85a95474c43", "PBKDF2 c=2")
+    print("Усі перевірки bytes/crypto пройдено")
+}

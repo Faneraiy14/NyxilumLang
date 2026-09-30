@@ -641,6 +641,7 @@ public class VirtualMachine
         NyxilumLang.Runtime.Modules.ProcessModule.Register(_nativeFunctions);
         NyxilumLang.Runtime.Modules.ArchiveModule.Register(_nativeFunctions);
         NyxilumLang.Runtime.Modules.NotificationModule.Register(_nativeFunctions);
+        NyxilumLang.Runtime.Modules.TcpModule.Register(_nativeFunctions);
 #if WINDOWS
         NyxilumLang.Runtime.Modules.GraphicsModule.Register(_nativeFunctions);
 #else

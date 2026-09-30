@@ -12,6 +12,34 @@ jobs:
     # Windows Forms) — саме те, що реально перевіряє tests/run_all.sh:
     # graphics/http_server-тести там пропускаються на будь-якій ОС.
     runs-on: ubuntu-latest
+    # Справжні БД для tests/test_postgres.nx і tests/test_mysql.nx (драйвери
+    # lib/postgres.nx, lib/mysql.nx - чиста NyxilumLang поверх tcp*). Живуть
+    # лише на час job. Postgres 16 - SCRAM-SHA-256 за замовчуванням; MySQL
+    # 8.4 - caching_sha2_password, перший вхід через TLS (?ssl=true).
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: nxpass
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U postgres"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=20
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_ROOT_PASSWORD: nxpass
+          MYSQL_DATABASE: nxtest
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1 -pnxpass --silent"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=30
     steps:
       - uses: actions/checkout@v4
         with:
@@ -47,6 +75,9 @@ jobs:
         # Абсолютний шлях обов'язковий: run_all.sh сам робить cd у tests/
         # перед тим, як перевірити $NX_EXE — відносний шлях звідти вже
         # вказував би не туди.
+        env:
+          NX_TEST_PG_URL: postgres://postgres:nxpass@127.0.0.1:5432/postgres
+          NX_TEST_MYSQL_URL: mysql://root:nxpass@127.0.0.1:3306/nxtest?ssl=true
         run: NX_EXE="$(pwd)/src/NyxilumLang/bin/Release/net10.0/Nx" bash tests/run_all.sh
 
   build-windows:
