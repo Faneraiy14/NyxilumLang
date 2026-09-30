@@ -51,25 +51,128 @@ func tgMessageText(update) {
     return mapGet(message, "text")
 }
 
+// Для звичайного повідомлення - чат повідомлення; для натискання inline-
+// кнопки (callback_query) - чат повідомлення, під яким була кнопка.
 func tgChatId(update) {
     var message = mapGet(update, "message")
     if isNull(message) {
-        return null
+        var cb = mapGet(update, "callback_query")
+        if isNull(cb) {
+            return null
+        }
+        message = mapGet(cb, "message")
+        if isNull(message) {
+            return null
+        }
     }
     var chat = mapGet(message, "chat")
     return mapGet(chat, "id")
 }
 
 func tgUserId(update) {
-    var message = mapGet(update, "message")
-    if isNull(message) {
+    var source = mapGet(update, "message")
+    if isNull(source) {
+        source = mapGet(update, "callback_query")
+    }
+    if isNull(source) {
         return null
     }
-    var from = mapGet(message, "from")
+    var from = mapGet(source, "from")
     if isNull(from) {
         return null
     }
     return mapGet(from, "id")
+}
+
+// ---------------------------------------------------------------- inline-кнопки
+// Кнопка під повідомленням: text - що бачить людина, data - рядок до 64
+// байт, який бот отримає в callback_query при натисканні.
+//   var rows = [[tgButton("💱 Курс", "rate"), tgButton("🔄 Конвертер", "conv")]]
+//   tgSendMessageWithButtons(token, chatId, "Що зробимо?", rows)
+
+func tgButton(text, data) {
+    var b = newMap()
+    mapSet(b, "text", text)
+    mapSet(b, "callback_data", data)
+    return b
+}
+
+func tgKeyboard(rows) {
+    var markup = newMap()
+    mapSet(markup, "inline_keyboard", rows)
+    return markup
+}
+
+func tgSendMessageWithButtons(token, chatId, text, rows) {
+    var data = newMap()
+    mapSet(data, "chat_id", chatId)
+    mapSet(data, "text", text)
+    if !isNull(rows) {
+        mapSet(data, "reply_markup", tgKeyboard(rows))
+    }
+    var res = httpRequest("https://api.telegram.org/bot" + token + "/sendMessage", "POST", toJson(data))
+    return fromJson(mapGet(res, "body"))
+}
+
+// Замінити текст (і кнопки) вже надісланого повідомлення - так меню
+// "перемикається" на місці, а не засипає чат новими повідомленнями.
+// Якщо текст і кнопки не змінились, Telegram відповідає ok:false
+// ("message is not modified") - це не помилка, результат просто повертається.
+func tgEditMessage(token, chatId, messageId, text, rows) {
+    var data = newMap()
+    mapSet(data, "chat_id", chatId)
+    mapSet(data, "message_id", messageId)
+    mapSet(data, "text", text)
+    if !isNull(rows) {
+        mapSet(data, "reply_markup", tgKeyboard(rows))
+    }
+    var res = httpRequest("https://api.telegram.org/bot" + token + "/editMessageText", "POST", toJson(data))
+    return fromJson(mapGet(res, "body"))
+}
+
+// Обов'язкова відповідь на натискання кнопки (інакше в Telegram крутиться
+// годинник на кнопці). text - необов'язкове коротке спливаюче повідомлення.
+func tgAnswerCallback(token, callbackId, text) {
+    var data = newMap()
+    mapSet(data, "callback_query_id", callbackId)
+    if !isNull(text) {
+        mapSet(data, "text", text)
+    }
+    var res = httpRequest("https://api.telegram.org/bot" + token + "/answerCallbackQuery", "POST", toJson(data))
+    return fromJson(mapGet(res, "body"))
+}
+
+// callback_query з апдейту або null (апдейт - звичайне повідомлення)
+func tgCallback(update) {
+    return mapGet(update, "callback_query")
+}
+
+func tgCallbackData(update) {
+    var cb = tgCallback(update)
+    if isNull(cb) {
+        return null
+    }
+    return mapGet(cb, "data")
+}
+
+func tgCallbackId(update) {
+    var cb = tgCallback(update)
+    if isNull(cb) {
+        return null
+    }
+    return mapGet(cb, "id")
+}
+
+func tgCallbackMessageId(update) {
+    var cb = tgCallback(update)
+    if isNull(cb) {
+        return null
+    }
+    var message = mapGet(cb, "message")
+    if isNull(message) {
+        return null
+    }
+    return mapGet(message, "message_id")
 }
 
 // Блокує назавжди (як httpServer): на кожен новий апдейт викликає
@@ -80,6 +183,14 @@ func tgUserId(update) {
 // наступного апдейту (offset усе одно просувається, інакше одне "погане"
 // повідомлення прилітало б знову й знову і клало бота по колу).
 func tgPollLoop(token, handler) {
+    tgPollLoopWithTick(token, handler, null)
+}
+
+// Те саме + onTick() після кожного циклу getUpdates (не рідше ніж раз на
+// ~30 с, бо long polling повертається щонайпізніше через timeout) - для
+// фонових справ бота: нагадування, розсилки, прибирання. Виняток в onTick
+// логується й не зупиняє бота.
+func tgPollLoopWithTick(token, handler, onTick) {
     var offset = 0
     while true {
         var updates = null
@@ -100,6 +211,13 @@ func tgPollLoop(token, handler) {
                     print("[" + now() + "] помилка в обробнику: " + toString(e))
                 }
                 i = i + 1
+            }
+        }
+        if !isNull(onTick) {
+            try {
+                onTick()
+            } catch (e) {
+                print("[" + now() + "] помилка в onTick: " + toString(e))
             }
         }
     }
