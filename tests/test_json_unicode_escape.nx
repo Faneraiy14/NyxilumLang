@@ -1,0 +1,30 @@
+// fromJson розшифровує \uXXXX (так Telegram API шле кирилицю й емодзі).
+// Раніше "є" ставало "u0454" - знайдено в боті Маяк на "/convert 50 євро".
+func check(name, got, expected) {
+    if got != expected {
+        throw name + ": очікувалось '" + expected + "', отримано '" + got + "'"
+    }
+    print("OK " + name)
+}
+
+var bs = fromCharCode(92)
+check("кирилиця", fromJson("\"" + bs + "u0454" + bs + "u0432" + bs + "u0440" + bs + "u043e\""), "євро")
+check("регістр hex", fromJson("\"" + bs + "u0454" + bs + "u0412\""), "єВ")
+check("емодзі (сурогатна пара)", fromJson("\"" + bs + "ud83d" + bs + "udde8\""), "🗨")
+check("мікс з ASCII", fromJson("\"a" + bs + "u0431c\""), "aбc")
+var m = fromJson("{\"text\":\"/convert 50 " + bs + "u0454" + bs + "u0432" + bs + "u0440" + bs + "u043e\"}")
+check("у мапі", mapGet(m, "text"), "/convert 50 євро")
+check("старі екранування", fromJson("\"a" + bs + "nb" + bs + "\"c\""), "a\nb\"c")
+check("toJson -> fromJson", fromJson(toJson("Маяк 🗼")), "Маяк 🗼")
+
+var failed = false
+try {
+    fromJson("\"" + bs + "u04zz\"")
+} catch (e) {
+    failed = true
+}
+if !failed {
+    throw "невалідний \\u мав кинути виняток"
+}
+print("OK невалідний \\u -> виняток")
+print("Усі перевірки \\u пройдено")

@@ -179,9 +179,24 @@ public static class NxJson
             if (c == '\\' && pos + 1 < s.Length)
             {
                 char next = s[pos + 1];
+                // \uXXXX - так JSON-серіалізатори (напр. Telegram API) кодують
+                // усе не-ASCII: "євро" приходить як євро.
+                // Раніше тут спрацьовувала гілка "_ => next" і з'являвся
+                // сміттєвий рядок "u0454u0432...". Емодзі (сурогатні пари
+                // 😀) збираються самі: кожна половинка - окремий char.
+                if (next == 'u')
+                {
+                    if (pos + 6 > s.Length || !int.TryParse(s.AsSpan(pos + 2, 4),
+                            System.Globalization.NumberStyles.HexNumber, null, out int code))
+                        throw new Exception($"Невалідна \\u-послідовність у JSON на позиції {pos}");
+                    sb.Append((char)code);
+                    pos += 6;
+                    continue;
+                }
                 sb.Append(next switch
                 {
                     'n' => '\n', 't' => '\t', 'r' => '\r', '"' => '"', '\\' => '\\', '/' => '/',
+                    'b' => '\b', 'f' => '\f',
                     _ => next
                 });
                 pos += 2;
