@@ -66,10 +66,20 @@ public static class HttpModule
         var wsHandlerRef = args.Length > 2 ? args[2] as NxFunctionRef : null;
         var vm = VirtualMachine.Current!;
 
+        // Типово - лише localhost (локальний dev-сервер не світиться в мережу
+        // випадково). NX_HTTP_HOST=0.0.0.0 (або * / +) - слухати всі
+        // інтерфейси: потрібно в Docker/PaaS (Render тощо), де запити
+        // приходять ззовні контейнера, а не з localhost. Змінна середовища,
+        // а не аргумент: той самий .nx-код без змін працює і локально, і в
+        // контейнері, а позиційні аргументи вже зайняті (port, handler, ws?).
+        string? hostEnv = Environment.GetEnvironmentVariable("NX_HTTP_HOST");
+        string host = string.IsNullOrWhiteSpace(hostEnv) ? "localhost"
+            : hostEnv is "0.0.0.0" or "*" or "+" ? "+" : hostEnv.Trim();
+
         var listener = new HttpListener();
-        listener.Prefixes.Add($"http://localhost:{port}/");
+        listener.Prefixes.Add($"http://{host}:{port}/");
         listener.Start();
-        Console.WriteLine($"[Nx] Сервер запущено на порту {port}");
+        Console.WriteLine($"[Nx] Сервер запущено на порту {port}" + (host == "localhost" ? "" : $" (усі інтерфейси: {hostEnv})"));
 
         while (listener.IsListening)
         {
