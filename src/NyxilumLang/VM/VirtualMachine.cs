@@ -177,7 +177,7 @@ public class VirtualMachine
             string => "string",
             bool => "bool",
             double => "number",
-            int => "number",
+            int or long or float => "number",
             null => "null",
             _ => args[0].GetType().Name
         };
@@ -498,7 +498,12 @@ public class VirtualMachine
         // System / Time
         _nativeFunctions["now"] = args => DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss");
         _nativeFunctions["today"] = args => DateTime.Now.ToString("yyyy-MM-dd");
-        _nativeFunctions["timestamp"] = args => DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+        // (double), а не long: усі числа мови - double. Раніше timestamp()
+        // повертав C#-long - typeOf давав "Int64", а toJson писав його
+        // РЯДКОМ ("1790766696"), тож час, збережений у JSON і прочитаний
+        // назад, ставав рядком, і "t + 3600" склеював рядки (знайдено в
+        // лічильниках бота Маяк, 30.09.2026).
+        _nativeFunctions["timestamp"] = args => (double)DateTimeOffset.UtcNow.ToUnixTimeSeconds();
         // now()/today() віддавали лише два фіксовані формати - жодного способу
         // ані відформатувати timestamp() у власний вигляд (напр. "dd.MM HH:mm"),
         // ані розпарсити рядок дати назад у число. formatDate/parseDate
@@ -523,7 +528,7 @@ public class VirtualMachine
             {
                 throw new Exception($"parseDate: не вдалось розпарсити \"{s}\" за форматом \"{format}\"");
             }
-            return new DateTimeOffset(parsed, TimeZoneInfo.Local.GetUtcOffset(parsed)).ToUnixTimeSeconds();
+            return (double)new DateTimeOffset(parsed, TimeZoneInfo.Local.GetUtcOffset(parsed)).ToUnixTimeSeconds();
         };
         _nativeFunctions["sleep"] = args => {
             System.Threading.Thread.Sleep(Convert.ToInt32(args[0]));

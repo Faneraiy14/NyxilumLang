@@ -32,6 +32,14 @@ public static class NxJson
             case int i:
                 sb.Append(i.ToString(CultureInfo.InvariantCulture));
                 break;
+            // long/float - числа з нативних функцій (C#-бібліотеки); раніше
+            // падали в загальну гілку й писались РЯДКОМ у лапках
+            case long l:
+                sb.Append(l.ToString(CultureInfo.InvariantCulture));
+                break;
+            case float f:
+                sb.Append(f.ToString(CultureInfo.InvariantCulture));
+                break;
             case string s:
                 WriteString(s, sb);
                 break;
@@ -180,10 +188,10 @@ public static class NxJson
             {
                 char next = s[pos + 1];
                 // \uXXXX - так JSON-серіалізатори (напр. Telegram API) кодують
-                // усе не-ASCII: "євро" приходить як євро.
+                // усе не-ASCII: "євро" приходить як \u0454\u0432\u0440\u043e.
                 // Раніше тут спрацьовувала гілка "_ => next" і з'являвся
                 // сміттєвий рядок "u0454u0432...". Емодзі (сурогатні пари
-                // 😀) збираються самі: кожна половинка - окремий char.
+                // \uD83D\uDE00) збираються самі: кожна половинка - окремий char.
                 if (next == 'u')
                 {
                     if (pos + 6 > s.Length || !int.TryParse(s.AsSpan(pos + 2, 4),

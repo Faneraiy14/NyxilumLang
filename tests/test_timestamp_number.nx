@@ -1,0 +1,16 @@
+// timestamp() - звичайне число: typeOf "number", toJson без лапок, переживає
+// JSON-коло (toJson -> fromJson) як число. Раніше C#-long -> "Int64" і рядок
+// у JSON (знайдено в лічильниках бота Маяк, 30.09.2026).
+import "../lib/testing.nx" { assertEqual, assertTrue }
+
+func main() {
+    var t = timestamp()
+    assertEqual(typeOf(t), "number", "typeOf(timestamp())")
+    var json = toJson([t])
+    assertTrue(!contains(json, "\""), "toJson(timestamp()) без лапок: " + json)
+    var back = fromJson(json)[0]
+    assertEqual(typeOf(back), "number", "після JSON-кола - число")
+    assertEqual(back + 60, t + 60, "арифметика після JSON-кола")
+    assertEqual(typeOf(parseDate("2026-09-30", "yyyy-MM-dd")), "number", "parseDate - число")
+    print("timestamp() - звичайне число")
+}
