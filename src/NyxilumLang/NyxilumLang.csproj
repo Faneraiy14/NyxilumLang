@@ -31,6 +31,12 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <!-- Стандартна бібліотека нативного ARM64-бекенда, написана на самій
+         NyxilumLang - компілятор читає її з ресурсу збірки. -->
+    <EmbeddedResource Include="Native/Arm64Prelude.nx" LogicalName="NyxilumLang.Native.Arm64Prelude.nx" />
+  </ItemGroup>
+
+  <ItemGroup>
     <!-- Сестринський проєкт (окремий репозиторій) — embedded KV-база
          з WAL, підключена як стандартна бібліотека db*-функцій
          (dbOpen/dbGet/dbSet/...). -->

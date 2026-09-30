@@ -31,14 +31,22 @@ fail=0
 for f in *.nx; do
     name="${f%.nx}"
     expected_exit=$(grep -oP '^// expect-exit: \K[0-9]+' "$f")
-    vm_out=$(timeout 30 "$NX" "$f" 2>&1)
+    # "// targets: arm64" - можливості, яких x86-бекенд ще не має
+    targets=$(grep -oP '^// targets: \K.+' "$f")
+    [ -z "$targets" ] && targets="x86 arm64"
+    # name.in (якщо є) подається на stdin і VM, і бінарникам
+    input=/dev/null
+    [ -f "$name.in" ] && input="$name.in"
+    vm_out=$(timeout 30 "$NX" "$f" 2>&1 < "$input")
     vm_code=$?
     vm_out=$(printf '%s\n' "$vm_out" | grep -v '^Runtime Error' | grep -v '^  рядок ' | grep -v '^Traceback')
     [ -z "$expected_exit" ] && expected_exit=$vm_code
+    # name.expected - еталонний вивід там, де сама VM має відомий баг
+    [ -f "$name.expected" ] && vm_out=$(cat "$name.expected")
 
     ok=1
     report=""
-    for arch in x86 arm64; do
+    for arch in $targets; do
         if [ "$arch" = "arm64" ] && [ "$have_arm64" = 0 ]; then
             continue
         fi
@@ -55,8 +63,9 @@ for f in *.nx; do
             report+="    $arch: не скомпілювалось: $(printf '%s' "$build" | tail -1)"$'\n'
             continue
         fi
-        out=$(timeout 30 "${run[@]}" 2>&1)
+        out=$(timeout 30 "${run[@]}" 2>&1 < "$input")
         code=$?
+        out=$(printf '%s\n' "$out" | grep -v '^Runtime Error')
         if [ "$out" != "$vm_out" ]; then
             ok=0
             report+="    $arch: вивід відрізняється від VM:"$'\n'"$(diff <(printf '%s\n' "$vm_out") <(printf '%s\n' "$out") | head -8 | sed 's/^/      /')"$'\n'

@@ -1,0 +1,8 @@
+// Допоміжний модуль для 19_import.nx
+func area(w, h) {
+    return w * h
+}
+
+func label(name) {
+    return "<" + name + ">"
+}

@@ -1,0 +1,99 @@
+// targets: arm64
+// Динамічні значення: рядки, масиви рядків, мапи, функції, що повертають
+// будь-що, for, глобальні змінні, типи.
+// (print масиву/мапи та contains(масив) не перевіряються: у VM це баги -
+// друкує назву C#-типу і завжди False; нативно - [1, 2] і правильний bool)
+var COUNTER = 0
+
+struct User {
+    name: string
+    age: number
+
+    func User.greet(prefix) {
+        return prefix + ", " + self.name + "!"
+    }
+}
+
+func bump() {
+    COUNTER = COUNTER + 1
+    return COUNTER
+}
+
+func describe(v) {
+    return typeOf(v) + ":" + toString(v)
+}
+
+func main() {
+    var words = split("раз,два,,три", ",")
+    print(len(words))
+    print(join(words, "|"))
+    for w in words {
+        print("[" + w + "]")
+    }
+    for i in 0..3 {
+        print(i * 10)
+    }
+    var m = newMap()
+    mapSet(m, "uk", "Привіт")
+    mapSet(m, "en", "Hello")
+    mapSet(m, "uk", "Вітаю")
+    print(mapGet(m, "uk"))
+    print(mapGet(m, "de"))
+    print(mapHas(m, "en"))
+    print(len(m))
+    print(join(mapKeys(m), ","))
+    mapRemove(m, "uk")
+    print(join(mapKeys(m), ","))
+    var u = User { name: "Святослав", age: 14 }
+    print(u.greet("Привіт"))
+    u.age = u.age + 1
+    print(u.age)
+    print(bump() + bump())
+    print(COUNTER)
+    print(describe(1.5))
+    print(describe("x"))
+    print(describe(true))
+    print(describe(null))
+    print(typeOf([1]) + typeOf(m) + typeOf(u) + typeOf(bump))
+    var s = "привіт 😴 світ"
+    print(len(s))
+    print(substring(s, 7, 2))
+    print(indexOf(s, "світ"))
+    print(contains(s, "віт"))
+    print(startsWith(s, "при") && endsWith(s, "іт"))
+    print(toUpper("Ґанок і Їжак, є abc"))
+    print(toLower("ҐАНОК І ЇЖАК, Є ABC"))
+    print(trim("  \t сад  "))
+    print(replace("a-b-c", "-", " + "))
+    print(repeat("ab", 3))
+    print(charCode("я") + charCode("A"))
+    print(fromCharCode(1103) + fromCharCode(65))
+    print(toDouble("12.5") + toInt("30"))
+    print(toInt(-3.7))
+    print("n=" + 5 + ", ok=" + true)
+    print(3 == "3")
+    print("abc" == "ab" + "c")
+    print(min(3, 7) + max(3, 7) + pow(2, 10))
+    print(floor(-2.5) + ceil(2.1) + round(2.5) + round(3.5) + abs(-4))
+    var nums = [5, 3, 9, 1]
+    var sorted = sort(nums, func(a, b) { return a - b })
+    print(join(sorted, " "))
+    print(join(sort(["груша", "аґрус", "banana"]), " "))
+    var big = filter(nums, func(x) { return x > 3 })
+    print(join(big, " "))
+    var k = 10
+    var addK = func(x) { return x + k }
+    k = 100
+    print(addK(1))
+    print(join(mapArr(nums, addK), ","))
+    print(reduce(nums, func(acc, x) { return acc + x }, 0))
+    append(nums, 7)
+    print(len(nums))
+    print(pop(nums))
+    print(removeAt(nums, 0))
+    insert(nums, 1, 42)
+    print(join(nums, ","))
+    print(join(slice(nums, 1, 3), ","))
+    print(join(reverse(nums), ","))
+    print(indexOf(nums, 9))
+}

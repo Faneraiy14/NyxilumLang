@@ -1,0 +1,16 @@
+// targets: arm64
+// import: свій модуль і справжня бібліотека мови (lib/strings.nx) -
+// компілюються нативно як є. lib/crypto.nx - ще ні: йому потрібні
+// sin()/cos(), яких нативно поки немає
+import "helpers/shapes.nx"
+import "../../lib/strings.nx"
+
+func main() {
+    print(area(3, 4))
+    print(label("маяк"))
+    print(capitalize("привіт"))
+    print(titleCase("hello big world"))
+    print(padLeft("7", 3, "0"))
+    print(countOccurrences("abcabcab", "ab"))
+    print(isBlank("   "))
+}

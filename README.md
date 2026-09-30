@@ -284,18 +284,25 @@ changing behavior.
 ## Native ARM64 Compilation (Android / Linux phones)
 
 `nx compile-native file.nx -o out --target linux-arm64` (alias
-`android-arm64`) compiles the same language subset as the x86 Linux
-target — numbers, bool, strings, arrays, structs with methods, closures,
-recursion, `if`/`while`/`break`/`continue`, `try`/`catch`/`throw` — into
-a **static AArch64 ELF with no libc and no VM**: raw Linux syscalls
-(`svc #0`), its own `brk`-based heap and number printing. Android is
-Linux underneath, so the same binary runs on a phone (Termux or
-`adb shell`); segments are 16 KB-aligned for Android 15 devices.
-Needs `binutils-aarch64-linux-gnu`; test on a PC with `qemu-aarch64`.
+`android-arm64`) produces a **static AArch64 ELF with no libc and no VM**:
+raw Linux syscalls, its own heap. Android is Linux underneath, so the same
+binary runs on a phone (Termux, `adb shell`, or inside an APK); segments
+are 16 KB-aligned for Android 15+ devices.
 
-`tests/native/run_native.sh` runs every `tests/native/*.nx` in the VM,
-as an x86 binary and as an ARM64 binary (via `qemu-aarch64`) and
-requires byte-identical output and exit codes; CI runs it on every push.
+Unlike the x86 backend, values are **dynamic, like in the VM** (NaN-boxing):
+strings, arrays and maps of anything, functions as values, closures,
+structs with methods, `for` loops, globals, top-level code, `import`,
+`readLine()`, `try`/`catch` of runtime errors. Most of the native standard
+library (`len`, `split`, `join`, maps, `sort`, number printing with the
+shortest round-trip format) is written **in NyxilumLang itself**
+(`src/NyxilumLang/Native/Arm64Prelude.nx`); assembly is used only for the
+"doors" - memory, bytes, syscalls. Not yet native: sin/cos, JSON, files,
+HTTP.
+
+Needs `binutils-aarch64-linux-gnu`; test on a PC with `qemu-aarch64`.
+`tests/native/run_native.sh` runs every `tests/native/*.nx` in the VM, as
+an x86 binary and as an ARM64 binary and requires byte-identical output and
+exit codes; CI runs it on every push.
 
 ## Commands
 

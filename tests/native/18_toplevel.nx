@@ -1,0 +1,12 @@
+// targets: arm64
+// Код верхнього рівня: main НЕ викликається автоматично (як у VM)
+var greeting = "Привіт"
+func main() {
+    print("main не мав би викликатись")
+}
+print(greeting + " з верхнього рівня")
+var total = 0
+for x in [1, 2, 3] {
+    total = total + x
+}
+print(total)

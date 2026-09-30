@@ -1,0 +1,70 @@
+// targets: arm64
+// expect-exit: 1
+// Потік керування крізь try: return/break/continue з try, помилки
+// рантайму ловляться як рядки, вкладені try, rethrow.
+// Еталон - 17_try_flow.expected: VM тут має баг (continue з try не знімає
+// обробник, і фінальний throw "ловиться" кілька разів по колу).
+func safeDiv(a, b) {
+    try {
+        if b == 0 {
+            throw "ділення на нуль"
+        }
+        return a / b
+    } catch (e) {
+        return "помилка: " + e
+    }
+}
+
+func findFirst(arr, target) {
+    var i = 0
+    while i < len(arr) {
+        try {
+            if arr[i] == target {
+                break
+            }
+        } catch (e) {
+            print("не буває")
+        }
+        i = i + 1
+    }
+    return i
+}
+
+func main() {
+    print(safeDiv(10, 4))
+    print(safeDiv(1, 0))
+    print(findFirst([4, 5, 6], 5))
+    try {
+        var a = [1, 2]
+        print(a[5])
+    } catch (e) {
+        print("зловив: " + typeOf(e))
+    }
+    try {
+        try {
+            throw 7
+        } catch (inner) {
+            throw inner * 6
+        }
+    } catch (outer) {
+        print(outer)
+    }
+    var hits = 0
+    for i in 0..5 {
+        try {
+            if i % 2 == 0 {
+                continue
+            }
+            hits = hits + 1
+        } catch (e) {
+            print(e)
+        }
+    }
+    print(hits)
+    try {
+        throw [1, 2, 3]
+    } catch (arr) {
+        print(len(arr))
+    }
+    throw "кінець"
+}

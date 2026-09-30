@@ -307,6 +307,9 @@ public class Nx
             {
                 // ARM64 (телефони Android / Linux на ARM): статичний ELF без libc.
                 // max-page-size=16384 - Android 15 має 16-KB сторінки пам'яті.
+                // import "lib/..." працює так само, як у VM (ARM64-бекенд
+                // динамічний, тож бібліотеки на .nx компілюються як є)
+                program = ModuleResolver.ResolveImports(program, path);
                 string armAsm = new NyxilumLang.Native.NativeCodegenArm64().Compile(program);
                 File.WriteAllText(asmPath, armAsm);
                 Console.WriteLine($"Асемблер записано: {asmPath}");

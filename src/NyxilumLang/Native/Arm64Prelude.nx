@@ -1,0 +1,903 @@
+// Arm64Prelude.nx — стандартна бібліотека нативного ARM64-бекенда,
+// написана на САМІЙ NyxilumLang. На асемблері (NativeCodegenArm64.cs)
+// лишились тільки "двері": байти рядків (__strByte, __strAlloc...),
+// сирі масиви (__arrGet, __arrPush...), біти double, syscall'и.
+// Компілюється разом із програмою; у бінарник потрапляють лише ті
+// функції, які програма (або рантайм) справді викликає. Програма може
+// перевизначити будь-яку з них своєю функцією з тією ж назвою.
+//
+// Семантика звірена з VM: len/substring/indexOf рахують UTF-16-одиниці
+// (як C#), тож "привіт" має довжину 6, а емодзі - 2.
+
+// ------------------------------------------------------------ типи
+
+func typeOf(v) {
+    var t = __tag(v)
+    if t == 0 { return "number" }
+    if t == 1 { return "null" }
+    if t == 2 { return "bool" }
+    if t == 3 { return "string" }
+    if t == 4 { return "array" }
+    if t == 5 { return "map" }
+    if t == 6 { return "function" }
+    return "struct"
+}
+
+func isNumber(v) { return __tag(v) == 0 }
+func isString(v) { return __tag(v) == 3 }
+func isArray(v) { return __tag(v) == 4 }
+func isBool(v) { return __tag(v) == 2 }
+
+// ------------------------------------------------------------ UTF-8 <-> UTF-16-одиниці
+
+// Скільки UTF-16-одиниць "починає" байт b: 0 - байт-продовження
+func __units(b) {
+    if b < 128 { return 1 }
+    if b < 192 { return 0 }
+    if b < 240 { return 1 }
+    return 2
+}
+
+func __strUnits(s) {
+    var n = __strByteLen(s)
+    var i = 0
+    var u = 0
+    while i < n {
+        u = u + __units(__strByte(s, i))
+        i = i + 1
+    }
+    return u
+}
+
+// Байтовий зсув, з якого починається UTF-16-одиниця номер u
+func __unitToByte(s, u) {
+    var n = __strByteLen(s)
+    var i = 0
+    var c = 0
+    while i < n && c < u {
+        c = c + __units(__strByte(s, i))
+        i = i + 1
+        while i < n && __units(__strByte(s, i)) == 0 {
+            i = i + 1
+        }
+    }
+    if c != u {
+        throw "Індекс " + toString(u) + " поза межами рядка (довжина " + toString(__strUnits(s)) + ")"
+    }
+    return i
+}
+
+func __byteToUnits(s, b) {
+    var i = 0
+    var u = 0
+    while i < b {
+        u = u + __units(__strByte(s, i))
+        i = i + 1
+    }
+    return u
+}
+
+// ------------------------------------------------------------ рядки
+
+func len(v) {
+    var t = __tag(v)
+    if t == 3 { return __strUnits(v) }
+    if t == 4 { return __arrLen(v) }
+    if t == 5 { return __arrLen(__mapKeys(v)) }
+    throw "len(): очікувався рядок, масив чи мапа, а не " + typeOf(v)
+}
+
+func utf8ByteCount(s) { return __strByteLen(s) }
+
+func substring(s, start, length) {
+    var from = __unitToByte(s, start)
+    if isNull(length) {
+        return __strSliceBytes(s, from, __strByteLen(s))
+    }
+    return __strSliceBytes(s, from, __unitToByte(s, start + length))
+}
+
+func indexOf(v, x) {
+    if __tag(v) == 4 {
+        var i = 0
+        while i < __arrLen(v) {
+            if __arrGet(v, i) == x { return i }
+            i = i + 1
+        }
+        return -1
+    }
+    var b = __strFindBytes(v, x, 0)
+    if b < 0 { return -1 }
+    return __byteToUnits(v, b)
+}
+
+func contains(v, x) {
+    if __tag(v) == 4 { return indexOf(v, x) >= 0 }
+    return __strFindBytes(v, x, 0) >= 0
+}
+
+func startsWith(s, p) {
+    var n = __strByteLen(p)
+    if n > __strByteLen(s) { return false }
+    return __strSliceBytes(s, 0, n) == p
+}
+
+func endsWith(s, p) {
+    var n = __strByteLen(p)
+    var m = __strByteLen(s)
+    if n > m { return false }
+    return __strSliceBytes(s, m - n, m) == p
+}
+
+func split(s, sep) {
+    var out = []
+    var n = __strByteLen(sep)
+    if n == 0 {
+        __arrPush(out, s)
+        return out
+    }
+    var pos = 0
+    while true {
+        var f = __strFindBytes(s, sep, pos)
+        if f < 0 {
+            __arrPush(out, __strSliceBytes(s, pos, __strByteLen(s)))
+            return out
+        }
+        __arrPush(out, __strSliceBytes(s, pos, f))
+        pos = f + n
+    }
+}
+
+func join(a, sep) {
+    if isNull(sep) { sep = "" }
+    var n = __arrLen(a)
+    if n == 0 { return "" }
+    var parts = __arrNew(n)
+    var total = 0
+    var i = 0
+    while i < n {
+        var p = toString(__arrGet(a, i))
+        __arrSet(parts, i, p)
+        total = total + __strByteLen(p)
+        i = i + 1
+    }
+    var sl = __strByteLen(sep)
+    var out = __strAlloc(total + sl * (n - 1))
+    var pos = 0
+    i = 0
+    while i < n {
+        if i > 0 {
+            __strCopy(out, pos, sep, 0, sl)
+            pos = pos + sl
+        }
+        var q = __arrGet(parts, i)
+        __strCopy(out, pos, q, 0, __strByteLen(q))
+        pos = pos + __strByteLen(q)
+        i = i + 1
+    }
+    return out
+}
+
+func replace(s, a, b) {
+    return join(split(s, a), b)
+}
+
+func __isSpace(b) {
+    return b == 32 || b == 9 || b == 10 || b == 13 || b == 11 || b == 12
+}
+
+func trim(s) {
+    var n = __strByteLen(s)
+    var i = 0
+    while i < n && __isSpace(__strByte(s, i)) { i = i + 1 }
+    var j = n
+    while j > i && __isSpace(__strByte(s, j - 1)) { j = j - 1 }
+    return __strSliceBytes(s, i, j)
+}
+
+func repeat(s, n) {
+    var parts = []
+    var i = 0
+    while i < n {
+        __arrPush(parts, s)
+        i = i + 1
+    }
+    return join(parts, "")
+}
+
+// Регістр: ASCII + кирилиця (укр/рос) - побайтово в UTF-8
+func __caseMap(s, up) {
+    var n = __strByteLen(s)
+    var out = __strAlloc(n)
+    __strCopy(out, 0, s, 0, n)
+    var i = 0
+    while i < n {
+        var b = __strByte(s, i)
+        if up {
+            if b >= 97 && b <= 122 { __strSetByte(out, i, b - 32) }
+            if b == 208 && i + 1 < n {
+                var c = __strByte(s, i + 1)
+                if c >= 176 && c <= 191 { __strSetByte(out, i + 1, c - 32) }
+            }
+            if b == 209 && i + 1 < n {
+                var d = __strByte(s, i + 1)
+                if d >= 128 && d <= 143 {
+                    __strSetByte(out, i, 208)
+                    __strSetByte(out, i + 1, d + 32)
+                }
+                if d >= 144 && d <= 159 {
+                    __strSetByte(out, i, 208)
+                    __strSetByte(out, i + 1, d - 16)
+                }
+            }
+            if b == 210 && i + 1 < n && __strByte(s, i + 1) == 145 { __strSetByte(out, i + 1, 144) }
+        } else {
+            if b >= 65 && b <= 90 { __strSetByte(out, i, b + 32) }
+            if b == 208 && i + 1 < n {
+                var e = __strByte(s, i + 1)
+                if e >= 144 && e <= 159 { __strSetByte(out, i + 1, e + 32) }
+                if e >= 160 && e <= 175 {
+                    __strSetByte(out, i, 209)
+                    __strSetByte(out, i + 1, e - 32)
+                }
+                if e >= 128 && e <= 143 {
+                    __strSetByte(out, i, 209)
+                    __strSetByte(out, i + 1, e + 16)
+                }
+            }
+            if b == 210 && i + 1 < n && __strByte(s, i + 1) == 144 { __strSetByte(out, i + 1, 145) }
+        }
+        i = i + 1
+    }
+    return out
+}
+
+func toUpper(s) { return __caseMap(s, true) }
+func toLower(s) { return __caseMap(s, false) }
+
+// Код першої UTF-16-одиниці (як C# s[0])
+func charCode(s) {
+    var b = __strByte(s, 0)
+    if b < 128 { return b }
+    if b < 224 { return (b - 192) * 64 + (__strByte(s, 1) - 128) }
+    if b < 240 { return ((b - 224) * 64 + (__strByte(s, 1) - 128)) * 64 + (__strByte(s, 2) - 128) }
+    var cp = (((b - 240) * 64 + (__strByte(s, 1) - 128)) * 64 + (__strByte(s, 2) - 128)) * 64 + (__strByte(s, 3) - 128)
+    return 55296 + floor((cp - 65536) / 1024)
+}
+
+func fromCharCode(c) {
+    if c < 128 {
+        var a = __strAlloc(1)
+        __strSetByte(a, 0, c)
+        return a
+    }
+    if c < 2048 {
+        var b2 = __strAlloc(2)
+        __strSetByte(b2, 0, 192 + floor(c / 64))
+        __strSetByte(b2, 1, 128 + c % 64)
+        return b2
+    }
+    if c < 65536 {
+        var b3 = __strAlloc(3)
+        __strSetByte(b3, 0, 224 + floor(c / 4096))
+        __strSetByte(b3, 1, 128 + floor(c / 64) % 64)
+        __strSetByte(b3, 2, 128 + c % 64)
+        return b3
+    }
+    var b4 = __strAlloc(4)
+    __strSetByte(b4, 0, 240 + floor(c / 262144))
+    __strSetByte(b4, 1, 128 + floor(c / 4096) % 64)
+    __strSetByte(b4, 2, 128 + floor(c / 64) % 64)
+    __strSetByte(b4, 3, 128 + c % 64)
+    return b4
+}
+
+// ------------------------------------------------------------ числа з рядків
+
+func __pow10(e) {
+    var v = 1
+    while e > 0 {
+        v = v * 10
+        e = e - 1
+    }
+    return v
+}
+
+// Розбір числа; null, якщо рядок - не число. Точний для <= 15 значущих
+// цифр і |степеня| <= 22 (класичний "швидкий шлях" Клінгера) - саме такі
+// числа трапляються в програмах; довші - з похибкою в останньому знаку.
+func __parseNumber(s) {
+    var n = __strByteLen(s)
+    var i = 0
+    var neg = false
+    if i < n && __strByte(s, i) == 45 {
+        neg = true
+        i = i + 1
+    } else if i < n && __strByte(s, i) == 43 {
+        i = i + 1
+    }
+    var mant = 0
+    var digits = 0
+    var exp10 = 0
+    var any = false
+    while i < n && __strByte(s, i) >= 48 && __strByte(s, i) <= 57 {
+        if digits < 15 {
+            mant = mant * 10 + (__strByte(s, i) - 48)
+            if mant > 0 { digits = digits + 1 }
+        } else {
+            exp10 = exp10 + 1
+        }
+        any = true
+        i = i + 1
+    }
+    if i < n && __strByte(s, i) == 46 {
+        i = i + 1
+        while i < n && __strByte(s, i) >= 48 && __strByte(s, i) <= 57 {
+            if digits < 15 {
+                mant = mant * 10 + (__strByte(s, i) - 48)
+                if mant > 0 { digits = digits + 1 }
+                exp10 = exp10 - 1
+            }
+            any = true
+            i = i + 1
+        }
+    }
+    if !any { return null }
+    if i < n && (__strByte(s, i) == 101 || __strByte(s, i) == 69) {
+        i = i + 1
+        var eneg = false
+        if i < n && __strByte(s, i) == 45 {
+            eneg = true
+            i = i + 1
+        } else if i < n && __strByte(s, i) == 43 {
+            i = i + 1
+        }
+        var ev = 0
+        var edig = false
+        while i < n && __strByte(s, i) >= 48 && __strByte(s, i) <= 57 {
+            ev = ev * 10 + (__strByte(s, i) - 48)
+            edig = true
+            i = i + 1
+        }
+        if !edig { return null }
+        if eneg { ev = 0 - ev }
+        exp10 = exp10 + ev
+    }
+    if i != n { return null }
+    var v = mant
+    if exp10 > 0 { v = mant * __pow10(exp10) }
+    if exp10 < 0 { v = mant / __pow10(0 - exp10) }
+    if neg { v = (0 - 1) * v }
+    return v
+}
+
+func toDouble(v) {
+    if __tag(v) == 0 { return v }
+    var r = __parseNumber(trim(toString(v)))
+    if isNull(r) { throw "Рядок '" + toString(v) + "' - не число" }
+    return r
+}
+
+func toInt(v) {
+    if __tag(v) == 0 { return __trunc(v) }
+    var r = __parseNumber(trim(toString(v)))
+    if isNull(r) || __trunc(r) != r { throw "Рядок '" + toString(v) + "' - не ціле число" }
+    return r
+}
+
+// ------------------------------------------------------------ математика
+
+// min/max/pow - ключові слова лексера, тож тут вони з префіксом __;
+// компілятор перенаправляє виклики min(...) -> __min(...) тощо.
+func __min(a, b) {
+    if a < b { return a }
+    return b
+}
+
+func __max(a, b) {
+    if a > b { return a }
+    return b
+}
+
+func clamp(v, lo, hi) {
+    if v < lo { return lo }
+    if v > hi { return hi }
+    return v
+}
+
+func __pow(a, b) {
+    if __trunc(b) != b { throw "pow(): дробовий степінь нативно ще не підтримується" }
+    var r = 1
+    var e = b
+    if e < 0 { e = 0 - e }
+    while e > 0 {
+        r = r * a
+        e = e - 1
+    }
+    if b < 0 { return 1 / r }
+    return r
+}
+
+// Ціле з [a, b) - як Random.Next(a, b) у VM
+func randomInt(a, b) {
+    return a + floor(__random32() / 4294967296 * (b - a))
+}
+
+func randomDouble() {
+    return __random32() / 4294967296
+}
+
+// ------------------------------------------------------------ масиви
+
+func pop(a) { return __arrPop(a) }
+
+func clear(a) { __arrSetLen(a, 0) }
+
+func removeAt(a, i) {
+    var n = __arrLen(a)
+    if i < 0 || i >= n { throw "removeAt(): індекс " + toString(i) + " поза межами масиву" }
+    var j = i
+    while j < n - 1 {
+        __arrSet(a, j, __arrGet(a, j + 1))
+        j = j + 1
+    }
+    __arrSetLen(a, n - 1)
+}
+
+func insert(a, i, v) {
+    var n = __arrLen(a)
+    if i < 0 || i > n { throw "insert(): індекс " + toString(i) + " поза межами масиву" }
+    __arrPush(a, null)
+    var j = n
+    while j > i {
+        __arrSet(a, j, __arrGet(a, j - 1))
+        j = j - 1
+    }
+    __arrSet(a, i, v)
+}
+
+func slice(v, start, end) {
+    if __tag(v) == 3 {
+        if isNull(end) { end = __strUnits(v) }
+        return substring(v, start, end - start)
+    }
+    var n = __arrLen(v)
+    if isNull(end) { end = n }
+    var out = []
+    var i = start
+    while i < end && i < n {
+        __arrPush(out, __arrGet(v, i))
+        i = i + 1
+    }
+    return out
+}
+
+func reverse(a) {
+    var out = []
+    var i = __arrLen(a) - 1
+    while i >= 0 {
+        __arrPush(out, __arrGet(a, i))
+        i = i - 1
+    }
+    return out
+}
+
+func mapArr(a, f) {
+    var out = []
+    var i = 0
+    while i < __arrLen(a) {
+        __arrPush(out, f(__arrGet(a, i)))
+        i = i + 1
+    }
+    return out
+}
+
+func filter(a, f) {
+    var out = []
+    var i = 0
+    while i < __arrLen(a) {
+        var x = __arrGet(a, i)
+        if f(x) { __arrPush(out, x) }
+        i = i + 1
+    }
+    return out
+}
+
+func reduce(a, f, init) {
+    var acc = init
+    var i = 0
+    while i < __arrLen(a) {
+        acc = f(acc, __arrGet(a, i))
+        i = i + 1
+    }
+    return acc
+}
+
+func __cmpDefault(x, y) {
+    if __tag(x) == 3 {
+        var n = __strByteLen(x)
+        var m = __strByteLen(y)
+        var i = 0
+        while i < n && i < m {
+            var d = __strByte(x, i) - __strByte(y, i)
+            if d != 0 { return d }
+            i = i + 1
+        }
+        return n - m
+    }
+    if x < y { return -1 }
+    if x > y { return 1 }
+    return 0
+}
+
+// Стабільне сортування злиттям; повертає НОВИЙ масив
+func sort(a, cmp) {
+    var n = __arrLen(a)
+    var src = []
+    var i = 0
+    while i < n {
+        __arrPush(src, __arrGet(a, i))
+        i = i + 1
+    }
+    var tmp = __arrNew(n)
+    var width = 1
+    while width < n {
+        var lo = 0
+        while lo < n {
+            var mid = __min(lo + width, n)
+            var hi = __min(lo + 2 * width, n)
+            var p = lo
+            var q = mid
+            var k = lo
+            while k < hi {
+                var takeLeft = false
+                if p < mid {
+                    if q >= hi {
+                        takeLeft = true
+                    } else {
+                        var c = 0
+                        if isNull(cmp) { c = __cmpDefault(__arrGet(src, q), __arrGet(src, p)) } else { c = cmp(__arrGet(src, q), __arrGet(src, p)) }
+                        takeLeft = c >= 0
+                    }
+                }
+                if takeLeft {
+                    __arrSet(tmp, k, __arrGet(src, p))
+                    p = p + 1
+                } else {
+                    __arrSet(tmp, k, __arrGet(src, q))
+                    q = q + 1
+                }
+                k = k + 1
+            }
+            lo = lo + 2 * width
+        }
+        var sw = src
+        src = tmp
+        tmp = sw
+        width = width * 2
+    }
+    return src
+}
+
+// ------------------------------------------------------------ мапи
+
+func newMap() { return __mapNew() }
+
+func __mapFind(m, k) {
+    var keys = __mapKeys(m)
+    var i = 0
+    var n = __arrLen(keys)
+    while i < n {
+        if __arrGet(keys, i) == k { return i }
+        i = i + 1
+    }
+    return -1
+}
+
+func mapSet(m, k, v) {
+    var i = __mapFind(m, k)
+    if i >= 0 {
+        __arrSet(__mapVals(m), i, v)
+    } else {
+        __arrPush(__mapKeys(m), k)
+        __arrPush(__mapVals(m), v)
+    }
+}
+
+func mapGet(m, k) {
+    var i = __mapFind(m, k)
+    if i < 0 { return null }
+    return __arrGet(__mapVals(m), i)
+}
+
+func mapHas(m, k) { return __mapFind(m, k) >= 0 }
+
+func mapRemove(m, k) {
+    var i = __mapFind(m, k)
+    if i >= 0 {
+        removeAt(__mapKeys(m), i)
+        removeAt(__mapVals(m), i)
+    }
+}
+
+func mapKeys(m) { return slice(__mapKeys(m), 0, null) }
+func mapValues(m) { return slice(__mapVals(m), 0, null) }
+
+// ------------------------------------------------------------ друк значень
+
+func __arrToStr(a) {
+    return "[" + join(mapArr(a, func(x) { return toString(x) }), ", ") + "]"
+}
+
+func __mapToStr(m) {
+    var keys = __mapKeys(m)
+    var vals = __mapVals(m)
+    var parts = []
+    var i = 0
+    while i < __arrLen(keys) {
+        __arrPush(parts, toString(__arrGet(keys, i)) + ": " + toString(__arrGet(vals, i)))
+        i = i + 1
+    }
+    return "{" + join(parts, ", ") + "}"
+}
+
+func __structToStr(v) {
+    return "<struct " + __structName(v) + ">"
+}
+
+// ------------------------------------------------------------ число -> рядок
+
+// Великі цілі (для точного друку double): масив "цифр" за основою 10^7,
+// молодші спершу. Усі проміжні добутки < 2^53, тож double рахує їх точно.
+func __bigFrom(n) {
+    var a = []
+    if n == 0 {
+        __arrPush(a, 0)
+        return a
+    }
+    while n > 0 {
+        var q = floor(n / 10000000)
+        __arrPush(a, n - q * 10000000)
+        n = q
+    }
+    return a
+}
+
+func __bigMulSmall(a, k) {
+    var out = []
+    var carry = 0
+    var i = 0
+    var n = __arrLen(a)
+    while i < n {
+        var t = __arrGet(a, i) * k + carry
+        carry = floor(t / 10000000)
+        __arrPush(out, t - carry * 10000000)
+        i = i + 1
+    }
+    while carry > 0 {
+        var q = floor(carry / 10000000)
+        __arrPush(out, carry - q * 10000000)
+        carry = q
+    }
+    __bigTrim(out)
+    return out
+}
+
+func __bigTrim(a) {
+    var n = __arrLen(a)
+    while n > 1 && __arrGet(a, n - 1) == 0 { n = n - 1 }
+    __arrSetLen(a, n)
+}
+
+func __bigMulPow2(a, e) {
+    while e >= 20 {
+        a = __bigMulSmall(a, 1048576)
+        e = e - 20
+    }
+    var p = 1
+    while e > 0 {
+        p = p * 2
+        e = e - 1
+    }
+    return __bigMulSmall(a, p)
+}
+
+func __bigMulPow10(a, e) {
+    while e >= 7 {
+        a = __bigMulSmall(a, 10000000)
+        e = e - 7
+    }
+    return __bigMulSmall(a, __pow10(e))
+}
+
+func __bigAdd(a, b) {
+    var out = []
+    var n = __max(__arrLen(a), __arrLen(b))
+    var carry = 0
+    var i = 0
+    while i < n {
+        var t = carry
+        if i < __arrLen(a) { t = t + __arrGet(a, i) }
+        if i < __arrLen(b) { t = t + __arrGet(b, i) }
+        if t >= 10000000 {
+            __arrPush(out, t - 10000000)
+            carry = 1
+        } else {
+            __arrPush(out, t)
+            carry = 0
+        }
+        i = i + 1
+    }
+    if carry > 0 { __arrPush(out, carry) }
+    return out
+}
+
+// a - b, де a >= b
+func __bigSub(a, b) {
+    var out = []
+    var borrow = 0
+    var i = 0
+    while i < __arrLen(a) {
+        var t = __arrGet(a, i) - borrow
+        if i < __arrLen(b) { t = t - __arrGet(b, i) }
+        if t < 0 {
+            __arrPush(out, t + 10000000)
+            borrow = 1
+        } else {
+            __arrPush(out, t)
+            borrow = 0
+        }
+        i = i + 1
+    }
+    __bigTrim(out)
+    return out
+}
+
+func __bigCmp(a, b) {
+    var n = __arrLen(a)
+    var m = __arrLen(b)
+    if n != m { return n - m }
+    var i = n - 1
+    while i >= 0 {
+        var d = __arrGet(a, i) - __arrGet(b, i)
+        if d != 0 { return d }
+        i = i - 1
+    }
+    return 0
+}
+
+// Чи досягає x/s одиниці (з урахуванням того, чи межа включається)
+func __bdReach(x, s, inclusive) {
+    var c = __bigCmp(x, s)
+    if inclusive { return c >= 0 }
+    return c > 0
+}
+
+func __digitStr(d) {
+    var s = __strAlloc(1)
+    __strSetByte(s, 0, 48 + d)
+    return s
+}
+
+// Найкоротший запис double, що читається назад у те саме число
+// (алгоритм Burger & Dybvig, 1996) - так само друкує C#/VM: 0.1, 1/3 ->
+// 0.3333333333333333, 0.1 + 0.2 -> 0.30000000000000004. Рантайм кличе
+// цю функцію лише для дробових і дуже великих чисел; цілі до 10^15
+// друкуються швидким шляхом на асемблері.
+func __numToStrSlow(v) {
+    var neg = __dblSign(v) == 1
+    var ex = __dblExp(v)
+    var f = __dblHi(v) * 4294967296 + __dblLo(v)
+    var e = -1074
+    if ex > 0 {
+        f = f + 4503599627370496
+        e = ex - 1075
+    }
+    var even = f % 2 == 0
+    var r = null
+    var s = null
+    var mp = null
+    var mm = null
+    if e >= 0 {
+        var be = __bigMulPow2(__bigFrom(1), e)
+        if f != 4503599627370496 {
+            r = __bigMulSmall(__bigMulPow2(__bigFrom(f), e), 2)
+            s = __bigFrom(2)
+            mp = be
+            mm = be
+        } else {
+            r = __bigMulSmall(__bigMulPow2(__bigFrom(f), e + 1), 2)
+            s = __bigFrom(4)
+            mp = __bigMulSmall(be, 2)
+            mm = be
+        }
+    } else {
+        if ex <= 1 || f != 4503599627370496 {
+            r = __bigMulSmall(__bigFrom(f), 2)
+            s = __bigMulPow2(__bigFrom(1), 1 - e)
+            mp = __bigFrom(1)
+            mm = __bigFrom(1)
+        } else {
+            r = __bigMulSmall(__bigFrom(f), 4)
+            s = __bigMulPow2(__bigFrom(1), 2 - e)
+            mp = __bigFrom(2)
+            mm = __bigFrom(1)
+        }
+    }
+    var k = floor((e + 52) * 0.30102999566398114)
+    if k >= 0 {
+        s = __bigMulPow10(s, k)
+    } else {
+        r = __bigMulPow10(r, 0 - k)
+        mp = __bigMulPow10(mp, 0 - k)
+        mm = __bigMulPow10(mm, 0 - k)
+    }
+    while __bdReach(__bigAdd(r, mp), s, even) {
+        s = __bigMulSmall(s, 10)
+        k = k + 1
+    }
+    while !__bdReach(__bigMulSmall(__bigAdd(r, mp), 10), s, even) {
+        r = __bigMulSmall(r, 10)
+        mp = __bigMulSmall(mp, 10)
+        mm = __bigMulSmall(mm, 10)
+        k = k - 1
+    }
+    var digits = []
+    while true {
+        r = __bigMulSmall(r, 10)
+        mp = __bigMulSmall(mp, 10)
+        mm = __bigMulSmall(mm, 10)
+        var d = 0
+        while __bigCmp(r, s) >= 0 {
+            r = __bigSub(r, s)
+            d = d + 1
+        }
+        var c1 = __bigCmp(r, mm)
+        var low = c1 < 0
+        if even { low = c1 <= 0 }
+        var high = __bdReach(__bigAdd(r, mp), s, even)
+        if !low && !high {
+            __arrPush(digits, d)
+        } else {
+            if low && !high {
+                __arrPush(digits, d)
+            } else if !low && high {
+                __arrPush(digits, d + 1)
+            } else if __bigCmp(__bigMulSmall(r, 2), s) < 0 {
+                __arrPush(digits, d)
+            } else {
+                __arrPush(digits, d + 1)
+            }
+            return __fmtDigits(neg, digits, k)
+        }
+    }
+}
+
+// Цифри 0.d1d2... * 10^k -> текст за правилами C# double.ToString():
+// звичайний запис для -3 <= k <= 17, інакше науковий (1E+18, 5E-05)
+func __fmtDigits(neg, digits, k) {
+    var n = __arrLen(digits)
+    var ds = join(mapArr(digits, func(d) { return __digitStr(d) }), "")
+    var out = ""
+    if k > 17 || k < -3 {
+        out = __strSliceBytes(ds, 0, 1)
+        if n > 1 { out = out + "." + __strSliceBytes(ds, 1, n) }
+        var ee = k - 1
+        var sign = "+"
+        if ee < 0 {
+            sign = "-"
+            ee = 0 - ee
+        }
+        var es = toString(ee)
+        if ee < 10 { es = "0" + es }
+        out = out + "E" + sign + es
+    } else if k <= 0 {
+        out = "0." + repeat("0", 0 - k) + ds
+    } else if k < n {
+        out = __strSliceBytes(ds, 0, k) + "." + __strSliceBytes(ds, k, n)
+    } else {
+        out = ds + repeat("0", k - n)
+    }
+    if neg { out = "-" + out }
+    return out
+}
