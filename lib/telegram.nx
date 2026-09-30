@@ -29,7 +29,13 @@ func tgSendMessage(token, chatId, text) {
 // 30с, доки не з'явиться нове повідомлення, замість миттєвого порожнього
 // результату (це й відрізняє поллінг від грубого опитування щосекунди).
 func tgGetUpdates(token, offset) {
-    var url = "https://api.telegram.org/bot" + token + "/getUpdates?offset=" + toString(offset) + "&timeout=30"
+    return tgGetUpdatesWait(token, offset, 30)
+}
+
+// Те саме з власною тривалістю long polling (секунди): менше - частіше
+// "прокидаємось" для фонових справ (таймери), ціною частіших запитів.
+func tgGetUpdatesWait(token, offset, waitSeconds) {
+    var url = "https://api.telegram.org/bot" + token + "/getUpdates?offset=" + toString(offset) + "&timeout=" + toString(waitSeconds)
     var res = httpRequest(url, "GET", null)
     var parsed = fromJson(mapGet(res, "body"))
     // ok:false (невалідний/відкликаний токен, 409 через другий запущений
@@ -51,10 +57,20 @@ func tgMessageText(update) {
     return mapGet(message, "text")
 }
 
+// Повідомлення апдейту: нове або відредаговане (трансляція геопозиції
+// приходить саме як edited_message) - або null
+func tgAnyMessage(update) {
+    var message = mapGet(update, "message")
+    if isNull(message) {
+        message = mapGet(update, "edited_message")
+    }
+    return message
+}
+
 // Для звичайного повідомлення - чат повідомлення; для натискання inline-
 // кнопки (callback_query) - чат повідомлення, під яким була кнопка.
 func tgChatId(update) {
-    var message = mapGet(update, "message")
+    var message = tgAnyMessage(update)
     if isNull(message) {
         var cb = mapGet(update, "callback_query")
         if isNull(cb) {
@@ -70,7 +86,7 @@ func tgChatId(update) {
 }
 
 func tgUserId(update) {
-    var source = mapGet(update, "message")
+    var source = tgAnyMessage(update)
     if isNull(source) {
         source = mapGet(update, "callback_query")
     }
@@ -86,7 +102,7 @@ func tgUserId(update) {
 
 // Мова Telegram людини (language_code: "uk", "ru", "en-US"...) або null
 func tgUserLang(update) {
-    var source = mapGet(update, "message")
+    var source = tgAnyMessage(update)
     if isNull(source) {
         source = mapGet(update, "callback_query")
     }
@@ -120,6 +136,52 @@ func tgSetMyCommands(token, commands, langCode) {
         mapSet(data, "language_code", langCode)
     }
     var res = httpRequest("https://api.telegram.org/bot" + token + "/setMyCommands", "POST", toJson(data))
+    return fromJson(mapGet(res, "body"))
+}
+
+// Надіслане місце {latitude, longitude} (звичайне або трансляція) або null
+func tgMessageLocation(update) {
+    var message = tgAnyMessage(update)
+    if isNull(message) {
+        return null
+    }
+    return mapGet(message, "location")
+}
+
+// ---------------------------------------------------------------- reply-клавіатура
+// Кнопки ПІД полем вводу (не під повідомленням). Єдиний спосіб попросити
+// місце розташування: tgLocationButton - Telegram сам спитає людину, чи
+// надсилати геопозицію.
+
+func tgLocationButton(text) {
+    var b = newMap()
+    mapSet(b, "text", text)
+    mapSet(b, "request_location", true)
+    return b
+}
+
+func tgSendMessageWithKeyboard(token, chatId, text, rows) {
+    var markup = newMap()
+    mapSet(markup, "keyboard", rows)
+    mapSet(markup, "resize_keyboard", true)
+    mapSet(markup, "one_time_keyboard", true)
+    var data = newMap()
+    mapSet(data, "chat_id", chatId)
+    mapSet(data, "text", text)
+    mapSet(data, "reply_markup", markup)
+    var res = httpRequest("https://api.telegram.org/bot" + token + "/sendMessage", "POST", toJson(data))
+    return fromJson(mapGet(res, "body"))
+}
+
+// Надіслати повідомлення й прибрати reply-клавіатуру
+func tgSendMessageRemoveKeyboard(token, chatId, text) {
+    var markup = newMap()
+    mapSet(markup, "remove_keyboard", true)
+    var data = newMap()
+    mapSet(data, "chat_id", chatId)
+    mapSet(data, "text", text)
+    mapSet(data, "reply_markup", markup)
+    var res = httpRequest("https://api.telegram.org/bot" + token + "/sendMessage", "POST", toJson(data))
     return fromJson(mapGet(res, "body"))
 }
 
@@ -230,11 +292,17 @@ func tgPollLoop(token, handler) {
 // фонових справ бота: нагадування, розсилки, прибирання. Виняток в onTick
 // логується й не зупиняє бота.
 func tgPollLoopWithTick(token, handler, onTick) {
+    tgPollLoopWithTickEvery(token, handler, onTick, 30)
+}
+
+// + waitSeconds - тривалість long polling: onTick викликається не рідше
+// ніж раз на waitSeconds (напр. 5 - для точних таймерів і будильників)
+func tgPollLoopWithTickEvery(token, handler, onTick, waitSeconds) {
     var offset = 0
     while true {
         var updates = null
         try {
-            updates = tgGetUpdates(token, offset)
+            updates = tgGetUpdatesWait(token, offset, waitSeconds)
         } catch (e) {
             print("[" + now() + "] getUpdates не вдався: " + toString(e) + " - повтор через 5с")
             sleep(5000)
