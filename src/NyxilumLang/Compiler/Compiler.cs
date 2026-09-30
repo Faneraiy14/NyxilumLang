@@ -246,7 +246,7 @@ public class Compiler
 
         // Emit JUMP to skip function definitions
         _bytecode.Emit(OpCode.JUMP, 0);
-        int skipJump = _bytecode.Code.Count - 2;
+        int skipJump = _bytecode.Code.Count - Bytecode.ArgSize;
 
         // Компілюємо тіла функцій
         CompileFunctions(program.Statements);
@@ -279,8 +279,7 @@ public class Compiler
         foreach (var (pos, name) in _pendingCalls)
         {
             int target = _functions[name];
-            _bytecode.Code[pos] = (byte)(target & 0xFF);
-            _bytecode.Code[pos + 1] = (byte)((target >> 8) & 0xFF);
+            _bytecode.PatchArg(pos, target);
         }
         foreach (var (fref, name) in _pendingFunctionRefs)
         {
@@ -481,10 +480,10 @@ public class Compiler
             case IfStatement i:
                 CompileExpression(i.Condition);
                 _bytecode!.Emit(OpCode.JUMP_IF_FALSE, 0);
-                int jumpPos = _bytecode.Code.Count - 2;
+                int jumpPos = _bytecode.Code.Count - Bytecode.ArgSize;
                 CompileStatement(i.ThenBlock);
                 _bytecode.Emit(OpCode.JUMP, 0);
-                int jumpEndPos = _bytecode.Code.Count - 2;
+                int jumpEndPos = _bytecode.Code.Count - Bytecode.ArgSize;
                 PatchJump(jumpPos);
                 if (i.ElseBlock != null) CompileStatement(i.ElseBlock);
                 PatchJump(jumpEndPos);
@@ -493,7 +492,7 @@ public class Compiler
                 int startPos = _bytecode!.Code.Count;
                 CompileExpression(w.Condition);
                 _bytecode.Emit(OpCode.JUMP_IF_FALSE, 0);
-                int jumpPos2 = _bytecode.Code.Count - 2;
+                int jumpPos2 = _bytecode.Code.Count - Bytecode.ArgSize;
 
                 _loops.Push(new LoopContext { TryDepth = _tryDepth });
                 CompileStatement(w.Body);
@@ -528,7 +527,7 @@ public class Compiler
                     _bytecode.Emit(OpCode.CALL_NATIVE, lenNameConst, 1);
                     _bytecode.Emit(OpCode.LT);
                     _bytecode.Emit(OpCode.JUMP_IF_FALSE, 0);
-                    int arrEndJump = _bytecode.Code.Count - 2;
+                    int arrEndJump = _bytecode.Code.Count - Bytecode.ArgSize;
 
                     _bytecode.Emit(OpCode.LOAD_VAR, arrSlot);
                     _bytecode.Emit(OpCode.LOAD_VAR, idxSlot);
@@ -564,7 +563,7 @@ public class Compiler
                 CompileExpression(f.End!);
                 _bytecode.Emit(OpCode.LT);
                 _bytecode.Emit(OpCode.JUMP_IF_FALSE, 0);
-                int forJump = _bytecode.Code.Count - 2;
+                int forJump = _bytecode.Code.Count - Bytecode.ArgSize;
 
                 _loops.Push(new LoopContext { TryDepth = _tryDepth });
                 CompileStatement(f.Body);
@@ -603,14 +602,14 @@ public class Compiler
                     int catchVarSlot = _vars[t.CatchVariableName];
 
                     _bytecode!.Emit(OpCode.TRY_BEGIN, 0, catchVarSlot);
-                    int catchAddrPatchPos = _bytecode.Code.Count - 4;
+                    int catchAddrPatchPos = _bytecode.Code.Count - 2 * Bytecode.ArgSize;
 
                     _tryDepth++;
                     CompileStatement(t.TryBlock);
                     _tryDepth--;
                     _bytecode.Emit(OpCode.TRY_END);
                     _bytecode.Emit(OpCode.JUMP, 0);
-                    int jumpOverCatchPos = _bytecode.Code.Count - 2;
+                    int jumpOverCatchPos = _bytecode.Code.Count - Bytecode.ArgSize;
 
                     PatchJump(catchAddrPatchPos);
                     // Вкладений try з тим самим ім'ям змінної catch перепризначив
@@ -626,14 +625,14 @@ public class Compiler
                     throw new Exception("'break' можна використовувати лише всередині циклу");
                 EmitTryEndsForLoopExit();
                 _bytecode!.Emit(OpCode.JUMP, 0);
-                _loops.Peek().BreakJumps.Add(_bytecode.Code.Count - 2);
+                _loops.Peek().BreakJumps.Add(_bytecode.Code.Count - Bytecode.ArgSize);
                 break;
             case ContinueStatement:
                 if (_loops.Count == 0)
                     throw new Exception("'continue' можна використовувати лише всередині циклу");
                 EmitTryEndsForLoopExit();
                 _bytecode!.Emit(OpCode.JUMP, 0);
-                _loops.Peek().ContinueJumps.Add(_bytecode.Code.Count - 2);
+                _loops.Peek().ContinueJumps.Add(_bytecode.Code.Count - Bytecode.ArgSize);
                 break;
             case ThrowStatement th:
                 CompileExpression(th.Value);
@@ -659,8 +658,7 @@ public class Compiler
     // continue, який стрибає назад — на збільшення лічильника або на умову.
     private void PatchJumpTo(int pos, int target)
     {
-        _bytecode!.Code[pos] = (byte)(target & 0xFF);
-        _bytecode.Code[pos + 1] = (byte)((target >> 8) & 0xFF);
+        _bytecode!.PatchArg(pos, target);
     }
 
     private void CompileExpression(ExpressionNode expr)
@@ -736,12 +734,12 @@ public class Compiler
                     // Коротке замикання: якщо ліва частина хибна, права взагалі не обчислюється
                     CompileExpression(b.Left);
                     _bytecode!.Emit(OpCode.JUMP_IF_FALSE, 0);
-                    int falseJump = _bytecode.Code.Count - 2;
+                    int falseJump = _bytecode.Code.Count - Bytecode.ArgSize;
                     CompileExpression(b.Right);
                     _bytecode.Emit(OpCode.NOT);
                     _bytecode.Emit(OpCode.NOT);
                     _bytecode.Emit(OpCode.JUMP, 0);
-                    int endJump = _bytecode.Code.Count - 2;
+                    int endJump = _bytecode.Code.Count - Bytecode.ArgSize;
                     PatchJump(falseJump);
                     _bytecode.Emit(OpCode.LOAD_CONST, _bytecode.AddConstant(false));
                     PatchJump(endJump);
@@ -751,10 +749,10 @@ public class Compiler
                     // Коротке замикання: якщо ліва частина істинна, права взагалі не обчислюється
                     CompileExpression(b.Left);
                     _bytecode!.Emit(OpCode.JUMP_IF_FALSE, 0);
-                    int falseJump = _bytecode.Code.Count - 2;
+                    int falseJump = _bytecode.Code.Count - Bytecode.ArgSize;
                     _bytecode.Emit(OpCode.LOAD_CONST, _bytecode.AddConstant(true));
                     _bytecode.Emit(OpCode.JUMP, 0);
-                    int endJump = _bytecode.Code.Count - 2;
+                    int endJump = _bytecode.Code.Count - Bytecode.ArgSize;
                     PatchJump(falseJump);
                     CompileExpression(b.Right);
                     _bytecode.Emit(OpCode.NOT);
@@ -831,7 +829,7 @@ public class Compiler
                         {
                             foreach (var arg in c.Arguments) CompileExpression(arg);
                             _bytecode!.Emit(OpCode.CALL, 0);
-                            _pendingCalls.Add((_bytecode.Code.Count - 2, resolvedName));
+                            _pendingCalls.Add((_bytecode.Code.Count - Bytecode.ArgSize, resolvedName));
                         }
                         else if (_builtins.Contains(c.FunctionName))
                         {
@@ -894,7 +892,7 @@ public class Compiler
                     var capturedSlots = _vars.Values.Distinct().Select(s => (object)(double)s).ToList();
 
                     _bytecode!.Emit(OpCode.JUMP, 0);
-                    int skipPos = _bytecode.Code.Count - 2;
+                    int skipPos = _bytecode.Code.Count - Bytecode.ArgSize;
 
                     int lambdaAddr = _bytecode.Code.Count;
 
@@ -947,7 +945,7 @@ public class Compiler
                     _bytecode!.Emit(OpCode.LOAD_VAR, selfSlot);
                     foreach (var arg in m.Arguments) CompileExpression(arg);
                     _bytecode.Emit(OpCode.CALL, 0);
-                    _pendingCalls.Add((_bytecode.Code.Count - 2, $"{owner}.{m.MethodName}"));
+                    _pendingCalls.Add((_bytecode.Code.Count - Bytecode.ArgSize, $"{owner}.{m.MethodName}"));
                 }
                 else
                 {

@@ -35,23 +35,42 @@ public class Bytecode
     public List<object> Constants { get; } = new();
     public Dictionary<string, int> FunctionAddresses { get; } = new();
 
+    // Розмір операнда інструкції в байтах. Було 2 (16 біт) - адреси
+    // переходів і викликів "загорталися", щойно програма переростала
+    // 32 КБ байткоду (бот Маяк із ~20 функціями), і VM стрибала в
+    // довільне місце ("Stack empty", дивні приведення типів на випадкових
+    // рядках). 4 байти (32 біти) - до 2 ГБ коду.
+    public const int ArgSize = 4;
+
     public void Emit(OpCode op, int? arg = null)
     {
         Code.Add((byte)op);
         if (arg.HasValue)
-        {
-            Code.Add((byte)(arg.Value & 0xFF));
-            Code.Add((byte)((arg.Value >> 8) & 0xFF));
-        }
+            WriteArg(arg.Value);
     }
 
     public void Emit(OpCode op, int arg1, int arg2)
     {
         Code.Add((byte)op);
-        Code.Add((byte)(arg1 & 0xFF));
-        Code.Add((byte)((arg1 >> 8) & 0xFF));
-        Code.Add((byte)(arg2 & 0xFF));
-        Code.Add((byte)((arg2 >> 8) & 0xFF));
+        WriteArg(arg1);
+        WriteArg(arg2);
+    }
+
+    private void WriteArg(int value)
+    {
+        Code.Add((byte)(value & 0xFF));
+        Code.Add((byte)((value >> 8) & 0xFF));
+        Code.Add((byte)((value >> 16) & 0xFF));
+        Code.Add((byte)((value >> 24) & 0xFF));
+    }
+
+    // Дописати адресу в операнд, що вже в коді (патчинг переходів)
+    public void PatchArg(int pos, int value)
+    {
+        Code[pos] = (byte)(value & 0xFF);
+        Code[pos + 1] = (byte)((value >> 8) & 0xFF);
+        Code[pos + 2] = (byte)((value >> 16) & 0xFF);
+        Code[pos + 3] = (byte)((value >> 24) & 0xFF);
     }
 
     public int AddConstant(object value)

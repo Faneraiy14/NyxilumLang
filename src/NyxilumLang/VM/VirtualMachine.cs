@@ -909,26 +909,26 @@ public class VirtualMachine
             var op = (OpCode)_code[_ip++];
             switch (op)
             {
-                case OpCode.LOAD_CONST: _stack.Push(_constants[ReadInt16()]); break;
+                case OpCode.LOAD_CONST: _stack.Push(_constants[ReadArg()]); break;
                 case OpCode.LOAD_VAR:
-                    int idx = ReadInt16();
+                    int idx = ReadArg();
                     _stack.Push(_currentFrame.TryGetValue(idx, out var v) ? v : 0);
                     break;
-                case OpCode.STORE_VAR: _currentFrame[ReadInt16()] = _stack.Pop(); break;
+                case OpCode.STORE_VAR: _currentFrame[ReadArg()] = _stack.Pop(); break;
                 case OpCode.GET_GLOBAL:
                     {
-                        var name = (string)_constants[ReadInt16()];
+                        var name = (string)_constants[ReadArg()];
                         _stack.Push(_globals.TryGetValue(name, out var gv) ? gv : 0);
                     }
                     break;
                 case OpCode.SET_GLOBAL:
                     {
-                        var name = (string)_constants[ReadInt16()];
+                        var name = (string)_constants[ReadArg()];
                         _globals[name] = _stack.Pop();
                     }
                     break;
                 case OpCode.CALL:
-                    int addr = ReadInt16();
+                    int addr = ReadArg();
                     CheckCallDepth();
                     _callStack.Push(_ip);
                     _frameStack.Push(_currentFrame);
@@ -996,7 +996,7 @@ public class VirtualMachine
                 case OpCode.JUMP:
                     {
                         int jumpInstrAddr = _ip - 1;
-                        int target = ReadInt16();
+                        int target = ReadArg();
                         // Зворотний перехід (target ще раніше по коду, ніж сам
                         // JUMP) — це саме те, у що компілюються while/for
                         // (Compiler.cs: JUMP на startPos/forStart). Рахуємо
@@ -1014,7 +1014,7 @@ public class VirtualMachine
                     }
                     break;
                 case OpCode.JUMP_IF_FALSE:
-                    int addr2 = ReadInt16();
+                    int addr2 = ReadArg();
                     if (!Convert.ToBoolean(_stack.Pop())) _ip = addr2;
                     break;
                 case OpCode.PRINT: { var printed = _stack.Pop(); Console.WriteLine(printed == null ? null : FormatValue(printed)); } break;
@@ -1096,7 +1096,7 @@ public class VirtualMachine
 
                 case OpCode.ARRAY_NEW:
                     {
-                        int size = ReadInt16();
+                        int size = ReadArg();
                         var arr = new List<object>(size);
                         for (int i = 0; i < size; i++) arr.Add(0);
                         for (int i = size - 1; i >= 0; i--) arr[i] = _stack.Pop();
@@ -1129,7 +1129,7 @@ public class VirtualMachine
                     break;
                 case OpCode.STRUCT_NEW:
                     {
-                        int fieldCount = ReadInt16();
+                        int fieldCount = ReadArg();
                         var fields = new Dictionary<string, object>();
                         for (int i = 0; i < fieldCount; i++)
                         {
@@ -1164,8 +1164,8 @@ public class VirtualMachine
                     break;
                 case OpCode.CALL_NATIVE:
                     {
-                        int nameIdx = ReadInt16();
-                        int argCount = ReadInt16();
+                        int nameIdx = ReadArg();
+                        int argCount = ReadArg();
                         var name = (string)_constants[nameIdx];
                         var args = new object[argCount];
                         for (int i = argCount - 1; i >= 0; i--)
@@ -1188,8 +1188,8 @@ public class VirtualMachine
                     break;
                 case OpCode.CALL_METHOD:
                     {
-                        int nameIdx = ReadInt16();
-                        int argCount = ReadInt16();
+                        int nameIdx = ReadArg();
+                        int argCount = ReadArg();
                         var methodName = (string)_constants[nameIdx];
                         
                         // Object is at stack depth argCount
@@ -1220,8 +1220,8 @@ public class VirtualMachine
                 
                 case OpCode.MAKE_CLOSURE:
                     {
-                        int closureAddr = ReadInt16();
-                        int slotsConstIdx = ReadInt16();
+                        int closureAddr = ReadArg();
+                        int slotsConstIdx = ReadArg();
                         var slotsList = (List<object>)_constants[slotsConstIdx];
                         var captured = new Dictionary<int, object>();
                         foreach (var slotObj in slotsList)
@@ -1234,7 +1234,7 @@ public class VirtualMachine
                     break;
                 case OpCode.CALL_VALUE:
                     {
-                        int argCount = ReadInt16();
+                        int argCount = ReadArg();
                         var callArgs = new object[argCount];
                         for (int i = argCount - 1; i >= 0; i--) callArgs[i] = _stack.Count > 0 ? _stack.Pop() : null!;
                         var funcRef = (NxFunctionRef)_stack.Pop();
@@ -1261,8 +1261,8 @@ public class VirtualMachine
 
                 case OpCode.TRY_BEGIN:
                     {
-                        int catchAddr = ReadInt16();
-                        int varSlot = ReadInt16();
+                        int catchAddr = ReadArg();
+                        int varSlot = ReadArg();
                         _handlers.Push(new ExceptionHandler
                         {
                             CatchAddr = catchAddr,
@@ -1363,10 +1363,10 @@ public class VirtualMachine
     // інструкції міг би хибно "збігтись" зі значенням TRY_BEGIN/THROW.
     private static int InstrLength(OpCode op) => op switch
     {
-        OpCode.CALL_NATIVE or OpCode.CALL_METHOD or OpCode.MAKE_CLOSURE or OpCode.TRY_BEGIN => 5,
+        OpCode.CALL_NATIVE or OpCode.CALL_METHOD or OpCode.MAKE_CLOSURE or OpCode.TRY_BEGIN => 1 + 2 * Bytecode.ArgSize,
         OpCode.LOAD_CONST or OpCode.LOAD_VAR or OpCode.STORE_VAR or OpCode.GET_GLOBAL or OpCode.SET_GLOBAL
             or OpCode.CALL or OpCode.JUMP or OpCode.JUMP_IF_FALSE or OpCode.ARRAY_NEW or OpCode.STRUCT_NEW
-            or OpCode.CALL_VALUE => 3,
+            or OpCode.CALL_VALUE => 1 + Bytecode.ArgSize,
         _ => 1
     };
 
@@ -1420,7 +1420,7 @@ public class VirtualMachine
 
     private void TryInstallIncLocal(int loopStart, int jumpInstrAddr)
     {
-        const int patternLen = 10; // LOAD_VAR(3) + LOAD_CONST(3) + ADD(1) + STORE_VAR(3)
+        const int patternLen = 3 * (1 + Bytecode.ArgSize) + 1; // LOAD_VAR + LOAD_CONST + ADD(1) + STORE_VAR
         int start = jumpInstrAddr - patternLen;
         if (start < loopStart) return;
 
@@ -1446,22 +1446,23 @@ public class VirtualMachine
     }
 
     // Читає одну інструкцію з операндом (LOAD_VAR/LOAD_CONST/STORE_VAR/
-    // JUMP_IF_FALSE тощо — усі рівно 3 байти: опкод + Int16), не виходячи
-    // за межі [i, limit).
+    // JUMP_IF_FALSE тощо — опкод + один операнд Bytecode.ArgSize байт),
+    // не виходячи за межі [i, limit).
     private bool TryReadOperand(ref int i, int limit, out OpCode op, out int arg)
     {
         op = default; arg = 0;
-        if (i + 3 > limit) return false;
+        if (i + 1 + Bytecode.ArgSize > limit) return false;
         op = (OpCode)_code[i];
-        arg = _code[i + 1] | (_code[i + 2] << 8);
-        i += 3;
+        arg = _code[i + 1] | (_code[i + 2] << 8) | (_code[i + 3] << 16) | (_code[i + 4] << 24);
+        i += 1 + Bytecode.ArgSize;
         return true;
     }
 
-    private int ReadInt16()
+    // Операнд інструкції - 4 байти (див. Bytecode.ArgSize)
+    private int ReadArg()
     {
-        int val = _code[_ip] | (_code[_ip + 1] << 8);
-        _ip += 2;
+        int val = _code[_ip] | (_code[_ip + 1] << 8) | (_code[_ip + 2] << 16) | (_code[_ip + 3] << 24);
+        _ip += 4;
         return val;
     }
 
