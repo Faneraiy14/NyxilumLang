@@ -250,6 +250,15 @@ func tgRemoveButtons(token, chatId, messageId) {
     return fromJson(mapGet(res, "body"))
 }
 
+// Видалити повідомлення (бот може видаляти свої повідомлення до 48 год)
+func tgDeleteMessage(token, chatId, messageId) {
+    var data = newMap()
+    mapSet(data, "chat_id", chatId)
+    mapSet(data, "message_id", messageId)
+    var res = httpRequest("https://api.telegram.org/bot" + token + "/deleteMessage", "POST", toJson(data))
+    return fromJson(mapGet(res, "body"))
+}
+
 // Обов'язкова відповідь на натискання кнопки (інакше в Telegram крутиться
 // годинник на кнопці). text - необов'язкове коротке спливаюче повідомлення.
 func tgAnswerCallback(token, callbackId, text) {
