@@ -1,0 +1,87 @@
+// Перший застосунок на NyxilumLang для Android: лічильник, поле вводу,
+// сховище, будильник за хвилину. Зібрати й поставити на телефон:
+//   android/build-apk.sh android/examples/hello.nx --package nyx.hello --label "Привіт Nyx"
+//   adb install -r hello.apk
+// Протокол можна прогнати й на ноутбуці у VM: nx hello.nx < proto.in
+import "../../lib/android.nx"
+
+// Лічильник у сховищі; при першому запуску ключа ще немає (null)
+func getCount() {
+    var c = storeGet("count")
+    if isNull(c) {
+        return 0
+    }
+    return toInt(c)
+}
+
+func render(message) {
+    var count = getCount()
+    uiClear()
+    uiTitle("Привіт з NyxilumLang 👋")
+    uiText("info", "Цей екран намалювала програма на твоїй мові, скомпільована в ARM64.")
+    uiText("count", "Натискань: " + count)
+    uiButton("inc", "+1")
+    uiInput("name", "Як тебе звати?", "")
+    uiButton("hi", "Привітатись")
+    uiButton("alarm", "⏰ Будильник через 1 хвилину")
+    uiButton("clock", "🕰 Системний будильник через 2 хвилини")
+    uiButton("timer", "⏱ Системний таймер на 1 хвилину")
+    if message != "" {
+        uiText("msg", message)
+    }
+}
+
+func onEvent(ev) {
+    var kind = mapGet(ev, "kind")
+    if kind == "start" || kind == "deeplink" {
+        render("")
+    } else if kind == "click" {
+        var id = mapGet(ev, "arg")
+        if id == "inc" {
+            storeSet("count", toString(getCount() + 1))
+            render("")
+        } else if id == "hi" {
+            var name = trim(mapGet(mapGet(ev, "inputs"), "name"))
+            if name == "" {
+                toast("Спершу напиши ім'я")
+                render("")
+            } else {
+                render("Привіт, " + name + "!")
+            }
+        } else if id == "alarm" {
+            alarmSet("test", timestamp() + 60, "Тест")
+            render("Будильник поставлено - заблокуй телефон і чекай хвилину.")
+        } else if id == "clock" {
+            // місцевий час: timestamp() - UTC, тож беремо зсув з програми бота
+            // пізніше; для тесту - Київ/Каїр влітку UTC+3
+            var t = timestamp() + 3 * 3600 + 120
+            var h = floor(t % 86400 / 3600)
+            var m = floor(t % 3600 / 60)
+            clockAlarm(h, m, "Тест NyxilumLang", null)
+            render("Системний будильник на " + h + ":" + m + " - подивись у Годиннику")
+        } else if id == "timer" {
+            clockTimer(60, "Тест NyxilumLang")
+            render("Таймер на 1 хвилину - у Годиннику")
+        } else if id == "stop" {
+            alarmSound(false)
+            vibrate(false)
+            finishScreen()
+        }
+    } else if kind == "sync" {
+        // фонова подія (раз на ~15 хв): тут нічого не ставимо, лише рахуємо
+        var n = storeGet("syncs")
+        if isNull(n) {
+            n = "0"
+        }
+        storeSet("syncs", toString(toInt(n) + 1))
+    } else if kind == "alarm" {
+        alarmSound(true)
+        vibrate(true)
+        uiClear()
+        uiTitle("⏰ Будильник!")
+        uiText("t", "Його поставила програма на NyxilumLang.")
+        uiButton("stop", "✅ Прокинувся")
+    }
+}
+
+androidMain(onEvent)

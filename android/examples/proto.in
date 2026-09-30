@@ -1,0 +1,7 @@
+EVENT	start	
+REPLY	4
+EVENT	click	inc	name	
+REPLY	4
+REPLY	5
+EVENT	click	hi	name	  Свят\tослав 
+REPLY	5

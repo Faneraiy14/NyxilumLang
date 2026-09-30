@@ -1,0 +1,320 @@
+package nyx.bridge;
+
+import android.app.AlarmManager;
+import android.app.PendingIntent;
+import android.content.Context;
+import android.content.Intent;
+import android.content.SharedPreferences;
+import android.provider.AlarmClock;
+import android.util.Log;
+
+import java.io.BufferedReader;
+import java.io.ByteArrayOutputStream;
+import java.io.File;
+import java.io.InputStream;
+import java.io.InputStreamReader;
+import java.io.OutputStream;
+import java.io.OutputStreamWriter;
+import java.io.Writer;
+import java.net.HttpURLConnection;
+import java.net.URL;
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.List;
+
+// Універсальний перекладач NyxilumLang <-> Android.
+//
+// Уся логіка застосунку - у програмі на NyxilumLang, скомпільованій у
+// ARM64 і покладеній в APK як lib/arm64-v8a/libnxapp.so (Android дозволяє
+// запускати файли лише з теки нативних бібліотек). Цей клас запускає її і
+// розмовляє рядками через stdin/stdout - протокол описано в lib/android.nx.
+// Тут немає НІЧОГО про будильники чи Маяк: лише виконання команд
+// (екран, AlarmManager, сховище, HTTP) і пересилання подій.
+public final class NxBridge {
+    private static final String TAG = "NxBridge";
+
+    // Те, що вміє показати екран (ScreenActivity); для фонових подій - null
+    public interface Screen {
+        void apply(List<String[]> uiCommands);
+        void toast(String text);
+        void finishScreen();
+        void openUrl(String url);
+        void sound(boolean on);
+        void vibrate(boolean on);
+    }
+
+    private final Context ctx;
+    private final Process proc;
+    private final Writer out;
+    private final BufferedReader in;
+
+    public NxBridge(Context context) throws Exception {
+        ctx = context.getApplicationContext();
+        File exe = new File(ctx.getApplicationInfo().nativeLibraryDir, "libnxapp.so");
+        proc = new ProcessBuilder(exe.getAbsolutePath()).redirectErrorStream(false).start();
+        out = new OutputStreamWriter(proc.getOutputStream(), StandardCharsets.UTF_8);
+        in = new BufferedReader(new InputStreamReader(proc.getInputStream(), StandardCharsets.UTF_8));
+        drainStderr(proc.getErrorStream());
+    }
+
+    // Надіслати подію і виконувати команди програми до DONE.
+    // Викликати НЕ з головного потоку (тут може бути мережа).
+    public synchronized void event(Screen screen, String... fields) throws Exception {
+        send(prepend("EVENT", fields));
+        List<String[]> ui = new ArrayList<>();
+        String line;
+        while ((line = in.readLine()) != null) {
+            String[] f = parse(line);
+            String cmd = f[0];
+            switch (cmd) {
+                case "DONE":
+                    if (screen != null && !ui.isEmpty()) screen.apply(ui);
+                    return;
+                case "UI_CLEAR": case "UI_TITLE": case "UI_TEXT": case "UI_BUTTON": case "UI_INPUT":
+                    ui.add(f);
+                    break;
+                case "TOAST":
+                    if (screen != null) screen.toast(arg(f, 1));
+                    break;
+                case "FINISH":
+                    if (screen != null) screen.finishScreen();
+                    break;
+                case "OPEN_URL":
+                    if (screen != null) screen.openUrl(arg(f, 1));
+                    break;
+                case "SOUND":
+                    if (screen != null) screen.sound(isTrue(arg(f, 1)));
+                    break;
+                case "VIBRATE":
+                    if (screen != null) screen.vibrate(isTrue(arg(f, 1)));
+                    break;
+                case "LOG":
+                    Log.i(TAG, arg(f, 1));
+                    break;
+                case "ALARM_SET":
+                    setAlarm(ctx, arg(f, 1), (long) (Double.parseDouble(arg(f, 2)) * 1000), arg(f, 3));
+                    break;
+                case "ALARM_CANCEL":
+                    cancelAlarm(ctx, arg(f, 1));
+                    break;
+                case "CLOCK_ALARM":
+                    clockAlarm(ctx, (int) Double.parseDouble(arg(f, 1)), (int) Double.parseDouble(arg(f, 2)), arg(f, 3), arg(f, 4));
+                    break;
+                case "CLOCK_TIMER":
+                    clockTimer(ctx, (int) Double.parseDouble(arg(f, 1)), arg(f, 2));
+                    break;
+                case "CLOCK_DISMISS":
+                    clockDismiss(ctx, arg(f, 1));
+                    break;
+                case "STORE_SET":
+                    prefs().edit().putString(arg(f, 1), arg(f, 2)).apply();
+                    break;
+                case "STORE_REMOVE":
+                    prefs().edit().remove(arg(f, 1)).apply();
+                    break;
+                case "STORE_GET": {
+                    String v = prefs().getString(arg(f, 1), null);
+                    send(v == null ? new String[]{"REPLY"} : new String[]{"REPLY", v});
+                    break;
+                }
+                case "HTTP_GET":
+                    send(http("GET", arg(f, 1), null));
+                    break;
+                case "HTTP_POST":
+                    send(http("POST", arg(f, 1), arg(f, 2)));
+                    break;
+                default:
+                    Log.w(TAG, "невідома команда: " + cmd);
+            }
+        }
+        throw new Exception("програма завершилась, не надіславши DONE");
+    }
+
+    public void close() {
+        try { out.close(); } catch (Exception ignored) { }
+        proc.destroy();
+    }
+
+    // Одна подія з окремим процесом: для фонових подій (будильник після
+    // перезавантаження, синхронізація)
+    public static void runOnce(Context ctx, String... fields) {
+        NxBridge b = null;
+        try {
+            b = new NxBridge(ctx);
+            b.event(null, fields);
+        } catch (Exception e) {
+            Log.e(TAG, "фонова подія " + fields[0] + " впала", e);
+        } finally {
+            if (b != null) b.close();
+        }
+    }
+
+    // ------------------------------------------------------------ будильник
+
+    static void setAlarm(Context ctx, String id, long atMillis, String label) {
+        AlarmManager am = (AlarmManager) ctx.getSystemService(Context.ALARM_SERVICE);
+        PendingIntent show = PendingIntent.getActivity(ctx, 0,
+                new Intent(ctx, ScreenActivity.class), PendingIntent.FLAG_IMMUTABLE);
+        am.setAlarmClock(new AlarmManager.AlarmClockInfo(atMillis, show), alarmIntent(ctx, id, label));
+    }
+
+    static void cancelAlarm(Context ctx, String id) {
+        AlarmManager am = (AlarmManager) ctx.getSystemService(Context.ALARM_SERVICE);
+        am.cancel(alarmIntent(ctx, id, ""));
+    }
+
+    // Коли будильник спрацює, система розбудить AlarmReceiver (той покаже
+    // повноекранне повідомлення -> ScreenActivity з подією "alarm <id>")
+    private static PendingIntent alarmIntent(Context ctx, String id, String label) {
+        Intent i = new Intent(ctx, AlarmReceiver.class)
+                .setAction("nyx.ALARM." + id)
+                .putExtra(ScreenActivity.EXTRA_ARG, id)
+                .putExtra("nx.label", label);
+        return PendingIntent.getBroadcast(ctx, id.hashCode(), i,
+                PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
+    }
+
+    // ------------------------------------------------------------ вбудований "Годинник"
+
+    // Будильник у СИСТЕМНОМУ годиннику телефона (AlarmClock.ACTION_SET_ALARM):
+    // дзвонить сам "Годинник" - з усіма його налаштуваннями (мелодія,
+    // "Не турбувати", режим сну). days - "1,2,..." (1 = неділя, як Calendar)
+    // або "" для одноразового.
+    static void clockAlarm(Context ctx, int hour, int minute, String label, String days) {
+        Intent i = new Intent(AlarmClock.ACTION_SET_ALARM)
+                .putExtra(AlarmClock.EXTRA_HOUR, hour)
+                .putExtra(AlarmClock.EXTRA_MINUTES, minute)
+                .putExtra(AlarmClock.EXTRA_MESSAGE, label)
+                .putExtra(AlarmClock.EXTRA_VIBRATE, true)
+                .putExtra(AlarmClock.EXTRA_SKIP_UI, true);
+        if (days != null && !days.isEmpty()) {
+            ArrayList<Integer> d = new ArrayList<>();
+            for (String p : days.split(",")) d.add(Integer.parseInt(p.trim()));
+            i.putExtra(AlarmClock.EXTRA_DAYS, d);
+        }
+        startClock(ctx, i, "будильник");
+    }
+
+    static void clockTimer(Context ctx, int seconds, String label) {
+        startClock(ctx, new Intent(AlarmClock.ACTION_SET_TIMER)
+                .putExtra(AlarmClock.EXTRA_LENGTH, seconds)
+                .putExtra(AlarmClock.EXTRA_MESSAGE, label)
+                .putExtra(AlarmClock.EXTRA_SKIP_UI, true), "таймер");
+    }
+
+    // Вимкнути будильник "Годинника" за назвою (підтримують не всі годинники)
+    static void clockDismiss(Context ctx, String label) {
+        startClock(ctx, new Intent(AlarmClock.ACTION_DISMISS_ALARM)
+                .putExtra(AlarmClock.EXTRA_ALARM_SEARCH_MODE, AlarmClock.ALARM_SEARCH_MODE_LABEL)
+                .putExtra(AlarmClock.EXTRA_MESSAGE, label), "вимкнення будильника");
+    }
+
+    private static void startClock(Context ctx, Intent i, String what) {
+        try {
+            ctx.startActivity(i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
+            Log.i(TAG, "Годинник: " + what + " - запит надіслано");
+        } catch (Exception e) {
+            Log.e(TAG, "Годинник: " + what + " не вдалося", e);
+        }
+    }
+
+    // ------------------------------------------------------------ мережа, сховище
+
+    private SharedPreferences prefs() {
+        return ctx.getSharedPreferences("nx", Context.MODE_PRIVATE);
+    }
+
+    private static String[] http(String method, String url, String body) {
+        HttpURLConnection c = null;
+        try {
+            c = (HttpURLConnection) new URL(url).openConnection();
+            c.setRequestMethod(method);
+            c.setConnectTimeout(15000);
+            c.setReadTimeout(20000);
+            if (body != null) {
+                c.setDoOutput(true);
+                c.setRequestProperty("Content-Type", "text/plain; charset=utf-8");
+                try (OutputStream os = c.getOutputStream()) {
+                    os.write(body.getBytes(StandardCharsets.UTF_8));
+                }
+            }
+            int code = c.getResponseCode();
+            InputStream is = code >= 400 ? c.getErrorStream() : c.getInputStream();
+            return new String[]{"REPLY", String.valueOf(code), is == null ? "" : readAll(is)};
+        } catch (Exception e) {
+            return new String[]{"REPLY", "0", String.valueOf(e.getMessage())};
+        } finally {
+            if (c != null) c.disconnect();
+        }
+    }
+
+    private static String readAll(InputStream is) throws Exception {
+        ByteArrayOutputStream buf = new ByteArrayOutputStream();
+        byte[] chunk = new byte[8192];
+        int n;
+        while ((n = is.read(chunk)) > 0) buf.write(chunk, 0, n);
+        return new String(buf.toByteArray(), StandardCharsets.UTF_8);
+    }
+
+    // ------------------------------------------------------------ протокол
+
+    private void send(String[] fields) throws Exception {
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < fields.length; i++) {
+            if (i > 0) sb.append('\t');
+            sb.append(escape(fields[i]));
+        }
+        sb.append('\n');
+        out.write(sb.toString());
+        out.flush();
+    }
+
+    static String escape(String s) {
+        return s.replace("\\", "\\\\").replace("\t", "\\t").replace("\n", "\\n");
+    }
+
+    static String unescape(String s) {
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            if (c == '\\' && i + 1 < s.length()) {
+                char n = s.charAt(++i);
+                sb.append(n == 't' ? '\t' : n == 'n' ? '\n' : n);
+            } else {
+                sb.append(c);
+            }
+        }
+        return sb.toString();
+    }
+
+    static String[] parse(String line) {
+        String[] raw = line.split("\t", -1);
+        for (int i = 0; i < raw.length; i++) raw[i] = unescape(raw[i]);
+        return raw;
+    }
+
+    private static String arg(String[] f, int i) {
+        return i < f.length ? f[i] : "";
+    }
+
+    private static boolean isTrue(String s) {
+        return s.equalsIgnoreCase("true") || s.equals("1");
+    }
+
+    private static String[] prepend(String first, String[] rest) {
+        String[] r = new String[rest.length + 1];
+        r[0] = first;
+        System.arraycopy(rest, 0, r, 1, rest.length);
+        return r;
+    }
+
+    // stderr програми (помилки рантайму) -> logcat, щоб не забив буфер
+    private static void drainStderr(final InputStream err) {
+        new Thread(() -> {
+            try (BufferedReader r = new BufferedReader(new InputStreamReader(err, StandardCharsets.UTF_8))) {
+                String l;
+                while ((l = r.readLine()) != null) Log.e(TAG, "nx: " + l);
+            } catch (Exception ignored) { }
+        }).start();
+    }
+}

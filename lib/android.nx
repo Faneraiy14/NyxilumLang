@@ -1,0 +1,182 @@
+// lib/android.nx — Android-застосунки на NyxilumLang через "універсальний
+// перекладач" (android/bridge/*.java). Застосунок - це звичайна програма
+// на NyxilumLang, скомпільована `nx compile-native --target android-arm64`
+// і покладена в APK (android/build-apk.sh). Java-перекладач запускає її і
+// розмовляє з нею РЯДКАМИ через stdin/stdout:
+//
+//   перекладач -> програма:  EVENT <вид> <аргумент> [id_поля значення]...
+//                            REPLY <поля>...          (відповідь на запит)
+//   програма -> перекладач:  UI_TEXT <id> <текст>, ALARM_SET <id> <час> <назва>,
+//                            HTTP_GET <url>, STORE_GET <ключ>, ..., DONE
+//
+// Поля розділені табуляцією; "\", табуляція й перенос рядка всередині
+// поля екрануються як \\, \t, \n. Код застосунку цих деталей не бачить -
+// лише функції нижче. Якщо колись перекладач заміниться на прямі виклики
+// Android (JNI), зміниться тільки цей файл, а не застосунки.
+//
+// Бібліотека працює і у VM (`nx app.nx`), тож протокол можна перевіряти на
+// ноутбуці, подаючи події на stdin вручну.
+//
+// Події (ev - мапа {kind, arg, inputs}):
+//   start          - відкрили застосунок (arg - "")
+//   click          - натиснули кнопку (arg - id кнопки; inputs - значення полів вводу)
+//   alarm          - спрацював будильник (arg - id будильника); екран уже поверх блокування
+//   boot           - телефон перезавантажився: будильники треба поставити знову
+//   sync           - фонова перевірка (раз на ~15 хв)
+//   deeplink       - застосунок відкрили посиланням (arg - адреса, напр. mayak://sync)
+
+func __andEscape(s) {
+    return replace(replace(replace(toString(s), "\\", "\\\\"), "\t", "\\t"), "\n", "\\n")
+}
+
+func __andUnescape(s) {
+    var parts = split(s, "\\\\")
+    var i = 0
+    while i < len(parts) {
+        parts[i] = replace(replace(parts[i], "\\t", "\t"), "\\n", "\n")
+        i = i + 1
+    }
+    return join(parts, "\\")
+}
+
+// Надіслати перекладачу команду (поля екрануються)
+func androidSend(fields) {
+    var out = []
+    var i = 0
+    while i < len(fields) {
+        append(out, __andEscape(fields[i]))
+        i = i + 1
+    }
+    print(join(out, "\t"))
+}
+
+// Прочитати один рядок протоколу -> масив полів, або null наприкінці вводу
+func __andReadFields() {
+    var line = readLine()
+    if line == "" {
+        return null
+    }
+    var raw = split(line, "\t")
+    var fields = []
+    var i = 0
+    while i < len(raw) {
+        append(fields, __andUnescape(raw[i]))
+        i = i + 1
+    }
+    return fields
+}
+
+// Запит із відповіддю (HTTP, сховище): надіслати й дочекатися REPLY
+func __andRequest(fields) {
+    androidSend(fields)
+    var reply = __andReadFields()
+    if isNull(reply) || reply[0] != "REPLY" {
+        throw "android: перекладач не відповів на " + fields[0]
+    }
+    return reply
+}
+
+// Головний цикл застосунку: handler(ev) викликається на кожну подію;
+// після неї перекладач отримує DONE і показує зібраний екран.
+func androidMain(handler) {
+    while true {
+        var f = __andReadFields()
+        if isNull(f) {
+            return null
+        }
+        if f[0] == "EVENT" {
+            var ev = newMap()
+            mapSet(ev, "kind", f[1])
+            var arg = ""
+            if len(f) > 2 {
+                arg = f[2]
+            }
+            mapSet(ev, "arg", arg)
+            var inputs = newMap()
+            var i = 3
+            while i + 1 < len(f) {
+                mapSet(inputs, f[i], f[i + 1])
+                i = i + 2
+            }
+            mapSet(ev, "inputs", inputs)
+            try {
+                handler(ev)
+            } catch (e) {
+                androidSend(["LOG", "помилка в обробнику: " + toString(e)])
+                androidSend(["TOAST", "Помилка: " + toString(e)])
+            }
+            androidSend(["DONE"])
+        }
+    }
+}
+
+// ------------------------------------------------------------ екран
+
+// Екран будується заново на кожну подію: uiClear(), потім елементи згори вниз
+func uiClear() { androidSend(["UI_CLEAR"]) }
+func uiTitle(text) { androidSend(["UI_TITLE", text]) }
+func uiText(id, text) { androidSend(["UI_TEXT", id, text]) }
+func uiButton(id, text) { androidSend(["UI_BUTTON", id, text]) }
+// Поле вводу; його значення прийде в ev.inputs[id] разом із наступним натисканням кнопки
+func uiInput(id, hint, value) { androidSend(["UI_INPUT", id, hint, value]) }
+func toast(text) { androidSend(["TOAST", text]) }
+// Закрити екран (напр. після "Прокинувся")
+func finishScreen() { androidSend(["FINISH"]) }
+func openUrl(url) { androidSend(["OPEN_URL", url]) }
+func androidLog(text) { androidSend(["LOG", text]) }
+
+// ------------------------------------------------------------ будильник
+
+// Справжній системний будильник (AlarmManager.setAlarmClock): дзвонить
+// навіть офлайн і в режимі "Не турбувати"; ts - Unix-час у секундах.
+// Коли спрацює - прийде подія alarm з arg = id.
+func alarmSet(id, ts, label) { androidSend(["ALARM_SET", id, ts, label]) }
+func alarmCancel(id) { androidSend(["ALARM_CANCEL", id]) }
+// Звук будильника (системна мелодія, гучність будильника) і вібрація
+func alarmSound(on) { androidSend(["SOUND", on]) }
+func vibrate(on) { androidSend(["VIBRATE", on]) }
+
+// ------------------------------------------------------------ вбудований "Годинник"
+
+// Будильник у СИСТЕМНОМУ "Годиннику" телефона: дзвонить сам годинник
+// (його мелодія, "Не турбувати", режим сну - усе як у звичайного
+// будильника). days - масив днів [1..7], 1 = неділя, 2 = понеділок...;
+// порожній масив чи null - одноразовий.
+func clockAlarm(hour, minute, label, days) {
+    var d = ""
+    if !isNull(days) {
+        d = join(days, ",")
+    }
+    androidSend(["CLOCK_ALARM", hour, minute, label, d])
+}
+// Таймер у системному "Годиннику" на seconds секунд
+func clockTimer(seconds, label) { androidSend(["CLOCK_TIMER", seconds, label]) }
+// Вимкнути будильник "Годинника" за назвою (підтримують не всі годинники)
+func clockDismiss(label) { androidSend(["CLOCK_DISMISS", label]) }
+
+// ------------------------------------------------------------ сховище
+
+// Локальне сховище застосунку (рядок -> рядок); null, якщо ключа немає
+func storeGet(key) {
+    var r = __andRequest(["STORE_GET", key])
+    if len(r) < 2 {
+        return null
+    }
+    return r[1]
+}
+func storeSet(key, value) { androidSend(["STORE_SET", key, value]) }
+func storeRemove(key) { androidSend(["STORE_REMOVE", key]) }
+
+// ------------------------------------------------------------ мережа
+
+// HTTP(S) робить перекладач (назви netGet/netPost - щоб не плутати з
+// вбудованими httpGet/httpPost VM). Результат - [код статусу, тіло]; код 0 -
+// мережа недоступна (тіло - текст помилки).
+func netGet(url) {
+    var r = __andRequest(["HTTP_GET", url])
+    return [toDouble(r[1]), r[2]]
+}
+func netPost(url, body) {
+    var r = __andRequest(["HTTP_POST", url, body])
+    return [toDouble(r[1]), r[2]]
+}

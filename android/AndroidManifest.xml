@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Шаблон маніфесту для застосунків NyxilumLang (android/build-apk.sh
+     підставляє @PACKAGE@, @LABEL@, @SCHEME@, @VERSION_CODE@, @VERSION_NAME@, @THEME@).
+     Компоненти - лише універсальний перекладач (nyx.bridge.*); уся логіка -
+     у програмі на NyxilumLang (lib/arm64-v8a/libnxapp.so). -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="@PACKAGE@"
+    android:versionCode="@VERSION_CODE@"
+    android:versionName="@VERSION_NAME@">
+
+    <uses-permission android:name="android.permission.INTERNET" />
+    <!-- фонова синхронізація чекає на мережу (JobScheduler) -->
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <!-- справжній будильник (AlarmManager.setAlarmClock) -->
+    <uses-permission android:name="android.permission.USE_EXACT_ALARM" />
+    <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" android:maxSdkVersion="32" />
+    <!-- після перезавантаження - поставити будильники знову -->
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <uses-permission android:name="android.permission.VIBRATE" />
+    <!-- будильник/таймер у вбудованому "Годиннику" телефона -->
+    <uses-permission android:name="com.android.alarm.permission.SET_ALARM" />
+    <!-- дзвінок будильника = повідомлення з повноекранним вікном (Android 14+
+         не дає фоновим застосункам відкривати вікна самим) -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
+
+    <application
+        android:label="@LABEL@"
+        android:extractNativeLibs="true"
+        android:theme="@THEME@">
+
+        <activity
+            android:name="nyx.bridge.ScreenActivity"
+            android:exported="true"
+            android:launchMode="singleTask">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+            <!-- @SCHEME@://... - відкрити застосунок посиланням (подія deeplink) -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="@SCHEME@" />
+            </intent-filter>
+        </activity>
+
+        <receiver android:name="nyx.bridge.AlarmReceiver" android:exported="false" />
+
+        <receiver android:name="nyx.bridge.BootReceiver" android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+            </intent-filter>
+        </receiver>
+
+        <service
+            android:name="nyx.bridge.SyncJob"
+            android:permission="android.permission.BIND_JOB_SERVICE"
+            android:exported="false" />
+    </application>
+</manifest>
