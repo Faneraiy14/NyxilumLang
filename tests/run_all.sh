@@ -22,7 +22,7 @@ EXE="${NX_EXE:-$TESTS_DIR/../src/NyxilumLang/bin/Debug/net10.0-windows/Nx.exe}"
 SKIP="test_graphics2d.nx test_graphics3d.nx test_graphics_image_sound.nx calculator.nx test_http_server.nx test_websocket_server.nx bench_loop.nx test_sandbox_symlink.nx test_db_sandbox_escape.nx ws_client_check.nx ws_timeout_recovery_check.nx test_ast_dump.nx"
 
 # Тести, де помилка — очікуваний результат.
-EXPECT_ERROR="test_throw_uncaught.nx test_nested_scope_error.nx test_selective_import_missing.nx test_lib_testing_fail.nx test_parser_stack_limits.nx"
+EXPECT_ERROR="test_selective_import_excludes.nx test_throw_uncaught.nx test_nested_scope_error.nx test_selective_import_missing.nx test_lib_testing_fail.nx test_parser_stack_limits.nx"
 
 TIMEOUT_SEC=25
 # Повільні тести зі своїм тайм-аутом: test_postgres.nx - перше підключення

@@ -1,0 +1,13 @@
+// Вибірковий import тягне транзитивні залежності: sha256 викликає
+// sha256Finish/sha256Compress/mdPad, користується SHA256_K/SHA256_H0 і
+// функціями з bytes.nx, який crypto.nx імпортує сам. Раніше все це
+// губилось ("Функція ... не оголошена"). І другий import уже відвіданого
+// bytes.nx { bytesToHex } раніше пропускався повністю.
+import "../lib/testing.nx" { assertEqual }
+import "../lib/crypto.nx" { sha256 }
+import "../lib/bytes.nx" { bytesToHex, asciiBytes }
+
+func main() {
+    assertEqual(bytesToHex(sha256(asciiBytes("abc"))), "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad", "sha256 через вибірковий import")
+    print("Транзитивний вибірковий import працює")
+}

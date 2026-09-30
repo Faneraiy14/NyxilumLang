@@ -229,7 +229,7 @@ func main() {
 ```
 Шлях в `import` — відносно файлу, що імпортує. Циклічні та повторні імпорти безпечні (кожен файл обробляється один раз).
 
-Вибірковий import — тягне лише перелічені функції/структури/глобальні змінні, а не весь файл:
+Вибірковий import — тягне перелічені функції/структури/глобальні змінні (разом з тим, що вони самі використовують), а не весь файл:
 ```nx
 import "math_helpers.nx" { square }
 
@@ -242,7 +242,7 @@ func main() {
 ### Стандартна бібліотека (`lib/`)
 У теці `lib/` в корені репозиторію лежать готові `.nx`-модулі — підключаються звичайним `import` за відносним шляхом (`../lib/...` з файлу в `tests/`, або `lib/...`, якщо скрипт лежить поруч із самою `lib/`).
 
-⚠️ Вибірковий `import "lib/x.nx" { a, b }` вливає ЛИШЕ перелічені імена (плюс функції, що починаються з `_`) - внутрішні функції модуля й те, що він сам імпортує, губляться. Тому модулі, які спираються на власні хелпери чи інші модулі (`telegram`, `postgres`, `mysql`, `crypto`), підключай повністю, без `{ ... }`:
+Вибірковий `import "lib/x.nx" { a, b }` вливає перелічені імена разом з усім, від чого вони залежать (функції, які вони викликають, глобальні змінні, структури, а також потрібне з модулів, які імпортує сам модуль) - і нічого зайвого:
 
 - **`lib/datetime.nx`** — арифметика дат з правильними високосними роками (алгоритм Говарда Гіннанта, чиста NyxilumLang): `daysFromCivil(y,m,d)`/`civilFromDays(z)` (дата <-> днів від епохи), `isLeapYear(y)`, `dayOfWeek(y,m,d)` (0=неділя), `dayName(weekday)`, `addDays(y,m,d,n)`, `diffDays(y1,m1,d1,y2,m2,d2)`, `formatDate(y,m,d)`, `parseDate(s)`, `todayCivil()`.
 - **`lib/strings.nx`** — `capitalize(s)`, `titleCase(s)`, `isBlank(s)`, `isEmpty(s)`, `padLeft(s, len, ch)`, `padRight(s, len, ch)`, `countOccurrences(s, sub)`.
@@ -269,7 +269,7 @@ func main() {
   ```
 - **`lib/telegram.nx`** — обгортка над [Telegram Bot API](https://core.telegram.org/bots/api) (звичайний HTTPS+JSON, без WebSocket - тому повністю реалізований на самій NyxilumLang): `tgGetMe(token)`, `tgSendMessage(token, chatId, text)`, `tgGetUpdates(token, offset)`, `tgMessageText(update)`, `tgChatId(update)`, і блокуючий `tgPollLoop(token, handler)` для готового бота одним викликом. Токен читай через `osEnv("TELEGRAM_BOT_TOKEN")`, ніколи не хардкодь у скрипті. Повний робочий приклад ехо-бота: `programs/telegram_echo_bot.nx`.
   ```nx
-  import "lib/telegram.nx"
+  import "lib/telegram.nx" { tgPollLoop, tgMessageText, tgChatId, tgSendMessage }
 
   func main() {
       var token = osEnv("TELEGRAM_BOT_TOKEN")
@@ -300,7 +300,7 @@ func main() {
 - **`lib/crypto.nx`** — хеші на ЧИСТІЙ NyxilumLang, без нативного коду: `sha1`, `sha256`, `md5`, `hmacSha256(key, msg)`, `pbkdf2Sha256(password, salt, iterations, dkLen)`, `randomBytes(n)` (⚠️ не криптографічний генератор - лише для nonce). Для паролів і протоколів, не для масових даних: у VM SHA-256 ~4 мс на 64-байтовий блок.
 - **`lib/postgres.nx`** — клієнт PostgreSQL (протокол v3) на чистій NyxilumLang поверх `tcp*`: авторизація trust / cleartext / MD5 / SCRAM-SHA-256, TLS (`?sslmode=require` - без перевірки сертифіката, як у libpq; `?sslmode=verify-full` - з перевіркою), параметри `$1..$n` окремо від SQL (захист від SQL-ін'єкцій). Типи: bool, цілі/float/numeric -> число, NULL -> `null`, решта -> рядок. ⚠️ Перше SCRAM-підключення рахує PBKDF2 ~40 с (далі кеш на весь процес).
   ```nx
-  import "lib/postgres.nx"
+  import "lib/postgres.nx" { pgConnect, pgExec, pgQuery, pgClose }
 
   func main() {
       var db = pgConnect(osEnv("DATABASE_URL"))   // postgres://user:pass@host:5432/db?sslmode=require

@@ -237,8 +237,8 @@ func main() {
 The path in `import` is relative to the importing file. Circular and
 repeated imports are safe (each file is processed once).
 
-Selective import — pulls in only the listed functions/structs/global
-variables, not the whole file:
+Selective import — pulls in the listed functions/structs/global
+variables (plus whatever they use themselves), not the whole file:
 ```nx
 import "math_helpers.nx" { square }
 
@@ -258,7 +258,7 @@ The `lib/` directory at the repo root contains ready-made `.nx` modules —
 pulled in with a regular `import` using a relative path (`../lib/...` from
 a file in `tests/`, or `lib/...` if the script sits next to `lib/` itself).
 
-⚠️ A selective `import "lib/x.nx" { a, b }` merges ONLY the listed names (plus functions starting with `_`) - the module's internal helpers and whatever it imports itself are dropped. So import modules that rely on their own helpers or other modules (`telegram`, `postgres`, `mysql`, `crypto`) in full, without `{ ... }`:
+A selective `import "lib/x.nx" { a, b }` merges the listed names together with everything they depend on (functions they call, globals, structs, and whatever they need from modules the module itself imports) - and nothing extra:
 
 - **`lib/datetime.nx`** — date arithmetic with correct leap years (Howard Hinnant's algorithm, pure NyxilumLang): `daysFromCivil(y,m,d)`/`civilFromDays(z)` (date <-> days since epoch), `isLeapYear(y)`, `dayOfWeek(y,m,d)` (0=Sunday), `dayName(weekday)`, `addDays(y,m,d,n)`, `diffDays(y1,m1,d1,y2,m2,d2)`, `formatDate(y,m,d)`, `parseDate(s)`, `todayCivil()`.
 - **`lib/strings.nx`** — `capitalize(s)`, `titleCase(s)`, `isBlank(s)`, `isEmpty(s)`, `padLeft(s, len, ch)`, `padRight(s, len, ch)`, `countOccurrences(s, sub)`.
@@ -285,7 +285,7 @@ a file in `tests/`, or `lib/...` if the script sits next to `lib/` itself).
   ```
 - **`lib/telegram.nx`** — a wrapper over the [Telegram Bot API](https://core.telegram.org/bots/api) (plain HTTPS+JSON, no WebSocket — so it's fully implemented in NyxilumLang itself): `tgGetMe(token)`, `tgSendMessage(token, chatId, text)`, `tgGetUpdates(token, offset)`, `tgMessageText(update)`, `tgChatId(update)`, and a blocking `tgPollLoop(token, handler)` for a ready-made bot in a single call. Read the token via `osEnv("TELEGRAM_BOT_TOKEN")`, never hardcode it in the script. Full working echo-bot example: `programs/telegram_echo_bot.nx`.
   ```nx
-  import "lib/telegram.nx"
+  import "lib/telegram.nx" { tgPollLoop, tgMessageText, tgChatId, tgSendMessage }
 
   func main() {
       var token = osEnv("TELEGRAM_BOT_TOKEN")
@@ -316,7 +316,7 @@ a file in `tests/`, or `lib/...` if the script sits next to `lib/` itself).
 - **`lib/crypto.nx`** — hashes in PURE NyxilumLang, no native code: `sha1`, `sha256`, `md5`, `hmacSha256(key, msg)`, `pbkdf2Sha256(password, salt, iterations, dkLen)`, `randomBytes(n)` (⚠️ not a cryptographic RNG - nonces only). For passwords and protocols, not bulk data: SHA-256 in the VM is ~4 ms per 64-byte block.
 - **`lib/postgres.nx`** — PostgreSQL client (protocol v3) in pure NyxilumLang on top of `tcp*`: trust / cleartext / MD5 / SCRAM-SHA-256 auth, TLS (`?sslmode=require` - no certificate check, like libpq; `?sslmode=verify-full` - verified), `$1..$n` parameters sent separately from SQL (SQL-injection safe). Types: bool, integers/float/numeric -> number, NULL -> `null`, the rest -> string. ⚠️ The first SCRAM connection computes PBKDF2 in ~40 s (cached for the whole process afterwards).
   ```nx
-  import "lib/postgres.nx"
+  import "lib/postgres.nx" { pgConnect, pgExec, pgQuery, pgClose }
 
   func main() {
       var db = pgConnect(osEnv("DATABASE_URL"))   // postgres://user:pass@host:5432/db?sslmode=require
