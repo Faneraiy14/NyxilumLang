@@ -26,7 +26,8 @@ EXPECT_ERROR="test_selective_import_excludes.nx test_throw_uncaught.nx test_nest
 
 TIMEOUT_SEC=25
 # Повільні тести зі своїм тайм-аутом: test_postgres.nx - перше підключення
-# SCRAM-SHA-256 рахує PBKDF2 (4096 ітерацій) на чистій NyxilumLang, ~40 с.
+# SCRAM-SHA-256 рахує PBKDF2 (4096 ітерацій) на чистій NyxilumLang: ~9 с у
+# Release (CI), ~38 с у Debug-збірці.
 SLOW="test_postgres.nx"
 SLOW_TIMEOUT_SEC=180
 
