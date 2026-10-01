@@ -3,7 +3,7 @@
 # Без Android Studio і без Gradle: кожен крок - окрема зрозуміла команда.
 #
 #   android/build-apk.sh app.nx --package com.example.app --label "Назва" \
-#       [--scheme app] [--version 1] [--headless] [-o app.apk]
+#       [--scheme app] [--version 1] [--version-name 1.0] [--headless] [-o app.apk]
 #
 # --headless: без інтерфейсу - екран прозорий, застосунок робить свою
 # справу (напр. ставить будильники) і закривається сам (finishScreen()).
@@ -18,20 +18,21 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 NX="${NX:-nx}"
 SDK="${ANDROID_HOME:-$HOME/Android/Sdk}"
 
-src="" pkg="" label="" scheme="" version=1 out="" theme="@android:style/Theme.DeviceDefault.NoActionBar"
+src="" pkg="" label="" scheme="" version=1 vname="" out="" theme="@android:style/Theme.DeviceDefault.NoActionBar"
 while [ $# -gt 0 ]; do
     case "$1" in
         --package) pkg="$2"; shift 2 ;;
         --label) label="$2"; shift 2 ;;
         --scheme) scheme="$2"; shift 2 ;;
         --version) version="$2"; shift 2 ;;
+        --version-name) vname="$2"; shift 2 ;;
         --headless) theme="@android:style/Theme.Translucent.NoTitleBar"; shift ;;
         -o) out="$2"; shift 2 ;;
         *) src="$1"; shift ;;
     esac
 done
 if [ -z "$src" ] || [ -z "$pkg" ] || [ -z "$label" ]; then
-    echo "Використання: $0 app.nx --package com.example.app --label \"Назва\" [--scheme app] [--version N] [-o app.apk]" >&2
+    echo "Використання: $0 app.nx --package com.example.app --label \"Назва\" [--scheme app] [--version N] [--version-name X.Y] [-o app.apk]" >&2
     exit 1
 fi
 [ -z "$scheme" ] && scheme="${pkg##*.}"
@@ -63,7 +64,7 @@ echo "3/6 .class -> classes.dex (d8)"
 
 echo "4/6 маніфест -> APK (aapt2)"
 sed -e "s|@PACKAGE@|$pkg|" -e "s|@LABEL@|$label|" -e "s|@SCHEME@|$scheme|" \
-    -e "s|@VERSION_CODE@|$version|" -e "s|@VERSION_NAME@|$version|" -e "s|@THEME@|$theme|" \
+    -e "s|@VERSION_CODE@|$version|" -e "s|@VERSION_NAME@|${vname:-$version}|" -e "s|@THEME@|$theme|" \
     "$HERE/AndroidManifest.xml" > "$work/AndroidManifest.xml"
 "$tools/aapt2" link -o "$work/base.apk" -I "$jar" --manifest "$work/AndroidManifest.xml" \
     --min-sdk-version 26 --target-sdk-version 36

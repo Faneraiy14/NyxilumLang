@@ -116,7 +116,7 @@ public final class NxBridge {
                     break;
                 }
                 case "NOTIFY":
-                    notifyInfo(ctx, arg(f, 1), arg(f, 2), arg(f, 3));
+                    notifyInfo(ctx, arg(f, 1), arg(f, 2), arg(f, 3), arg(f, 4));
                     break;
                 case "STORE_SET":
                     prefs().edit().putString(arg(f, 1), arg(f, 2)).apply();
@@ -232,12 +232,17 @@ public final class NxBridge {
 
     // Звичайне сповіщення (id - щоб оновлювати те саме); натискання
     // відкриває список будильників "Годинника"
-    static void notifyInfo(Context ctx, String id, String title, String text) {
+    // url - що відкрити натисканням (напр. сторінку нової версії); порожній -
+    // список будильників "Годинника"
+    static void notifyInfo(Context ctx, String id, String title, String text, String url) {
         android.app.NotificationManager nm = (android.app.NotificationManager) ctx.getSystemService(Context.NOTIFICATION_SERVICE);
         if (nm.getNotificationChannel("nx_info") == null)
             nm.createNotificationChannel(new android.app.NotificationChannel("nx_info", "Повідомлення", android.app.NotificationManager.IMPORTANCE_DEFAULT));
-        PendingIntent pi = PendingIntent.getActivity(ctx, 1,
-                new Intent(AlarmClock.ACTION_SHOW_ALARMS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK), PendingIntent.FLAG_IMMUTABLE);
+        Intent open = url == null || url.isEmpty()
+                ? new Intent(AlarmClock.ACTION_SHOW_ALARMS)
+                : new Intent(Intent.ACTION_VIEW, android.net.Uri.parse(url));
+        PendingIntent pi = PendingIntent.getActivity(ctx, ("info:" + id).hashCode(),
+                open.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK), PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
         android.app.Notification n = new android.app.Notification.Builder(ctx, "nx_info")
                 .setSmallIcon(android.R.drawable.ic_lock_idle_alarm)
                 .setContentTitle(title)

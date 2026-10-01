@@ -165,7 +165,9 @@ func phoneTzOffset() {
 
 // Сповіщення в шторці (працює й з фону); натискання відкриває список
 // будильників "Годинника". id - щоб наступне з тим самим id замінювало попереднє.
-func notify(id, title, text) { androidSend(["NOTIFY", id, title, text]) }
+func notify(id, title, text) { androidSend(["NOTIFY", id, title, text, ""]) }
+// Те саме, але натискання відкриває адресу (напр. скачування нової версії)
+func notifyUrl(id, title, text, url) { androidSend(["NOTIFY", id, title, text, url]) }
 
 // ------------------------------------------------------------ сховище
 
