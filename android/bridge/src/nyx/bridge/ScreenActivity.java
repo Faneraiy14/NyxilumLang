@@ -92,7 +92,8 @@ public final class ScreenActivity extends Activity implements NxBridge.Screen {
         // обробляє фон (лише коротке спливаюче повідомлення), а екран
         // закривається одразу, без анімації. Дозвіл на сповіщення спершу
         // треба попросити з видимого екрана - тоді йдемо звичайним шляхом.
-        if (isHeadless() && !event.equals("alarm")
+        boolean proDeeplink = "deeplink".equals(event) && arg != null && arg.startsWith("mayak://pro");
+        if (isHeadless() && !event.equals("alarm") && !proDeeplink
                 && checkSelfPermission("android.permission.POST_NOTIFICATIONS") == PackageManager.PERMISSION_GRANTED) {
             final android.content.Context app = getApplicationContext();
             final String ev = event;

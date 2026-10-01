@@ -24,6 +24,29 @@ public final class ShizukuDoor {
 
     private static volatile IAppFn service;
     private static ServiceConnection conn;
+    private static volatile boolean binderReady;
+    private static boolean listenerAdded;
+
+    // Shizuku надсилає binder асинхронно після старту процесу - чекаємо його
+    private static synchronized void ensureBinderListener() {
+        if (listenerAdded) return;
+        listenerAdded = true;
+        try {
+            Shizuku.addBinderReceivedListenerSticky(() -> binderReady = true);
+            Shizuku.addBinderDeadListener(() -> binderReady = false);
+        } catch (Throwable t) {
+            Log.w(TAG, "binder listener: " + t);
+        }
+    }
+
+    private static boolean waitBinder() {
+        ensureBinderListener();
+        for (int i = 0; i < 30 && !binderReady; i++) {
+            if (alive()) { binderReady = true; break; }
+            try { Thread.sleep(100); } catch (InterruptedException e) { return false; }
+        }
+        return binderReady || alive();
+    }
 
     static boolean installed(Context ctx) {
         try {
@@ -36,6 +59,7 @@ public final class ShizukuDoor {
 
     static boolean alive() {
         try {
+            ensureBinderListener();
             return Shizuku.pingBinder();
         } catch (Throwable t) {
             return false;
@@ -51,13 +75,14 @@ public final class ShizukuDoor {
     }
 
     static String state(Context ctx) {
-        if (!installed(ctx) || !alive()) return "none";
+        if (!installed(ctx)) return "none";
+        if (!waitBinder()) return "none";
         return granted() ? "ready" : "denied";
     }
 
     static void ask(Context ctx) {
         try {
-            if (alive() && !granted()) Shizuku.requestPermission(PERM_CODE);
+            if (waitBinder() && !granted()) Shizuku.requestPermission(PERM_CODE);
         } catch (Throwable t) {
             Log.w(TAG, "requestPermission: " + t);
         }
@@ -73,7 +98,7 @@ public final class ShizukuDoor {
     // Переконатись, що сервіс прив'язаний (чекає до 8 с)
     private static synchronized IAppFn ensure(Context ctx) {
         if (service != null) return service;
-        if (!granted()) return null;
+        if (!waitBinder() || !granted()) return null;
         final CountDownLatch latch = new CountDownLatch(1);
         conn = new ServiceConnection() {
             @Override public void onServiceConnected(ComponentName name, IBinder binder) {
