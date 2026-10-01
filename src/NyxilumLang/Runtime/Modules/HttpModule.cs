@@ -279,6 +279,17 @@ public static class HttpModule
             {
                 string key = kv.Key?.ToString() ?? "";
                 string value = kv.Value?.ToString() ?? "";
+                // свій Content-Type ЗАМІНЮЄ типовий application/json (раніше
+                // дописувався другим значенням - multipart і суворі сервери ламались)
+                if (string.Equals(key, "Content-Type", StringComparison.OrdinalIgnoreCase))
+                {
+                    if (request.Content != null)
+                    {
+                        request.Content.Headers.Remove("Content-Type");
+                        request.Content.Headers.TryAddWithoutValidation("Content-Type", value);
+                    }
+                    continue;
+                }
                 if (!request.Headers.TryAddWithoutValidation(key, value))
                     request.Content?.Headers.TryAddWithoutValidation(key, value);
             }

@@ -280,6 +280,92 @@ func tgAnswerCallback(token, callbackId, text) {
     return fromJson(mapGet(res, "body"))
 }
 
+// Кнопка "скопіювати": натискання кладе copyText (до 256 символів) у буфер
+// обміну, нічого не показуючи в чаті (Bot API 7.11+)
+func tgCopyButton(text, copyText) {
+    var c = newMap()
+    mapSet(c, "text", copyText)
+    var b = newMap()
+    mapSet(b, "text", text)
+    mapSet(b, "copy_text", c)
+    return b
+}
+
+// Екранування тексту для parse_mode HTML (&, <, >)
+func tgHtmlEscape(s) {
+    return replace(replace(replace(toString(s), "&", "&amp;"), "<", "&lt;"), ">", "&gt;")
+}
+
+// Повідомлення з HTML-розміткою: <b>, <i>, <code>, <tg-spoiler>... Увесь
+// "чужий" текст усередині - через tgHtmlEscape.
+func tgSendHtml(token, chatId, html, rows) {
+    var data = newMap()
+    mapSet(data, "chat_id", chatId)
+    mapSet(data, "text", html)
+    mapSet(data, "parse_mode", "HTML")
+    if !isNull(rows) {
+        mapSet(data, "reply_markup", tgKeyboard(rows))
+    }
+    var res = httpRequest("https://api.telegram.org/bot" + token + "/sendMessage", "POST", toJson(data))
+    return fromJson(mapGet(res, "body"))
+}
+
+func tgEditHtml(token, chatId, messageId, html, rows) {
+    var data = newMap()
+    mapSet(data, "chat_id", chatId)
+    mapSet(data, "message_id", messageId)
+    mapSet(data, "text", html)
+    mapSet(data, "parse_mode", "HTML")
+    if !isNull(rows) {
+        mapSet(data, "reply_markup", tgKeyboard(rows))
+    }
+    var res = httpRequest("https://api.telegram.org/bot" + token + "/editMessageText", "POST", toJson(data))
+    return fromJson(mapGet(res, "body"))
+}
+
+// Надіслати текстовий файл (напр. JSON) як документ - multipart/form-data.
+// content - рядок (UTF-8), fileName - як файл називатиметься в чаті.
+func tgSendDocument(token, chatId, fileName, content, caption) {
+    var boundary = "nxBoundary" + toString(randomInt(100000000, 999999999)) + toString(randomInt(100000000, 999999999))
+    var nl = "\r\n"
+    var body = "--" + boundary + nl + "Content-Disposition: form-data; name=\"chat_id\"" + nl + nl + toString(chatId) + nl
+    if !isNull(caption) {
+        body = body + "--" + boundary + nl + "Content-Disposition: form-data; name=\"caption\"" + nl + nl + caption + nl
+    }
+    body = body + "--" + boundary + nl + "Content-Disposition: form-data; name=\"document\"; filename=\"" + replace(fileName, "\"", "") + "\"" + nl
+    body = body + "Content-Type: application/octet-stream" + nl + nl + content + nl + "--" + boundary + "--" + nl
+    var headers = newMap()
+    mapSet(headers, "Content-Type", "multipart/form-data; boundary=" + boundary)
+    var res = httpRequest("https://api.telegram.org/bot" + token + "/sendDocument", "POST", body, headers)
+    return fromJson(mapGet(res, "body"))
+}
+
+// Документ (файл) з повідомлення: {file_id, file_name, file_size...} або null
+func tgMessageDocument(update) {
+    var message = tgAnyMessage(update)
+    if isNull(message) {
+        return null
+    }
+    return mapGet(message, "document")
+}
+
+// Скачати файл, надісланий боту, як текст (до 20 МБ - обмеження Bot API).
+// null - не вдалося.
+func tgDownloadText(token, fileId) {
+    var data = newMap()
+    mapSet(data, "file_id", fileId)
+    var res = fromJson(mapGet(httpRequest("https://api.telegram.org/bot" + token + "/getFile", "POST", toJson(data)), "body"))
+    if !mapGet(res, "ok") {
+        return null
+    }
+    var path = mapGet(mapGet(res, "result"), "file_path")
+    var file = httpRequest("https://api.telegram.org/file/bot" + token + "/" + path, "GET", "")
+    if mapGet(file, "status") != 200 {
+        return null
+    }
+    return mapGet(file, "body")
+}
+
 // callback_query з апдейту або null (апдейт - звичайне повідомлення)
 func tgCallback(update) {
     return mapGet(update, "callback_query")

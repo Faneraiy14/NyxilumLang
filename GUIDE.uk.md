@@ -487,7 +487,7 @@ closeCanvas(canvas)
 - `guiOnAction(button,fn)` - викликати NyxilumLang-функцію `fn` при кліку (звичайну функцію-значення, як у `sort(arr,cmp)` — без дужок, не рядок з іменем)
 - `guiShow(win)` - показати вікно (блокує, доки вікно не закриють)
 - `isKeyDown(key)`, `isMouseDown(canvas)`, `getMouseX/Y(canvas)` - ввід для вікна
-- `randomInt(min,max)`, `randomDouble(min,max)`, `secureRandomBytes(n)` (криптостійкі байти 0-255 для ключів/солей/nonce), `now()`, `today()`, `timestamp()` - утиліти
+- `randomInt(min,max)`, `randomDouble(min,max)`, `secureRandomBytes(n)` (криптостійкі байти 0-255 для ключів/солей/nonce), `pbkdf2Native(пароль, сіль, ітерації, довжина)` (PBKDF2-HMAC-SHA256 ОС, масиви байтів), `now()`, `today()`, `timestamp()` - утиліти
 - `formatDate(timestamp, format?)` - Unix-timestamp (секунди) у рядок довільного формату (.NET custom date format, напр. `"dd.MM.yyyy HH:mm"`); без `format` - той самий вигляд, що й `now()`; `parseDate(str, format)` - обернена операція, рядок за форматом назад у Unix-timestamp; кидає помилку, якщо рядок не відповідає формату
 - `osPlatform()`, `osArchitecture()`, `osMemory()`, `osCpuCount()`, `osEnv(name)`, `osCwd()` - інформація про систему
 - `osProcessList()` - масив усіх процесів ОС (не лише дочірніх, як `procRun`/`procStart`), кожен - `{pid, name, memMB, cpuPercent}`; `cpuPercent` рахується як `top`/`htop` - двома замірами `TotalProcessorTime` з паузою ~200мс між ними, тож виклик не миттєвий. Процеси, що завершились між замірами, просто пропускаються, не валять виклик

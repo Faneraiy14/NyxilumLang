@@ -186,6 +186,26 @@ public class VirtualMachine
             foreach (var b in buf) list.Add((double)b);
             return list;
         };
+        // "Двері" до PBKDF2-HMAC-SHA256 ОС: те саме, що pbkdf2Sha256 з lib/crypto.nx,
+        // але в тисячі разів швидше - для майстер-паролів (сотні тисяч ітерацій).
+        // pbkdf2Native(байти пароля, байти солі, ітерації, довжина) -> байти
+        _nativeFunctions["pbkdf2Native"] = args => {
+            static byte[] ToBytes(object? v, string what) {
+                if (v is not List<object> l) throw new Exception("pbkdf2Native: " + what + " має бути масивом байтів");
+                var r = new byte[l.Count];
+                for (int i = 0; i < l.Count; i++) r[i] = (byte)Convert.ToInt32(l[i]);
+                return r;
+            }
+            int iterations = TruncToInt(args[2]);
+            int dkLen = TruncToInt(args[3]);
+            if (iterations < 1 || iterations > 10000000) throw new Exception("pbkdf2Native: ітерацій має бути від 1 до 10000000");
+            if (dkLen < 1 || dkLen > 1024) throw new Exception("pbkdf2Native: довжина має бути від 1 до 1024");
+            var dk = System.Security.Cryptography.Rfc2898DeriveBytes.Pbkdf2(ToBytes(args[0], "пароль"), ToBytes(args[1], "сіль"),
+                iterations, System.Security.Cryptography.HashAlgorithmName.SHA256, dkLen);
+            var outList = new List<object>(dkLen);
+            foreach (var b in dk) outList.Add((double)b);
+            return outList;
+        };
 
         // Conversions & Types
         _nativeFunctions["toString"] = args => FormatValue(args[0]);

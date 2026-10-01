@@ -31,7 +31,7 @@ const BUILTINS = [
     'substring', 'replace', 'toUpper', 'toLower', 'contains', 'startsWith', 'endsWith', 'split', 'join',
     'trim', 'repeat', 'indexOf', 'reverse', 'utf8ByteCount',
     'append', 'pop', 'removeAt', 'insert', 'clear', 'slice', 'unique',
-    'randomInt', 'randomDouble', 'secureRandomBytes',
+    'randomInt', 'randomDouble', 'secureRandomBytes', 'pbkdf2Native',
     'now', 'today', 'timestamp', 'formatDate', 'parseDate', 'sleep',
     'typeOf', 'isNumber', 'isString', 'isArray', 'isBool', 'isNull',
     'charCode', 'fromCharCode',
