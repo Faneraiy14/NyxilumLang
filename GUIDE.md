@@ -508,7 +508,7 @@ closeCanvas(canvas)
 - `guiOnAction(button,fn)` - invokes the NyxilumLang function `fn` on click (a plain function value, like in `sort(arr,cmp)` — no parentheses, not a name string)
 - `guiShow(win)` - shows the window (blocks until it's closed)
 - `isKeyDown(key)`, `isMouseDown(canvas)`, `getMouseX/Y(canvas)` - input for a window
-- `randomInt(min,max)`, `randomDouble(min,max)`, `now()`, `today()`, `timestamp()` - utilities
+- `randomInt(min,max)`, `randomDouble(min,max)`, `secureRandomBytes(n)` (cryptographically secure bytes 0-255 for keys/salts/nonces), `now()`, `today()`, `timestamp()` - utilities
 - `formatDate(timestamp, format?)` - converts a Unix timestamp (seconds) into a string in any format (.NET custom date format, e.g. `"dd.MM.yyyy HH:mm"`); without `format` - the same look as `now()`; `parseDate(str, format)` - the reverse operation, a formatted string back into a Unix timestamp; throws an error if the string doesn't match the format
 - `osPlatform()`, `osArchitecture()`, `osMemory()`, `osCpuCount()`, `osEnv(name)`, `osCwd()` - system information
 - `osProcessList()` - array of every OS process (not just child ones like `procRun`/`procStart`), each `{pid, name, memMB, cpuPercent}`; `cpuPercent` is computed the way `top`/`htop` do it - two `TotalProcessorTime` samples with a ~200ms pause between them, so the call isn't instant. Processes that exited between the two samples are simply skipped, they don't fail the call

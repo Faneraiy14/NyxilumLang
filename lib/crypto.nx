@@ -1,5 +1,5 @@
 // lib/crypto.nx — хеші й похідні ключів на ЧИСТІЙ NyxilumLang (жодного
-// нативного коду): SHA-1, SHA-256, MD5, HMAC-SHA256, PBKDF2-HMAC-SHA256.
+// нативного коду): SHA-1, SHA-256, MD5, HMAC-SHA256, PBKDF2-HMAC-SHA256, ChaCha20.
 // Потрібні драйверам БД для авторизації: MySQL mysql_native_password (SHA-1)
 // і caching_sha2_password (SHA-256), Postgres MD5 і SCRAM-SHA-256 (HMAC,
 // PBKDF2). Байти - масив чисел 0..255 (див. lib/bytes.nx).
@@ -396,4 +396,140 @@ func randomBytes(n) {
         i = i + 1
     }
     return out
+}
+
+// ================================ ChaCha20 (RFC 8439) + шифрування з перевіркою
+//
+// cryptoSeal/cryptoOpen - шифрування з автентифікацією (encrypt-then-MAC):
+//   nonce (12 Б, secureRandomBytes) ‖ ChaCha20(encKey, nonce, лічильник 1) ‖
+//   HMAC-SHA256(macKey, nonce ‖ шифр) (32 Б).
+// Змінений хоч один байт або чужий ключ -> cryptoOpen повертає null.
+// Ключі - по 32 байти (напр. дві половини pbkdf2Sha256(..., 64)).
+// ⚠️ secureRandomBytes є лише у VM (у нативних збірках - ні).
+
+var CHACHA_CONST = mapArr([1634760805, 857760878, 2036477234, 1797285236], w32)
+
+func __chachaQr(s, a, b, c, d) {
+    s[a] = w32(s[a] + s[b])
+    s[d] = rotl(s[d] ^ s[a], 16)
+    s[c] = w32(s[c] + s[d])
+    s[b] = rotl(s[b] ^ s[c], 12)
+    s[a] = w32(s[a] + s[b])
+    s[d] = rotl(s[d] ^ s[a], 8)
+    s[c] = w32(s[c] + s[d])
+    s[b] = rotl(s[b] ^ s[c], 7)
+}
+
+// Один блок ключового потоку (64 байти)
+func chacha20Block(keyWords, counter, nonceWords) {
+    var init = [CHACHA_CONST[0], CHACHA_CONST[1], CHACHA_CONST[2], CHACHA_CONST[3]]
+    var i = 0
+    while i < 8 {
+        append(init, keyWords[i])
+        i = i + 1
+    }
+    append(init, w32(counter))
+    append(init, nonceWords[0])
+    append(init, nonceWords[1])
+    append(init, nonceWords[2])
+    var s = slice(init, 0, 16)
+    var r = 0
+    while r < 10 {
+        __chachaQr(s, 0, 4, 8, 12)
+        __chachaQr(s, 1, 5, 9, 13)
+        __chachaQr(s, 2, 6, 10, 14)
+        __chachaQr(s, 3, 7, 11, 15)
+        __chachaQr(s, 0, 5, 10, 15)
+        __chachaQr(s, 1, 6, 11, 12)
+        __chachaQr(s, 2, 7, 8, 13)
+        __chachaQr(s, 3, 4, 9, 14)
+        r = r + 1
+    }
+    i = 0
+    while i < 16 {
+        s[i] = w32(s[i] + init[i])
+        i = i + 1
+    }
+    return wordsToBytesLe(s)
+}
+
+// Зашифрувати/розшифрувати (те саме: XOR з ключовим потоком).
+// key - 32 Б, nonce - 12 Б, counter - номер першого блоку (зазвичай 1)
+func chacha20(key, nonce, counter, data) {
+    var kw = []
+    var i = 0
+    while i < 8 {
+        append(kw, wordLe(key, i * 4))
+        i = i + 1
+    }
+    var nw = [wordLe(nonce, 0), wordLe(nonce, 4), wordLe(nonce, 8)]
+    var out = []
+    var block = 0
+    while block * 64 < len(data) {
+        var ks = chacha20Block(kw, counter + block, nw)
+        var start = block * 64
+        var j = 0
+        while j < 64 && start + j < len(data) {
+            append(out, data[start + j] ^ ks[j])
+            j = j + 1
+        }
+        block = block + 1
+    }
+    return out
+}
+
+// Порівняння без раннього виходу (час не залежить від того, де відмінність)
+func bytesEqualConst(a, b) {
+    if len(a) != len(b) {
+        return false
+    }
+    var diff = 0
+    var i = 0
+    while i < len(a) {
+        diff = diff | (a[i] ^ b[i])
+        i = i + 1
+    }
+    return diff == 0
+}
+
+// nonce - лише для тестів з еталонними векторами; у житті - cryptoSeal
+func cryptoSealWithNonce(encKey, macKey, nonce, plain) {
+    var body = bytesConcat(nonce, chacha20(encKey, nonce, 1, plain))
+    return bytesConcat(body, hmacSha256(macKey, body))
+}
+
+func cryptoSeal(encKey, macKey, plain) {
+    return cryptoSealWithNonce(encKey, macKey, secureRandomBytes(12), plain)
+}
+
+// Байти -> відкритий текст-байти, або null (підробка / чужий ключ / сміття)
+func cryptoOpen(encKey, macKey, sealed) {
+    if isNull(sealed) || len(sealed) < 44 {
+        return null
+    }
+    var body = slice(sealed, 0, len(sealed) - 32)
+    var tag = slice(sealed, len(sealed) - 32, len(sealed))
+    if !bytesEqualConst(hmacSha256(macKey, body), tag) {
+        return null
+    }
+    return chacha20(encKey, slice(body, 0, 12), 1, slice(body, 12, len(body)))
+}
+
+// Те саме для рядків: текст -> base64, base64 -> текст або null
+func cryptoSealText(encKey, macKey, text) {
+    return base64Encode(cryptoSeal(encKey, macKey, utf8Encode(text)))
+}
+
+func cryptoOpenText(encKey, macKey, b64) {
+    var raw = null
+    try {
+        raw = base64Decode(b64)
+    } catch (e) {
+        return null
+    }
+    var plain = cryptoOpen(encKey, macKey, raw)
+    if isNull(plain) {
+        return null
+    }
+    return utf8Decode(plain)
 }

@@ -1,0 +1,59 @@
+// ChaCha20 (RFC 8439) + cryptoSeal/cryptoOpen + secureRandomBytes.
+// Еталони: вектор RFC 8439 §2.4.2 і випадковий 200-байтний (4 блоки,
+// лічильник 7), обидва згенеровані openssl enc -chacha20.
+import "../lib/testing.nx" { assertEqual, assertTrue }
+import "../lib/bytes.nx"
+import "../lib/crypto.nx"
+
+func main() {
+    var key = []
+    var i = 0
+    while i < 32 {
+        append(key, i)
+        i = i + 1
+    }
+    var plain = asciiBytes("Ladies and Gentlemen of the class of '99: If I could offer you only one tip for the future, sunscreen would be it.")
+    var nonce = hexToBytes("000000000000004a00000000")
+    assertEqual(bytesToHex(chacha20(key, nonce, 1, plain)), "6e2e359a2568f98041ba0728dd0d6981e97e7aec1d4360c20a27afccfd9fae0bf91b65c5524733ab8f593dabcd62b3571639d624e65152ab8f530c359f0861d807ca0dbf500d6a6156a38e088a22b65e52bc514d16ccf806818ce91ab77937365af90bbf74a35be6b40b8eedf2785e42874d", "chacha20 RFC 8439 2.4.2")
+    assertEqual(bytesToHex(chacha20(key, nonce, 1, chacha20(key, nonce, 1, plain))), bytesToHex(plain), "chacha20 туди-назад")
+    var k2 = hexToBytes("fbd2dc69c3f062cf6aeb9bb8f3f2e786187a3f50a20394b05474ad7499c7a880")
+    var n2 = hexToBytes("54e86441a8670ae3b827b3f6")
+    var d2 = hexToBytes("0308e9f087c56fec3eeb814c45dd5acbb89a38a25af06e74e7a64293fb11764054a390b6b64e7a09c9e11764d9159bb7c676ab6b8fb4dd937c9fabe8243a3ea5a6b4dd9b849f1f1501b51d8d92ff066ade66b403e56bcd6b203907ec68762e90ecc1b9a6b76e178bcc575ef2e8404debe4545481be1f83229f5fb838edbb2f1281f46ae52ea160a54bb9717247733a25ad2d3b3fae8155bd51374435904172544f753cc1b48f2240e6fdc5b12022018fc073df80f0b5b9520753dc1b96067c049cd96d56e8ceaa7f")
+    assertEqual(bytesToHex(chacha20(k2, n2, 7, d2)), "19cee042edec9bb6665685bbc4ed2c25ff0f5d41e4c3aa68b5d17e8cf2bf07c8b11de9ef88fbd4a89ba91a7277c7d550d1e789931a51805e96b3e1cc82503fb7114ecf10856275e8e2f7c2d52f359837201fb77cfd8e11babe65d7093371e7ad83049c8f44fff008f929cca2e85574be57dac4d4559ff602120900295c77578c2bda00ba973b8a3779a2a6a6e320e05abfce2f9778cf59a022f0959d260e219e0717292696cc64e48a40c2849cccfc5708fa47f4d83097f6de7cf6b2f948ea06c72f31559e772acb", "chacha20 200 Б, лічильник 7 (openssl)")
+    assertEqual(len(chacha20(k2, n2, 1, [])), 0, "порожні дані")
+
+    // secureRandomBytes
+    var r1 = secureRandomBytes(32)
+    var r2 = secureRandomBytes(32)
+    assertEqual(len(r1), 32, "secureRandomBytes довжина")
+    assertTrue(bytesToHex(r1) != bytesToHex(r2), "secureRandomBytes різні")
+    var inRange = true
+    i = 0
+    while i < 32 {
+        if r1[i] < 0 || r1[i] > 255 || r1[i] != floor(r1[i]) {
+            inRange = false
+        }
+        i = i + 1
+    }
+    assertTrue(inRange, "secureRandomBytes байти 0..255")
+
+    // шифрування з перевіркою
+    var enc = secureRandomBytes(32)
+    var mac = secureRandomBytes(32)
+    var sealed = cryptoSeal(enc, mac, utf8Encode("пароль від FTP: s3cr3t ✅"))
+    assertEqual(len(sealed), 12 + len(utf8Encode("пароль від FTP: s3cr3t ✅")) + 32, "розмір: nonce+шифр+тег")
+    assertEqual(utf8Decode(cryptoOpen(enc, mac, sealed)), "пароль від FTP: s3cr3t ✅", "seal -> open")
+    var bad = slice(sealed, 0, len(sealed))
+    bad[15] = bad[15] ^ 1
+    assertTrue(isNull(cryptoOpen(enc, mac, bad)), "змінений байт шифру -> null")
+    var badTag = slice(sealed, 0, len(sealed))
+    badTag[len(badTag) - 1] = badTag[len(badTag) - 1] ^ 128
+    assertTrue(isNull(cryptoOpen(enc, mac, badTag)), "змінений тег -> null")
+    assertTrue(isNull(cryptoOpen(enc, secureRandomBytes(32), sealed)), "чужий ключ MAC -> null")
+    assertTrue(isNull(cryptoOpen(enc, mac, [1, 2, 3])), "сміття -> null")
+    assertTrue(bytesToHex(cryptoSeal(enc, mac, asciiBytes("x"))) != bytesToHex(cryptoSeal(enc, mac, asciiBytes("x"))), "той самий текст - різний шифр (новий nonce)")
+    var t = cryptoSealText(enc, mac, "логін: sviat")
+    assertEqual(cryptoOpenText(enc, mac, t), "логін: sviat", "текст туди-назад")
+    assertTrue(isNull(cryptoOpenText(enc, mac, "не base64 !!!")), "не base64 -> null")
+    print("OK ChaCha20 + seal/open + secureRandomBytes")
+}

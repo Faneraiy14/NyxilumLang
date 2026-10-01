@@ -176,6 +176,16 @@ public class VirtualMachine
         // не гарантує коректність свого внутрішнього стану під конкуренцією.
         _nativeFunctions["randomInt"] = args => (double)Random.Shared.Next(TruncToInt(args[0]), TruncToInt(args[1]) + 1);
         _nativeFunctions["randomDouble"] = args => PopNumVal(args[0]) + (Random.Shared.NextDouble() * (PopNumVal(args[1]) - PopNumVal(args[0])));
+        // "Двері" до криптостійкого генератора ОС (ключі, солі, nonce, паролі).
+        // randomInt/randomDouble для цього НЕ годяться - їх можна передбачити.
+        _nativeFunctions["secureRandomBytes"] = args => {
+            int n = TruncToInt(args[0]);
+            if (n < 0 || n > 1048576) throw new Exception("secureRandomBytes: n має бути від 0 до 1048576");
+            var buf = System.Security.Cryptography.RandomNumberGenerator.GetBytes(n);
+            var list = new List<object>(n);
+            foreach (var b in buf) list.Add((double)b);
+            return list;
+        };
 
         // Conversions & Types
         _nativeFunctions["toString"] = args => FormatValue(args[0]);
