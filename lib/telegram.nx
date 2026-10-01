@@ -57,6 +57,15 @@ func tgMessageText(update) {
     return mapGet(message, "text")
 }
 
+// id звичайного повідомлення (щоб, напр., видалити його) або null
+func tgMessageId(update) {
+    var message = mapGet(update, "message")
+    if isNull(message) {
+        return null
+    }
+    return mapGet(message, "message_id")
+}
+
 // Повідомлення апдейту: нове або відредаговане (трансляція геопозиції
 // приходить саме як edited_message) - або null
 func tgAnyMessage(update) {
