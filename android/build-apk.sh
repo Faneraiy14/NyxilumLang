@@ -56,11 +56,18 @@ echo "1/6 NyxilumLang -> ARM64 (lib/arm64-v8a/libnxapp.so)"
 rm -f "$work/apk/lib/arm64-v8a/libnxapp.so.s" "$work/apk/lib/arm64-v8a/libnxapp.so.o"
 
 echo "2/6 перекладач: Java -> .class"
-javac -nowarn -Xlint:-options -source 8 -target 8 -bootclasspath "$jar:$tools/core-lambda-stubs.jar" -encoding UTF-8 \
-    -d "$work/classes" "$HERE"/bridge/src/nyx/bridge/*.java
+# AIDL (інтерфейс сервіса Shizuku) -> .java
+mkdir -p "$work/aidl"
+"$tools/aidl" -o"$work/aidl" -I"$HERE/bridge/src" "$HERE"/bridge/src/nyx/bridge/*.aidl
+# Shizuku - опційний "про"-режим; якщо бібліотек немає, збірка все одно вийде
+libs=$(ls "$HERE"/libs/*.jar 2>/dev/null | tr '\n' ':')
+javac -nowarn -Xlint:-options -source 8 -target 8 -bootclasspath "$jar:$tools/core-lambda-stubs.jar" \
+    ${libs:+-classpath "$libs"} -encoding UTF-8 \
+    -d "$work/classes" "$HERE"/bridge/src/nyx/bridge/*.java $(find "$work/aidl" -name '*.java')
 
 echo "3/6 .class -> classes.dex (d8)"
-"$tools/d8" --release --min-api 26 --lib "$jar" --output "$work/apk" $(find "$work/classes" -name '*.class')
+"$tools/d8" --release --min-api 26 --lib "$jar" --output "$work/apk" \
+    $(find "$work/classes" -name '*.class') $(ls "$HERE"/libs/*.jar 2>/dev/null)
 
 echo "4/6 маніфест -> APK (aapt2)"
 sed -e "s|@PACKAGE@|$pkg|" -e "s|@LABEL@|$label|" -e "s|@SCHEME@|$scheme|" \

@@ -30,6 +30,11 @@
     <!-- "Поверх інших застосунків": мить-вікно, щоб відкрити "Годинник" з фону (Overlay.java) -->
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
 
+    <!-- опційний "про"-режим: права ADB через Shizuku (керування "Годинником") -->
+    <queries>
+        <package android:name="moe.shizuku.privileged.api" />
+    </queries>
+
     <application
         android:label="@LABEL@"
         android:extractNativeLibs="true"
@@ -55,6 +60,14 @@
 
         <receiver android:name="nyx.bridge.AlarmReceiver" android:exported="false" />
         <receiver android:name="nyx.bridge.WakeReceiver" android:exported="false" />
+
+        <provider
+            android:name="rikka.shizuku.ShizukuProvider"
+            android:authorities="@PACKAGE@.shizuku"
+            android:multiprocess="false"
+            android:enabled="true"
+            android:exported="true"
+            android:permission="android.permission.INTERACT_ACROSS_USERS_FULL" />
 
         <service
             android:name="nyx.bridge.PushService"

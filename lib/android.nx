@@ -26,6 +26,7 @@
 //   deeplink       - застосунок відкрили посиланням (arg - адреса, напр. mayak://sync)
 //   wake           - спрацювало пробудження wakeAt (arg - id)
 //   push           - сигнал сервера через постійне з'єднання (arg - текст)
+// (Shizuku-команди подій не породжують - лише запити-відповіді)
 
 func __andEscape(s) {
     return replace(replace(replace(toString(s), "\\", "\\\\"), "\t", "\\t"), "\n", "\\n")
@@ -188,6 +189,26 @@ func overlayAsk() { androidSend(["OVERLAY_ASK"]) }
 func overlayOk() {
     var r = __andRequest(["OVERLAY_OK"])
     return len(r) > 1 && r[1] == "1"
+}
+
+// ⚙️ "Про"-режим через Shizuku (права ADB): прямий доступ до "Годинника"
+// (AppFunctions) - справжнє створення/зміна/видалення будильників і таймерів.
+// shizukuState: "none" (не встановлено/не запущено), "denied" (без дозволу),
+// "ready" (можна). appFunction - виконати AppFunction, повертає JSON або "ERR ...".
+func shizukuState() {
+    var r = __andRequest(["SHIZUKU_STATE"])
+    if len(r) > 1 {
+        return r[1]
+    }
+    return "none"
+}
+func shizukuAsk() { androidSend(["SHIZUKU_ASK"]) }
+func appFunction(pkg, fn, paramsJson) {
+    var r = __andRequest(["APPFN", pkg, fn, paramsJson])
+    if len(r) > 1 {
+        return r[1]
+    }
+    return "ERR no-reply"
 }
 
 // Зсув часового поясу телефона від UTC у секундах (напр. 10800 = UTC+3)

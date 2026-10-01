@@ -148,6 +148,17 @@ public final class NxBridge {
                 case "OVERLAY_OK":
                     send(new String[]{"REPLY", Overlay.allowed(ctx) ? "1" : "0"});
                     break;
+                case "SHIZUKU_STATE":
+                    send(new String[]{"REPLY", ShizukuDoor.state(ctx)});
+                    break;
+                case "SHIZUKU_ASK":
+                    ShizukuDoor.ask(ctx);
+                    break;
+                case "APPFN": {
+                    String r = ShizukuDoor.appFunction(ctx, arg(f, 1), arg(f, 2), arg(f, 3));
+                    send(new String[]{"REPLY", r});
+                    break;
+                }
                 case "CLOCK_SHOW":
                     startClock(ctx, new Intent(AlarmClock.ACTION_SHOW_ALARMS), "список будильників");
                     break;
