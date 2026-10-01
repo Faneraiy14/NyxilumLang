@@ -106,6 +106,23 @@ public final class NxBridge {
                 case "CLOCK_DISMISS":
                     clockDismiss(ctx, arg(f, 1));
                     break;
+                // те саме, але "Годинник" відкриває СИСТЕМА у вказаний час (секунди Unix) -
+                // з фону Android 14+ не дає застосунку відкривати чужі екрани напряму
+                case "CLOCK_ALARM_AT":
+                    clockAt(ctx, "a:" + arg(f, 1), (long) (Double.parseDouble(arg(f, 2)) * 1000),
+                            clockAlarmIntent((int) Double.parseDouble(arg(f, 3)), (int) Double.parseDouble(arg(f, 4)), arg(f, 5), ""));
+                    break;
+                case "CLOCK_TIMER_AT":
+                    clockAt(ctx, "t:" + arg(f, 1), (long) (Double.parseDouble(arg(f, 2)) * 1000),
+                            clockTimerIntent((int) Double.parseDouble(arg(f, 3)), arg(f, 4)));
+                    break;
+                case "CLOCK_DISMISS_TIMER_AT":
+                    clockAt(ctx, "d:" + arg(f, 1), (long) (Double.parseDouble(arg(f, 2)) * 1000),
+                            new Intent(AlarmClock.ACTION_DISMISS_TIMER));
+                    break;
+                case "CLOCK_AT_CANCEL":
+                    clockAtCancel(ctx, arg(f, 1));
+                    break;
                 case "CLOCK_DISMISS_TIMER":
                     // офіційне "зупинити таймер" (API 28); чи слухає - залежить від "Годинника"
                     startClock(ctx, new Intent(AlarmClock.ACTION_DISMISS_TIMER), "зупинка таймера");
@@ -124,6 +141,12 @@ public final class NxBridge {
                     break;
                 case "BATTERY_ASK":
                     askBattery(ctx);
+                    break;
+                case "OVERLAY_ASK":
+                    Overlay.ask(ctx);
+                    break;
+                case "OVERLAY_OK":
+                    send(new String[]{"REPLY", Overlay.allowed(ctx) ? "1" : "0"});
                     break;
                 case "CLOCK_SHOW":
                     startClock(ctx, new Intent(AlarmClock.ACTION_SHOW_ALARMS), "список будильників");
@@ -222,6 +245,10 @@ public final class NxBridge {
     // "Не турбувати", режим сну). days - "1,2,..." (1 = неділя, як Calendar)
     // або "" для одноразового.
     static void clockAlarm(Context ctx, int hour, int minute, String label, String days) {
+        startClock(ctx, clockAlarmIntent(hour, minute, label, days), "будильник");
+    }
+
+    static Intent clockAlarmIntent(int hour, int minute, String label, String days) {
         Intent i = new Intent(AlarmClock.ACTION_SET_ALARM)
                 .putExtra(AlarmClock.EXTRA_HOUR, hour)
                 .putExtra(AlarmClock.EXTRA_MINUTES, minute)
@@ -233,14 +260,54 @@ public final class NxBridge {
             for (String p : days.split(",")) d.add(Integer.parseInt(p.trim()));
             i.putExtra(AlarmClock.EXTRA_DAYS, d);
         }
-        startClock(ctx, i, "будильник");
+        return i;
     }
 
     static void clockTimer(Context ctx, int seconds, String label) {
-        startClock(ctx, new Intent(AlarmClock.ACTION_SET_TIMER)
+        startClock(ctx, clockTimerIntent(seconds, label), "таймер");
+    }
+
+    static Intent clockTimerIntent(int seconds, String label) {
+        return new Intent(AlarmClock.ACTION_SET_TIMER)
                 .putExtra(AlarmClock.EXTRA_LENGTH, seconds)
                 .putExtra(AlarmClock.EXTRA_MESSAGE, label)
-                .putExtra(AlarmClock.EXTRA_SKIP_UI, true), "таймер");
+                .putExtra(AlarmClock.EXTRA_SKIP_UI, true);
+    }
+
+    // "Конверт" для системи: о atMillis AlarmManager САМ відкриє intent (екран
+    // "Годинника"). Android 14+ блокує запуск чужих екранів із фону
+    // (BAL_BLOCK), але PendingIntent системного будильника (setAlarmClock) з
+    // дозволом творця - дозволено. key - щоб замінити/скасувати той самий конверт.
+    static void clockAt(Context ctx, String key, long atMillis, Intent intent) {
+        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+        android.os.Bundle opts = null;
+        if (android.os.Build.VERSION.SDK_INT >= 34) {
+            android.app.ActivityOptions o = android.app.ActivityOptions.makeBasic();
+            o.setPendingIntentCreatorBackgroundActivityStartMode(android.app.ActivityOptions.MODE_BACKGROUND_ACTIVITY_START_ALLOWED);
+            opts = o.toBundle();
+        }
+        PendingIntent pi = PendingIntent.getActivity(ctx, ("clock:" + key).hashCode(), intent,
+                PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT, opts);
+        PendingIntent show = PendingIntent.getActivity(ctx, 2,
+                new Intent(AlarmClock.ACTION_SHOW_ALARMS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK), PendingIntent.FLAG_IMMUTABLE);
+        AlarmManager am = (AlarmManager) ctx.getSystemService(Context.ALARM_SERVICE);
+        am.setAlarmClock(new AlarmManager.AlarmClockInfo(Math.max(atMillis, System.currentTimeMillis() + 1000), show), pi);
+        Log.i(TAG, "Годинник: конверт " + key + " на " + new java.util.Date(atMillis));
+    }
+
+    // id - як у CLOCK_ALARM_AT ("a:"), CLOCK_TIMER_AT ("t:"), CLOCK_DISMISS_TIMER_AT ("d:")
+    static void clockAtCancel(Context ctx, String key) {
+        String[] actions = {AlarmClock.ACTION_SET_ALARM, AlarmClock.ACTION_SET_TIMER, AlarmClock.ACTION_DISMISS_TIMER};
+        AlarmManager am = (AlarmManager) ctx.getSystemService(Context.ALARM_SERVICE);
+        for (String action : actions) {
+            PendingIntent pi = PendingIntent.getActivity(ctx, ("clock:" + key).hashCode(),
+                    new Intent(action).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+                    PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_NO_CREATE);
+            if (pi != null) {
+                am.cancel(pi);
+                pi.cancel();
+            }
+        }
     }
 
     // Вимкнути будильник "Годинника" за назвою (підтримують не всі годинники)
@@ -265,6 +332,13 @@ public final class NxBridge {
     }
 
     private static void startClock(Context ctx, Intent i, String what) {
+        // Android 14+ блокує запуск чужих екранів із фону (BAL_BLOCK), але
+        // дозволяє застосунку з видимим вікном "поверх інших" - тож якщо людина
+        // дала цей дозвіл, запускаємо через мить-вікно (Overlay)
+        if (Overlay.allowed(ctx)) {
+            Overlay.startWithOverlay(ctx, i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK), what);
+            return;
+        }
         try {
             ctx.startActivity(i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
             Log.i(TAG, "Годинник: " + what + " - запит надіслано");

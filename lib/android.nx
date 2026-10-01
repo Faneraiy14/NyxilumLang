@@ -161,6 +161,15 @@ func clockShowAlarms() { androidSend(["CLOCK_SHOW"]) }
 // Офіційне "зупинити таймер" (Android 9+); "Годинник" може й не послухати
 func clockDismissTimer() { androidSend(["CLOCK_DISMISS_TIMER"]) }
 
+// Те саме, але "Годинник" відкриє СИСТЕМА в час ts (секунди Unix) - так
+// працює і з фону (Android 14+ не дає фоновому застосунку відкривати чужі
+// екрани). ts у минулому - за ~1 с. id - щоб замінити/скасувати (clockAtCancel).
+func clockAlarmAt(id, ts, hour, minute, label) { androidSend(["CLOCK_ALARM_AT", id, ts, hour, minute, label]) }
+func clockTimerAt(id, ts, seconds, label) { androidSend(["CLOCK_TIMER_AT", id, ts, seconds, label]) }
+func clockDismissTimerAt(id, ts) { androidSend(["CLOCK_DISMISS_TIMER_AT", id, ts]) }
+// key - "a:<id>" (будильник), "t:<id>" (таймер), "d:<id>" (зупинка таймера)
+func clockAtCancel(key) { androidSend(["CLOCK_AT_CANCEL", key]) }
+
 // Точне пробудження програми в час ts (секунди Unix) - подія "wake" з arg = id.
 // Працює і в режимі сну; після перезавантаження - поставити знову на "boot".
 func wakeAt(id, ts) { androidSend(["WAKE_AT", id, ts]) }
@@ -173,6 +182,13 @@ func pushStart(url) { androidSend(["PUSH_START", url]) }
 func pushStop() { androidSend(["PUSH_STOP"]) }
 // Системне вікно "не оптимізувати батарею" (якщо ще не дозволено)
 func batteryAsk() { androidSend(["BATTERY_ASK"]) }
+// Дозвіл "Поверх інших застосунків": з ним команди "Годинника" працюють і з
+// фону (мить-вікно). overlayAsk - відкрити налаштування, overlayOk - чи дано.
+func overlayAsk() { androidSend(["OVERLAY_ASK"]) }
+func overlayOk() {
+    var r = __andRequest(["OVERLAY_OK"])
+    return len(r) > 1 && r[1] == "1"
+}
 
 // Зсув часового поясу телефона від UTC у секундах (напр. 10800 = UTC+3)
 func phoneTzOffset() {
