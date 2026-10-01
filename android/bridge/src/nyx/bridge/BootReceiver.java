@@ -16,6 +16,7 @@ public final class BootReceiver extends BroadcastReceiver {
             try {
                 NxBridge.runOnce(app, "boot", "");
                 ScreenActivity.scheduleSync(app);
+                PushService.startIfEnabled(app);
             } finally {
                 pending.finish();
             }

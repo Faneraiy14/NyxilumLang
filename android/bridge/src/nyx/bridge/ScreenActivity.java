@@ -63,6 +63,8 @@ public final class ScreenActivity extends Activity implements NxBridge.Screen {
         });
         setContentView(scroll);
         scheduleSync(this);
+        // ⚡ якщо програма ввімкнула постійне з'єднання - піднімаємо (з екрана Android дозволяє)
+        PushService.startIfEnabled(this);
         // Android 13+: без дозволу на сповіщення будильник не зможе показати
         // повноекранне вікно - просимо один раз
         if (checkSelfPermission("android.permission.POST_NOTIFICATIONS") != PackageManager.PERMISSION_GRANTED)

@@ -106,6 +106,25 @@ public final class NxBridge {
                 case "CLOCK_DISMISS":
                     clockDismiss(ctx, arg(f, 1));
                     break;
+                case "CLOCK_DISMISS_TIMER":
+                    // офіційне "зупинити таймер" (API 28); чи слухає - залежить від "Годинника"
+                    startClock(ctx, new Intent(AlarmClock.ACTION_DISMISS_TIMER), "зупинка таймера");
+                    break;
+                case "WAKE_AT":
+                    WakeReceiver.set(ctx, arg(f, 1), (long) (Double.parseDouble(arg(f, 2)) * 1000));
+                    break;
+                case "WAKE_CANCEL":
+                    WakeReceiver.cancel(ctx, arg(f, 1));
+                    break;
+                case "PUSH_START":
+                    PushService.start(ctx, arg(f, 1));
+                    break;
+                case "PUSH_STOP":
+                    PushService.stop(ctx);
+                    break;
+                case "BATTERY_ASK":
+                    askBattery(ctx);
+                    break;
                 case "CLOCK_SHOW":
                     startClock(ctx, new Intent(AlarmClock.ACTION_SHOW_ALARMS), "список будильників");
                     break;
@@ -149,7 +168,17 @@ public final class NxBridge {
 
     // Одна подія з окремим процесом: для фонових подій (будильник після
     // перезавантаження, синхронізація)
+    // Фонові події йдуть по одній (push, wake, sync можуть збігтися в часі,
+    // а програма читає/пише одне сховище)
+    private static final Object ONCE_LOCK = new Object();
+
     public static void runOnce(Context ctx, String... fields) {
+        synchronized (ONCE_LOCK) {
+            runOnceLocked(ctx, fields);
+        }
+    }
+
+    private static void runOnceLocked(Context ctx, String... fields) {
         NxBridge b = null;
         try {
             b = new NxBridge(ctx);
@@ -219,6 +248,20 @@ public final class NxBridge {
         startClock(ctx, new Intent(AlarmClock.ACTION_DISMISS_ALARM)
                 .putExtra(AlarmClock.EXTRA_ALARM_SEARCH_MODE, AlarmClock.ALARM_SEARCH_MODE_LABEL)
                 .putExtra(AlarmClock.EXTRA_MESSAGE, label), "вимкнення будильника");
+    }
+
+    // Системне вікно "не оптимізувати батарею" (раз; якщо вже дозволено - нічого).
+    // Без цього Android у сні обриває з'єднання ⚡ і не дає запускати сервіс з фону.
+    static void askBattery(Context ctx) {
+        android.os.PowerManager pm = (android.os.PowerManager) ctx.getSystemService(Context.POWER_SERVICE);
+        if (pm.isIgnoringBatteryOptimizations(ctx.getPackageName())) return;
+        try {
+            ctx.startActivity(new Intent(android.provider.Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS)
+                    .setData(android.net.Uri.parse("package:" + ctx.getPackageName()))
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
+        } catch (Exception e) {
+            Log.w(TAG, "вікно батареї не відкрилось: " + e);
+        }
     }
 
     private static void startClock(Context ctx, Intent i, String what) {

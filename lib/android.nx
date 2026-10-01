@@ -24,6 +24,8 @@
 //   boot           - телефон перезавантажився: будильники треба поставити знову
 //   sync           - фонова перевірка (раз на ~15 хв)
 //   deeplink       - застосунок відкрили посиланням (arg - адреса, напр. mayak://sync)
+//   wake           - спрацювало пробудження wakeAt (arg - id)
+//   push           - сигнал сервера через постійне з'єднання (arg - текст)
 
 func __andEscape(s) {
     return replace(replace(replace(toString(s), "\\", "\\\\"), "\t", "\\t"), "\n", "\\n")
@@ -156,6 +158,21 @@ func clockTimer(seconds, label) { androidSend(["CLOCK_TIMER", seconds, label]) }
 func clockDismiss(label) { androidSend(["CLOCK_DISMISS", label]) }
 // Відкрити список будильників "Годинника"
 func clockShowAlarms() { androidSend(["CLOCK_SHOW"]) }
+// Офіційне "зупинити таймер" (Android 9+); "Годинник" може й не послухати
+func clockDismissTimer() { androidSend(["CLOCK_DISMISS_TIMER"]) }
+
+// Точне пробудження програми в час ts (секунди Unix) - подія "wake" з arg = id.
+// Працює і в режимі сну; після перезавантаження - поставити знову на "boot".
+func wakeAt(id, ts) { androidSend(["WAKE_AT", id, ts]) }
+func wakeCancel(id) { androidSend(["WAKE_CANCEL", id]) }
+
+// ⚡ Постійне WebSocket-з'єднання (тихе сповіщення в шторці): кожне текстове
+// повідомлення сервера (крім hello/ping) - подія "push" з arg = текст;
+// сервер відповів "denied" - з'єднання зупиняється саме.
+func pushStart(url) { androidSend(["PUSH_START", url]) }
+func pushStop() { androidSend(["PUSH_STOP"]) }
+// Системне вікно "не оптимізувати батарею" (якщо ще не дозволено)
+func batteryAsk() { androidSend(["BATTERY_ASK"]) }
 
 // Зсув часового поясу телефона від UTC у секундах (напр. 10800 = UTC+3)
 func phoneTzOffset() {

@@ -23,6 +23,10 @@
          не дає фоновим застосункам відкривати вікна самим) -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
+    <!-- ⚡ постійне з'єднання (PushService) і виняток з оптимізації батареї -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
 
     <application
         android:label="@LABEL@"
@@ -47,6 +51,16 @@
         </activity>
 
         <receiver android:name="nyx.bridge.AlarmReceiver" android:exported="false" />
+        <receiver android:name="nyx.bridge.WakeReceiver" android:exported="false" />
+
+        <service
+            android:name="nyx.bridge.PushService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Постійне з'єднання з власним сервером для миттєвої доставки будильників" />
+        </service>
 
         <receiver android:name="nyx.bridge.BootReceiver" android:exported="true">
             <intent-filter>
