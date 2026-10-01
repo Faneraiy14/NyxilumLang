@@ -93,7 +93,12 @@ public final class ScreenActivity extends Activity implements NxBridge.Screen {
         // закривається одразу, без анімації. Дозвіл на сповіщення спершу
         // треба попросити з видимого екрана - тоді йдемо звичайним шляхом.
         boolean proDeeplink = "deeplink".equals(event) && arg != null && arg.startsWith("mayak://pro");
-        if (isHeadless() && !event.equals("alarm") && !proDeeplink
+        if (proDeeplink) {
+            startActivity(new Intent(this, ProActivity.class).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
+            finish();
+            return;
+        }
+        if (isHeadless() && !event.equals("alarm")
                 && checkSelfPermission("android.permission.POST_NOTIFICATIONS") == PackageManager.PERMISSION_GRANTED) {
             final android.content.Context app = getApplicationContext();
             final String ev = event;
@@ -194,6 +199,7 @@ public final class ScreenActivity extends Activity implements NxBridge.Screen {
     public void toast(final String text) {
         runOnUiThread(() -> Toast.makeText(this, text, Toast.LENGTH_LONG).show());
     }
+
 
     @Override
     public void finishScreen() {

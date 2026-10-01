@@ -2,6 +2,7 @@ package nyx.bridge;
 
 import android.content.ComponentName;
 import android.content.Context;
+import android.app.Activity;
 import android.content.ServiceConnection;
 import android.content.pm.PackageManager;
 import android.os.IBinder;
@@ -78,6 +79,37 @@ public final class ShizukuDoor {
         if (!installed(ctx)) return "none";
         if (!waitBinder()) return "none";
         return granted() ? "ready" : "denied";
+    }
+
+    // Запит дозволу з ВИДИМОЇ активності (UI-потік) - лише так Shizuku показує
+    // діалог згоди. after.run() викликається з результатом (true/false) на UI-потоці.
+    static void requestInteractive(final Activity a, final java.util.function.Consumer<Boolean> after) {
+        new Thread(() -> {
+            if (!waitBinder()) {
+                a.runOnUiThread(() -> after.accept(false));
+                return;
+            }
+            if (granted()) {
+                a.runOnUiThread(() -> after.accept(true));
+                return;
+            }
+            final Shizuku.OnRequestPermissionResultListener[] holder = new Shizuku.OnRequestPermissionResultListener[1];
+            holder[0] = (requestCode, grantResult) -> {
+                if (requestCode != PERM_CODE) return;
+                Shizuku.removeRequestPermissionResultListener(holder[0]);
+                boolean ok = grantResult == PackageManager.PERMISSION_GRANTED;
+                a.runOnUiThread(() -> after.accept(ok));
+            };
+            Shizuku.addRequestPermissionResultListener(holder[0]);
+            a.runOnUiThread(() -> {
+                try {
+                    Shizuku.requestPermission(PERM_CODE);
+                } catch (Throwable t) {
+                    Log.e(TAG, "requestPermission: " + t);
+                    after.accept(false);
+                }
+            });
+        }).start();
     }
 
     static void ask(Context ctx) {
