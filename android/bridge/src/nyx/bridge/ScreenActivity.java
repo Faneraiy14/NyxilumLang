@@ -88,6 +88,20 @@ public final class ScreenActivity extends Activity implements NxBridge.Screen {
             arg = data.toString();
         }
         if (event == null) event = "start";
+        // --headless: застосунок без інтерфейсу НЕ відкривається - подію
+        // обробляє фон (лише коротке спливаюче повідомлення), а екран
+        // закривається одразу, без анімації. Дозвіл на сповіщення спершу
+        // треба попросити з видимого екрана - тоді йдемо звичайним шляхом.
+        if (isHeadless() && !event.equals("alarm")
+                && checkSelfPermission("android.permission.POST_NOTIFICATIONS") == PackageManager.PERMISSION_GRANTED) {
+            final android.content.Context app = getApplicationContext();
+            final String ev = event;
+            final String a = arg == null ? "" : arg;
+            new Thread(() -> NxBridge.runOnceWith(app, new BackgroundScreen(app), ev, a)).start();
+            finishAndRemoveTask();
+            overridePendingTransition(0, 0);
+            return;
+        }
         if (event.equals("alarm")) {
             // поверх блокування, екран увімкнено й не гасне; далі звук веде
             // сама програма (alarmSound), тож повідомлення з мелодією прибираємо
@@ -97,6 +111,15 @@ public final class ScreenActivity extends Activity implements NxBridge.Screen {
             if (arg != null) AlarmReceiver.cancel(this, arg);
         }
         send(event, arg == null ? "" : arg);
+    }
+
+    private boolean isHeadless() {
+        try {
+            return (getPackageManager().getActivityInfo(getComponentName(), 0).flags
+                    & android.content.pm.ActivityInfo.FLAG_EXCLUDE_FROM_RECENTS) != 0;
+        } catch (Exception e) {
+            return false;
+        }
     }
 
     private void send(final String... fields) {
@@ -173,7 +196,8 @@ public final class ScreenActivity extends Activity implements NxBridge.Screen {
 
     @Override
     public void finishScreen() {
-        runOnUiThread(this::finish);
+        // і задачу з "Нещодавніх" - щоб змахування не вбивало фоновий зв'язок
+        runOnUiThread(this::finishAndRemoveTask);
     }
 
     @Override

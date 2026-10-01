@@ -38,6 +38,7 @@
         <activity
             android:name="nyx.bridge.ScreenActivity"
             android:exported="true"
+            android:excludeFromRecents="@EXCLUDE_RECENTS@"
             android:launchMode="singleTask">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
@@ -67,6 +68,8 @@
         <receiver android:name="nyx.bridge.BootReceiver" android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <!-- після оновлення застосунку - те саме, що після перезавантаження -->
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
             </intent-filter>
         </receiver>
 

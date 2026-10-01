@@ -196,16 +196,21 @@ public final class NxBridge {
     private static final Object ONCE_LOCK = new Object();
 
     public static void runOnce(Context ctx, String... fields) {
+        runOnceWith(ctx, null, fields);
+    }
+
+    // screen - що вміє "екран" фонової події (напр. лише спливаючі повідомлення)
+    public static void runOnceWith(Context ctx, Screen screen, String... fields) {
         synchronized (ONCE_LOCK) {
-            runOnceLocked(ctx, fields);
+            runOnceLocked(ctx, screen, fields);
         }
     }
 
-    private static void runOnceLocked(Context ctx, String... fields) {
+    private static void runOnceLocked(Context ctx, Screen screen, String... fields) {
         NxBridge b = null;
         try {
             b = new NxBridge(ctx);
-            b.event(null, fields);
+            b.event(screen, fields);
         } catch (Exception e) {
             Log.e(TAG, "фонова подія " + fields[0] + " впала", e);
         } finally {
