@@ -710,6 +710,9 @@ public class VirtualMachine
         NyxilumLang.Runtime.Canvas.SurfaceModule.Register(_nativeFunctions);
     }
 
+    // Готові однолітерні рядки для s[i] (ASCII + кирилиця) - без алокації.
+    private static readonly string[] CharStrings = Enumerable.Range(0, 0x500).Select(c => ((char)c).ToString()).ToArray();
+
     private static double PopNumVal(object val) => Convert.ToDouble(val);
 
     // Convert.ToInt32() округлює до найближчого ЦІЛОГО за банківським правилом
@@ -1141,6 +1144,17 @@ public class VirtualMachine
                     {
                         int index = TruncToInt(_stack.Pop());
                         var arrObj = _stack.Pop();
+                        // s[i] - символ рядка (рядок довжини 1; індекс - як у
+                        // len/substring, по UTF-16 одиницях). Для токенізаторів
+                        // (підсвітка коду в IDE), без substring(s, i, 1) на кожен символ.
+                        if (arrObj is string str)
+                        {
+                            if (index < 0 || index >= str.Length)
+                                throw new Exception($"Індекс {index} поза межами рядка (довжина {str.Length}).");
+                            char ch = str[index];
+                            _stack.Push(ch < CharStrings.Length ? CharStrings[ch] : ch.ToString());
+                            break;
+                        }
                         if (arrObj is not List<object> arr)
                             throw new Exception("Спроба звернутися до елемента масиву, але значення зліва - null або не масив.");
                         if (index < 0 || index >= arr.Count)

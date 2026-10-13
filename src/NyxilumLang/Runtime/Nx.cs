@@ -114,6 +114,8 @@ public class Nx
 
         if (File.Exists(command))
         {
+            NyxilumLang.Runtime.Modules.OsModule.ScriptArgs = args.Skip(1).ToList();
+            NyxilumLang.Runtime.Modules.OsModule.ScriptDir = Path.GetDirectoryName(Path.GetFullPath(command)) ?? Directory.GetCurrentDirectory();
             RunFile(command);
         }
         else

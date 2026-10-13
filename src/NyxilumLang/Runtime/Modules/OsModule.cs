@@ -5,6 +5,9 @@ namespace NyxilumLang.Runtime.Modules;
 
 public static class OsModule
 {
+    public static List<string> ScriptArgs = new();
+    public static string ScriptDir = Directory.GetCurrentDirectory();
+
     public static void Register(Dictionary<string, Func<object[], object?>> registry)
     {
         registry["osPlatform"] = args => RuntimeInformation.OSDescription;
@@ -17,6 +20,15 @@ public static class OsModule
             return Environment.GetEnvironmentVariable(args[0].ToString()!) ?? "";
         };
         registry["osCwd"] = args => Directory.GetCurrentDirectory();
+        // nxPath() - шлях до виконуваного файлу самого інтерпретатора (Nx/Nx.exe):
+        // IDE запускає програми користувача тим самим nx, яким запущена сама,
+        // незалежно від того, чи є nx у PATH.
+        registry["nxPath"] = args => Environment.ProcessPath ?? "nx";
+        // scriptArgs() - аргументи командного рядка ПІСЛЯ імені .nx-файлу
+        // (nx ide.nx ~/Проєкти -> ["~/Проєкти"]); scriptDir() - тека головного
+        // .nx-файлу (щоб програма знаходила свої ресурси незалежно від cwd).
+        registry["scriptArgs"] = args => ScriptArgs.Cast<object>().ToList();
+        registry["scriptDir"] = args => ScriptDir;
 
         // Список процесів усієї ОС (не лише дочірніх, як procRun/procStart) -
         // та сама категорія розкриття інформації про хост, що й запуск

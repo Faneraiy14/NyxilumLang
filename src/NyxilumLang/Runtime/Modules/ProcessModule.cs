@@ -19,6 +19,7 @@ public static class ProcessModule
         public readonly StringBuilder Out = new();
         public readonly StringBuilder Err = new();
         public readonly object Lock = new();
+        public StreamWriter? Input;
     }
 
     public static void Register(Dictionary<string, Func<object[], object?>> registry)
@@ -50,6 +51,19 @@ public static class ProcessModule
         // Те, що процес встиг вивести ВІД СТАРТУ (не лише "нове відтоді") —
         // .nx-скрипт сам вирішує, як часто перечитувати й показувати
         // (напр. в GUI-поле логів гри раз на секунду таймером).
+        // procWrite(h, текст) - у stdin процесу, запущеного з interactive: true
+        // (рядок для readLine - з "\n" у кінці). procCloseInput(h) - кінець вводу.
+        registry["procWrite"] = args => {
+            var h = (ProcHandle)args[0];
+            if (h.Input == null) throw new Exception("procWrite: процес запущено без опції interactive: true");
+            try { h.Input.Write(args[1]?.ToString() ?? ""); } catch (IOException) { }
+            return null;
+        };
+        registry["procCloseInput"] = args => {
+            var h = (ProcHandle)args[0];
+            try { h.Input?.Close(); } catch (IOException) { }
+            return null;
+        };
         registry["procOutput"] = args => { lock (((ProcHandle)args[0]).Lock) return ((ProcHandle)args[0]).Out.ToString(); };
         registry["procErrorOutput"] = args => { lock (((ProcHandle)args[0]).Lock) return ((ProcHandle)args[0]).Err.ToString(); };
     }
@@ -62,12 +76,19 @@ public static class ProcessModule
         var cmd = args[0]?.ToString() ?? throw new Exception("procStart: порожня команда");
         var nxArgs = args.Length > 1 && args[1] is List<object> list ? list : new List<object>();
         var options = args.Length > 2 ? args[2] as NxMap : null;
+        // interactive: true - діалогова програма (IDE запускає код учня):
+        // stdin відкритий для procWrite, вивід читається ПОСИМВОЛЬНО, тож
+        // підказка без переходу рядка ("Як тебе звати? ") видна одразу.
+        bool interactive = options != null && options.Entries.TryGetValue("interactive", out var inter) && inter is bool ib && ib;
 
         var psi = new ProcessStartInfo {
             FileName = cmd,
             UseShellExecute = false,
             RedirectStandardOutput = true,
             RedirectStandardError = true,
+            RedirectStandardInput = interactive,
+            StandardOutputEncoding = System.Text.Encoding.UTF8,
+            StandardErrorEncoding = System.Text.Encoding.UTF8,
             CreateNoWindow = true
         };
         foreach (var a in nxArgs) psi.ArgumentList.Add(a?.ToString() ?? "");
@@ -92,9 +113,35 @@ public static class ProcessModule
 
         try { proc.Start(); }
         catch (Exception ex) { throw new Exception($"Не вдалося запустити процес '{cmd}': {ex.Message}"); }
-        proc.BeginOutputReadLine();
-        proc.BeginErrorReadLine();
+        if (interactive)
+        {
+            var utf8 = new System.Text.UTF8Encoding(false);
+            handle.Input = new StreamWriter(proc.StandardInput.BaseStream, utf8) { AutoFlush = true };
+            PumpRaw(proc.StandardOutput, handle, handle.Out);
+            PumpRaw(proc.StandardError, handle, handle.Err);
+        }
+        else
+        {
+            proc.BeginOutputReadLine();
+            proc.BeginErrorReadLine();
+        }
         return handle;
+    }
+
+    private static void PumpRaw(StreamReader reader, ProcHandle handle, StringBuilder target)
+    {
+        var t = new Thread(() =>
+        {
+            var buf = new char[4096];
+            try
+            {
+                int n;
+                while ((n = reader.Read(buf, 0, buf.Length)) > 0)
+                    lock (handle.Lock) target.Append(buf, 0, n);
+            }
+            catch { }
+        }) { IsBackground = true };
+        t.Start();
     }
 
     // procRun — те саме, що procStart, але БЛОКУЄ до завершення й одразу

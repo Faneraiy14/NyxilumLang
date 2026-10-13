@@ -24,7 +24,7 @@ func draw() {
     surfaceText(s, "Остання клавіша: " + lastKey, 12, 30, 16, 0xa6adc8)
     surfaceCircle(s, w - 30, 32, brush + 2, colors[colorIdx])
     surfaceRoundRect(s, 12, h - 44, w - 24, 32, 8, 0x313244)
-    surfaceText(s, "Текст: " + typed + "▌", 22, h - 36, 16, 0xf9e2af)
+    surfaceText(s, "Текст: " + typed + "│", 22, h - 36, 16, 0xf9e2af)
     surfacePresent(s)
 }
 

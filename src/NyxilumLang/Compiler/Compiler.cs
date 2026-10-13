@@ -185,7 +185,7 @@ public class Compiler
         "newMap", "mapSet", "mapGet", "mapHas", "mapRemove", "mapKeys", "mapValues",
         "sort", "mapArr", "filter", "reduce", "toJson", "fromJson", "callWithArgs",
         "osPlatform", "osArchitecture", "osMemory", "osCpuCount", "osEnv", "osCwd",
-        "osProcessList", "osDiskFree", "notify",
+        "osProcessList", "osDiskFree", "notify", "nxPath", "scriptArgs", "scriptDir",
         "httpServer", "httpGet", "urlStatus", "httpPost", "httpRequest",
         "regexTest", "regexMatch", "regexFindAll", "regexReplace",
         "wsConnect", "wsSend", "wsReceive", "wsClose",
@@ -206,7 +206,7 @@ public class Compiler
         "gc_stats", "gc_collect", "gc_limit", "exit",
         "dbOpen", "dbClose", "dbSet", "dbGet", "dbHas", "dbDelete", "dbKeys", "dbCount", "dbCheckpoint",
         "procStart", "procRun", "procWait", "procIsRunning", "procKill", "procPid", "procExitCode",
-        "procOutput", "procErrorOutput",
+        "procOutput", "procErrorOutput", "procWrite", "procCloseInput",
         "zipExtract", "zipEntries", "zipExtractEntry", "zipCreate",
         "tcpConnect", "tcpSend", "tcpReceive", "tcpStartTls", "tcpClose"
     };
@@ -436,7 +436,19 @@ public class Compiler
         return false;
     }
 
+    // Помилки компіляції ("Змінна 'x' не оголошена" тощо) без цього не мали
+    // номера рядка - новачок не знав, де шукати. Найглибша інструкція
+    // додає "рядок N: ", зовнішні (тіло функції, блок) вже бачать префікс.
     private void CompileStatement(StatementNode stmt)
+    {
+        try { CompileStatementCore(stmt); }
+        catch (Exception ex) when (stmt.Line > 0 && !ex.Message.StartsWith("рядок "))
+        {
+            throw new Exception($"рядок {stmt.Line}: {ex.Message}", ex);
+        }
+    }
+
+    private void CompileStatementCore(StatementNode stmt)
     {
         // Дозволяє VirtualMachine показати номер рядка джерела при
         // Runtime Error — раніше помилки виконання (на відміну від

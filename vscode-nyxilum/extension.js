@@ -46,7 +46,7 @@ const BUILTINS = [
     'createCanvas', 'clearCanvas', 'drawRect', 'drawCircle', 'drawLine', 'drawText',
     'presentCanvas', 'canvasShouldClose', 'closeCanvas',
     'isKeyDown', 'isMouseDown', 'getMouseX', 'getMouseY', 'project3D',
-    'timeMs', 'rgb', 'rgba', 'surfaceOpen', 'surfaceClose', 'surfaceIsOpen', 'surfaceWidth', 'surfaceHeight', 'surfaceTitle',
+    'timeMs', 'nxPath', 'scriptArgs', 'scriptDir', 'rgb', 'rgba', 'surfaceOpen', 'surfaceClose', 'surfaceIsOpen', 'surfaceWidth', 'surfaceHeight', 'surfaceTitle',
     'surfacePresent', 'surfaceClear', 'surfaceRect', 'surfaceRectLine', 'surfaceRoundRect', 'surfaceCircle',
     'surfaceCircleLine', 'surfaceLine', 'surfacePolygon', 'surfaceText', 'textWidth', 'textHeight',
     'surfaceClip', 'surfaceUnclip', 'surfaceNextEvent', 'surfaceMouseX', 'surfaceMouseY', 'surfaceMouseDown',
@@ -58,7 +58,7 @@ const BUILTINS = [
     'gc_stats', 'gc_collect', 'gc_limit', 'exit',
     'dbOpen', 'dbClose', 'dbSet', 'dbGet', 'dbHas', 'dbDelete', 'dbKeys', 'dbCount', 'dbCheckpoint',
     'procStart', 'procRun', 'procWait', 'procIsRunning', 'procKill', 'procPid', 'procExitCode',
-    'procOutput', 'procErrorOutput',
+    'procOutput', 'procErrorOutput', 'procWrite', 'procCloseInput',
     'zipExtract', 'zipEntries', 'zipExtractEntry', 'zipCreate',
 ];
 
