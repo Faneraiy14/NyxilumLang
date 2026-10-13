@@ -24,6 +24,9 @@ SKIP="test_graphics2d.nx test_graphics3d.nx test_graphics_image_sound.nx calcula
 # Тести, де помилка — очікуваний результат.
 EXPECT_ERROR="test_selective_import_excludes.nx test_throw_uncaught.nx test_nested_scope_error.nx test_selective_import_missing.nx test_lib_testing_fail.nx test_parser_stack_limits.nx"
 
+# Полотно surface* без вікна - тести малювання не потребують дисплея.
+export NX_HEADLESS=1
+
 TIMEOUT_SEC=25
 # Повільні тести зі своїм тайм-аутом: test_postgres.nx - перше підключення
 # SCRAM-SHA-256 рахує PBKDF2 (4096 ітерацій) на чистій NyxilumLang: ~9 с у

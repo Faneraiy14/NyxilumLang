@@ -44,6 +44,7 @@ public sealed class X11Connection
     public List<X11Screen> Screens = new();
     public byte MinKeycode, MaxKeycode;
     public byte ImageByteOrder;
+    public Dictionary<byte, byte> PixmapFormats = new();
 
     private static int Pad(int n) => (4 - (n % 4)) % 4;
 
@@ -134,7 +135,9 @@ public sealed class X11Connection
         conn.Vendor = System.Text.Encoding.ASCII.GetString(Bytes(vendorLen));
         Skip(Pad(vendorLen));
 
-        for (int i = 0; i < numFormats; i++) { U8(); U8(); U8(); Skip(5); } // formats - не використовуються далі
+        // formats: depth -> bits-per-pixel (для PutImage полотна surface*:
+        // глибина 24 на практиці майже завжди 32 біти на піксель).
+        for (int i = 0; i < numFormats; i++) { byte depth = U8(); byte bpp = U8(); U8(); Skip(5); conn.PixmapFormats[depth] = bpp; }
 
         for (int i = 0; i < numScreens; i++)
         {

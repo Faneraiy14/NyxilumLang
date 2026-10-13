@@ -98,7 +98,12 @@ public sealed class X11Client
     }
 
     // Запит БЕЗ відповіді (CreateWindow, MapWindow, PolyFillRectangle, ...)
-    public void Send(byte[] buf) => Conn.Socket.Send(buf);
+    // _sendLock: полотно surface* шле PutImage з потоку VM, а X11Window -
+    // перестворення backbuffer з фонового потоку читання; без замка байти
+    // двох запитів могли б перемішатися в сокеті.
+    private readonly object _sendLock = new();
+
+    public void Send(byte[] buf) { lock (_sendLock) Conn.Socket.Send(buf); }
 
     // Запит З відповіддю (QueryTree, GetGeometry, GetImage, ...) - додає
     // очікувача в FIFO-чергу ПЕРЕД записом у сокет, щоб не було вікна
@@ -106,8 +111,11 @@ public sealed class X11Client
     public X11Reply Request(byte[] buf)
     {
         var waiter = new Waiter();
-        lock (_pendingLock) _pending.Enqueue(waiter);
-        Conn.Socket.Send(buf);
+        lock (_sendLock)
+        {
+            lock (_pendingLock) _pending.Enqueue(waiter);
+            Conn.Socket.Send(buf);
+        }
         waiter.Signal.Wait();
         if (waiter.Error != null) throw waiter.Error;
         return waiter.Result!;

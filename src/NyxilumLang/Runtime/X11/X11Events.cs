@@ -43,6 +43,7 @@ public sealed class X11Event
             case "KeyRelease":
             case "ButtonPress":
             case "ButtonRelease":
+            case "MotionNotify":
                 evt.Detail = head[1];
                 evt.Time = BinaryPrimitives.ReadUInt32LittleEndian(head.AsSpan(4));
                 evt.Root = BinaryPrimitives.ReadUInt32LittleEndian(head.AsSpan(8));

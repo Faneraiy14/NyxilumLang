@@ -1,0 +1,61 @@
+// Демо полотна surface*: малюй мишею, друкуй (і українською), колесо міняє
+// пензель, права кнопка - очистити, вікно можна розтягувати.
+//   nx programs/surface_demo.nx
+
+var s = null
+var strokes = []      // [x1, y1, x2, y2, товщина, колір]
+var typed = ""
+var lastKey = "(ще нічого)"
+var brush = 4
+var colors = [0xf38ba8, 0xa6e3a1, 0x89b4fa, 0xf9e2af, 0xcba6f7]
+var colorIdx = 0
+var prevX = -1
+var prevY = -1
+
+func draw() {
+    var w = surfaceWidth(s)
+    var h = surfaceHeight(s)
+    surfaceClear(s, 0x1e1e2e)
+    for st in strokes {
+        surfaceLine(s, st[0], st[1], st[2], st[3], st[5], st[4])
+    }
+    surfaceRect(s, 0, 0, w, 64, 0x181825)
+    surfaceText(s, "Малюй мишею. Колесо - товщина (${brush}). Пробіл - колір. Права кнопка - очистити.", 12, 8, 16, 0xcdd6f4)
+    surfaceText(s, "Остання клавіша: " + lastKey, 12, 30, 16, 0xa6adc8)
+    surfaceCircle(s, w - 30, 32, brush + 2, colors[colorIdx])
+    surfaceRoundRect(s, 12, h - 44, w - 24, 32, 8, 0x313244)
+    surfaceText(s, "Текст: " + typed + "▌", 22, h - 36, 16, 0xf9e2af)
+    surfacePresent(s)
+}
+
+func main() {
+    s = surfaceOpen("Демо полотна NyxilumLang", 900, 600)
+    draw()
+    while (surfaceIsOpen(s)) {
+        var e = surfaceNextEvent(s)
+        if (e == null) { continue }
+        if (e.type == "mousedown" && e.button == 1) {
+            prevX = e.x
+            prevY = e.y
+        }
+        if (e.type == "mousedown" && e.button == 3) { strokes = [] }
+        if (e.type == "mouseup") { prevX = -1 }
+        if (e.type == "mousemove" && prevX >= 0) {
+            append(strokes, [prevX, prevY, e.x, e.y, brush, colors[colorIdx]])
+            prevX = e.x
+            prevY = e.y
+        }
+        if (e.type == "wheel") { brush = clamp(brush - e.dy, 1, 30) }
+        if (e.type == "key") {
+            var mods = ""
+            if (e.ctrl) { mods = mods + "Ctrl+" }
+            if (e.alt) { mods = mods + "Alt+" }
+            if (e.shift) { mods = mods + "Shift+" }
+            lastKey = mods + e.key
+            if (e.key == "Backspace" && len(typed) > 0) { typed = substring(typed, 0, len(typed) - 1) }
+            if (e.key == "Space") { colorIdx = (colorIdx + 1) % len(colors) }
+        }
+        if (e.type == "text" && e.text != " ") { typed = typed + e.text }
+        draw()
+    }
+}

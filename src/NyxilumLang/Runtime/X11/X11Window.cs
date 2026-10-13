@@ -27,6 +27,8 @@ public sealed class X11Window
     public event Action<X11Event>? OnMouseDown;
     public event Action<X11Event>? OnMouseUp;
     public event Action<X11Event>? OnKey;
+    public event Action<X11Event>? OnKeyRelease;
+    public event Action<X11Event>? OnMotion;
     public event Action? OnClose;
     public event Action? OnDeleteRequest;
     public event Action<int, int>? OnResize;
@@ -42,7 +44,7 @@ public sealed class X11Window
         client.OnEvent += OnEvent;
     }
 
-    public static X11Window Create(int x = 100, int y = 100, int width = 400, int height = 300, uint background = 0x1a1a22, string? title = null, string? display = null)
+    public static X11Window Create(int x = 100, int y = 100, int width = 400, int height = 300, uint background = 0x1a1a22, string? title = null, string? display = null, uint extraEventMask = 0)
     {
         var client = X11Client.Connect(display);
         var screen = client.Conn.Screens[0];
@@ -61,6 +63,7 @@ public sealed class X11Window
                 [X11Protocol.CW.BackPixel] = background,
                 [X11Protocol.CW.EventMask] = X11Protocol.EventMask.Exposure | X11Protocol.EventMask.StructureNotify
                     | X11Protocol.EventMask.ButtonPress | X11Protocol.EventMask.ButtonRelease | X11Protocol.EventMask.KeyPress
+                    | extraEventMask
             }
         }));
         client.Send(X11Protocol.BuildCreateGC(gc, screen.Root, new() { [X11Protocol.GC.Foreground] = background, [X11Protocol.GC.GraphicsExposures] = 0 }));
@@ -90,6 +93,11 @@ public sealed class X11Window
     {
         var data = System.Text.Encoding.ASCII.GetBytes(title);
         Client.Send(X11Protocol.BuildChangeProperty(Wid, X11Protocol.Atom.WM_NAME, X11Protocol.Atom.STRING, 8, data));
+        // WM_NAME - лише Latin-1, кирилиця в ньому стала б "?". Сучасні
+        // менеджери вікон читають _NET_WM_NAME (UTF8_STRING) першим.
+        uint netName = X11Protocol.ParseInternAtomReply(Client.Request(X11Protocol.BuildInternAtom("_NET_WM_NAME")));
+        uint utf8 = X11Protocol.ParseInternAtomReply(Client.Request(X11Protocol.BuildInternAtom("UTF8_STRING")));
+        Client.Send(X11Protocol.BuildChangeProperty(Wid, netName, utf8, 8, System.Text.Encoding.UTF8.GetBytes(title)));
     }
 
     // Позначає, що виклик коду підписався на 'delete-request' - тоді сам
@@ -110,6 +118,8 @@ public sealed class X11Window
         else if (evt.Name == "ButtonPress") OnMouseDown?.Invoke(evt);
         else if (evt.Name == "ButtonRelease") OnMouseUp?.Invoke(evt);
         else if (evt.Name == "KeyPress") OnKey?.Invoke(evt);
+        else if (evt.Name == "KeyRelease") OnKeyRelease?.Invoke(evt);
+        else if (evt.Name == "MotionNotify") OnMotion?.Invoke(evt);
         else if (evt.Name == "DestroyNotify") OnClose?.Invoke();
         else if (evt.Name == "ClientMessage" && evt.MessageType == _wmProtocolsAtom && evt.Data.Length > 0 && evt.Data[0] == _wmDeleteAtom)
         {

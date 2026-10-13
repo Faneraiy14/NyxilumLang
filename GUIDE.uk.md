@@ -453,6 +453,47 @@ closeCanvas(canvas)
 ```
 3D робиться поверх того ж полотна: обертання точок через `sin`/`cos` (уже вбудовані), а `project3D(canvas, x, y, z, camDistance)` перетворює 3D-координату в 2D-точку екрана — і далі малюєш ребра через `drawLine`. Ввід: `isKeyDown("W")`, `isMouseDown(canvas)`, `getMouseX/Y(canvas)`, `canvasShouldClose(canvas)`.
 
+### Полотно surface* (Linux і Windows однаково)
+Вікно-полотно для програм з власним інтерфейсом (IDE, ігри, редактори). Пікселі
+малюються в пам'яті однаково на всіх платформах, `surfacePresent` показує кадр
+(на екран іде лише те, що змінилося). Колір - одне число `0xRRGGBB` або
+`rgb(r, g, b)`; `0xAARRGGBB` / `rgba(r, g, b, a)` - напівпрозорий.
+
+```nx
+func main() {
+    var s = surfaceOpen("Моя програма", 800, 600)
+    while (surfaceIsOpen(s)) {
+        surfaceClear(s, 0x1e1e2e)
+        surfaceRoundRect(s, 20, 20, 200, 50, 10, 0x89b4fa)
+        surfaceText(s, "Привіт, світе!", 36, 36, 20, 0x11111b, true)
+        surfacePresent(s)
+
+        var e = surfaceNextEvent(s)          // чекає наступну подію
+        if (e != null && e.type == "key" && e.key == "Escape") { surfaceClose(s) }
+    }
+}
+```
+
+- Малювання: `surfaceClear(s, колір)`, `surfaceRect(s, x, y, w, h, колір)`,
+  `surfaceRectLine(s, x, y, w, h, колір, товщина?)`, `surfaceRoundRect(s, x, y, w, h, радіус, колір)`,
+  `surfaceCircle(s, cx, cy, r, колір)`, `surfaceCircleLine(s, cx, cy, r, колір, товщина?)`,
+  `surfaceLine(s, x1, y1, x2, y2, колір, товщина?)`, `surfacePolygon(s, [x1, y1, x2, y2, ...], колір)`.
+- Текст (вшитий шрифт Terminus: латиниця, кирилиця, ґ/є/і/ї, стрілки): `surfaceText(s, текст, x, y, розмір, колір, жирний?)`
+  повертає ширину; розміри 12/14/16/20/24/28/32 (більші - збільшені). `textWidth(текст, розмір)`, `textHeight(розмір)`.
+  Шрифт моноширинний - зручно для редакторів коду.
+- Обрізання: `surfaceClip(s, x, y, w, h)` ... `surfaceUnclip(s)` (вкладаються).
+- Події: `surfaceNextEvent(s, чекатиМс?)` - структура або `null`. Поля: `type`
+  (`mousedown`/`mouseup`/`mousemove`/`wheel`/`key`/`keyup`/`text`/`resize`/`close`),
+  `x`, `y`, `button` (1 ліва, 2 середня, 3 права), `dy` (колесо), `key` (`"a"`, `"Enter"`,
+  `"Left"`, `"F5"`... - для літер латинська навіть в українській розкладці, тож Ctrl+C працює завжди),
+  `text` (набраний символ з урахуванням розкладки), `ctrl`/`shift`/`alt`, `width`/`height` (resize), `time`.
+- Опитування (для ігор): `surfaceMouseX/Y(s)`, `surfaceMouseDown(s)`, `surfaceKeyDown(s, "Left")`.
+- Інше: `surfaceWidth/Height(s)`, `surfaceTitle(s, назва)`, `surfaceGetPixel(s, x, y)`,
+  `surfaceSave(s, "кадр.png")`, `surfacePostEvent(s, подія)` (штучна подія - для тестів і демо),
+  `clipboardGet()` / `clipboardSet(текст)`, `timeMs()` (мілісекунди).
+- `NX_HEADLESS=1` - полотно без вікна (автотести, CI): усе працює, крім показу на екрані.
+- Демо: `nx programs/surface_demo.nx`.
+
 ### Вбудовані функції
 - `print(val)` - вивід у консоль
 - `readLine()`, `readInt()`, `readDouble()` - читання з консолі

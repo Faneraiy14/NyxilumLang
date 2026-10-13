@@ -705,6 +705,9 @@ public class VirtualMachine
         // лишається лише для Windows - GUI-вікна для лаунчера важливіші.
         NyxilumLang.Runtime.X11.X11Gui.Register(_nativeFunctions);
 #endif
+        // surface* - вікно-полотно для ОБОХ платформ (Runtime/Canvas/):
+        // однакові пікселі на Linux і Windows, події миші/клавіатури.
+        NyxilumLang.Runtime.Canvas.SurfaceModule.Register(_nativeFunctions);
     }
 
     private static double PopNumVal(object val) => Convert.ToDouble(val);

@@ -224,6 +224,28 @@ public static class X11Protocol
         return buf;
     }
 
+    // PutImage ZPixmap: data - рядки пікселів (уже у форматі сервера),
+    // вирівняні до 4 байтів. Розмір запиту обмежений MaxRequestLength -
+    // викликач ділить зображення на смуги.
+    public static byte[] BuildPutImage(uint drawable, uint gc, ushort width, ushort height, short dstX, short dstY, byte depth, ReadOnlySpan<byte> data)
+    {
+        int padded = data.Length + Pad(data.Length);
+        var buf = new byte[24 + padded];
+        buf[0] = 72; // opcode PutImage
+        buf[1] = 2;  // ZPixmap
+        BinaryPrimitives.WriteUInt16LittleEndian(buf.AsSpan(2), (ushort)((24 + padded) / 4));
+        BinaryPrimitives.WriteUInt32LittleEndian(buf.AsSpan(4), drawable);
+        BinaryPrimitives.WriteUInt32LittleEndian(buf.AsSpan(8), gc);
+        BinaryPrimitives.WriteUInt16LittleEndian(buf.AsSpan(12), width);
+        BinaryPrimitives.WriteUInt16LittleEndian(buf.AsSpan(14), height);
+        BinaryPrimitives.WriteInt16LittleEndian(buf.AsSpan(16), dstX);
+        BinaryPrimitives.WriteInt16LittleEndian(buf.AsSpan(18), dstY);
+        buf[20] = 0; // left-pad
+        buf[21] = depth;
+        data.CopyTo(buf.AsSpan(24));
+        return buf;
+    }
+
     public static byte[] BuildGetImage(uint drawable, short x, short y, ushort width, ushort height, byte format = 2, uint planeMask = 0xffffffff)
     {
         var buf = new byte[20];

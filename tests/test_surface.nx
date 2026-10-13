@@ -1,0 +1,68 @@
+// Полотно surface* (Runtime/Canvas/) у режимі без вікна (NX_HEADLESS=1 -
+// run_all.sh виставляє його для всіх тестів): малювання, текст, clip,
+// події, hex-літерали, rgb/rgba, timeMs.
+import "../lib/testing.nx" { assertEqual, assertTrue }
+
+func main() {
+    assertEqual(0xff, 255, "hex-літерал 0xff")
+    assertEqual(0x1E1e2E, 1973806, "hex-літерал змішаного регістру")
+    assertEqual(rgb(255, 0, 128), 0xff0080, "rgb")
+    assertEqual(rgba(0, 0, 0, 128), 0x80000000, "rgba - прозорість у старшому байті")
+
+    var s = surfaceOpen("тест", 200, 100)
+    assertEqual(surfaceWidth(s), 200, "ширина")
+    assertEqual(surfaceHeight(s), 100, "висота")
+
+    surfaceClear(s, 0x102030)
+    assertEqual(surfaceGetPixel(s, 0, 0), 0x102030, "clear")
+    surfaceRect(s, 10, 10, 20, 20, 0xff0000)
+    assertEqual(surfaceGetPixel(s, 15, 15), 0xff0000, "rect всередині")
+    assertEqual(surfaceGetPixel(s, 30, 30), 0x102030, "rect - права/нижня межа не входить")
+    assertEqual(surfaceGetPixel(s, -1, 5), -1, "піксель поза полотном")
+
+    surfaceRect(s, 40, 10, 10, 10, 0x80ffffff)
+    var p = surfaceGetPixel(s, 45, 15)
+    assertTrue(p > 0x102030 && p < 0xffffff, "напівпрозорий rect змішується з фоном")
+
+    surfaceClip(s, 0, 0, 50, 50)
+    surfaceRect(s, 60, 60, 10, 10, 0x00ff00)
+    surfaceUnclip(s)
+    assertEqual(surfaceGetPixel(s, 65, 65), 0x102030, "clip обрізає малювання")
+
+    surfaceCircle(s, 100, 50, 10, 0x0000ff)
+    assertEqual(surfaceGetPixel(s, 100, 50), 0x0000ff, "центр кола")
+    surfacePolygon(s, [150, 10, 190, 10, 170, 40], 0x00ff00)
+    assertEqual(surfaceGetPixel(s, 170, 20), 0x00ff00, "трикутник")
+
+    assertEqual(textWidth("abc", 16), 24, "ширина тексту 16px = 3 x 8")
+    assertEqual(textWidth("ґєї", 16), 24, "кирилиця - теж по символу")
+    assertEqual(textHeight(16), 16, "висота шрифту 16")
+    assertEqual(textHeight(20), 20, "висота шрифту 20")
+    surfaceClear(s, 0)
+    var w = surfaceText(s, "Ї", 0, 0, 16, 0xffffff)
+    assertEqual(w, 8, "surfaceText повертає ширину")
+    var lit = 0
+    for y in 0..16 { for x in 0..8 { if (surfaceGetPixel(s, x, y) == 0xffffff) { lit = lit + 1 } } }
+    assertTrue(lit > 10, "гліф Ї намальовано (${lit} пікселів)")
+
+    assertEqual(surfaceNextEvent(s, 0), null, "порожня черга - null")
+    var ev = newMap()
+    mapSet(ev, "type", "mousedown")
+    mapSet(ev, "x", 12)
+    mapSet(ev, "y", 34)
+    mapSet(ev, "button", 1)
+    surfacePostEvent(s, ev)
+    var e = surfaceNextEvent(s, 0)
+    assertEqual(e.type, "mousedown", "тип події")
+    assertEqual(e.x, 12, "x події")
+    assertTrue(surfaceMouseDown(s), "кнопка миші натиснута")
+    assertEqual(surfaceMouseX(s), 34 - 22, "surfaceMouseX")
+
+    var t0 = timeMs()
+    sleep(30)
+    assertTrue(timeMs() - t0 >= 25, "timeMs рахує мілісекунди")
+
+    surfaceClose(s)
+    assertTrue(!surfaceIsOpen(s), "закрите полотно")
+    print("test_surface: усе гаразд")
+}

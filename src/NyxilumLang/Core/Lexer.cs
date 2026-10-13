@@ -50,6 +50,25 @@ public class Lexer
                 continue;
             }
 
+            // 0xFF / 0x1e1e2e - шістнадцяткові числа (насамперед кольори
+            // полотна surface*). Токен лишається звичайним Number з
+            // ДЕСЯТКОВИМ значенням - парсер/компілятори далі нічого не знають
+            // про hex.
+            if (c == '0' && _pos + 2 < _source.Length && (_source[_pos + 1] == 'x' || _source[_pos + 1] == 'X') && Uri.IsHexDigit(_source[_pos + 2]))
+            {
+                int start = _pos;
+                _pos += 2;
+                long value = 0;
+                while (_pos < _source.Length && Uri.IsHexDigit(_source[_pos]))
+                {
+                    value = value * 16 + Convert.ToInt32(_source[_pos].ToString(), 16);
+                    _pos++;
+                }
+                _tokens.Add(new Token(TokenType.Number, value.ToString(System.Globalization.CultureInfo.InvariantCulture), _line, _column));
+                _column += _pos - start;
+                continue;
+            }
+
             if (char.IsDigit(c))
             {
                 string num = "";

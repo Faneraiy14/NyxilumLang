@@ -474,6 +474,44 @@ closeCanvas(canvas)
 `drawLine`. Input: `isKeyDown("W")`, `isMouseDown(canvas)`,
 `getMouseX/Y(canvas)`, `canvasShouldClose(canvas)`.
 
+### Surface canvas (identical on Linux and Windows)
+A window-canvas for programs with their own UI (IDEs, games, editors). Pixels are
+drawn in memory identically on every platform; `surfacePresent` shows the frame
+(only changed rows are sent to the screen). A color is one number `0xRRGGBB` or
+`rgb(r, g, b)`; `0xAARRGGBB` / `rgba(r, g, b, a)` is translucent.
+
+```nx
+func main() {
+    var s = surfaceOpen("My program", 800, 600)
+    while (surfaceIsOpen(s)) {
+        surfaceClear(s, 0x1e1e2e)
+        surfaceRoundRect(s, 20, 20, 200, 50, 10, 0x89b4fa)
+        surfaceText(s, "Hello, world!", 36, 36, 20, 0x11111b, true)
+        surfacePresent(s)
+
+        var e = surfaceNextEvent(s)          // waits for the next event
+        if (e != null && e.type == "key" && e.key == "Escape") { surfaceClose(s) }
+    }
+}
+```
+
+- Drawing: `surfaceClear`, `surfaceRect`, `surfaceRectLine`, `surfaceRoundRect`, `surfaceCircle`,
+  `surfaceCircleLine`, `surfaceLine`, `surfacePolygon(s, [x1, y1, x2, y2, ...], color)`.
+- Text (embedded Terminus font: Latin, Cyrillic, arrows): `surfaceText(s, text, x, y, size, color, bold?)`
+  returns the width; sizes 12/14/16/20/24/28/32 (larger ones are scaled). `textWidth(text, size)`, `textHeight(size)`. Monospace.
+- Clipping: `surfaceClip(s, x, y, w, h)` ... `surfaceUnclip(s)` (nestable).
+- Events: `surfaceNextEvent(s, waitMs?)` - a struct or `null`. Fields: `type`
+  (`mousedown`/`mouseup`/`mousemove`/`wheel`/`key`/`keyup`/`text`/`resize`/`close`),
+  `x`, `y`, `button` (1 left, 2 middle, 3 right), `dy` (wheel), `key` (`"a"`, `"Enter"`, `"Left"`, `"F5"`...
+  - Latin letter of the physical key even in other layouts), `text` (typed character, layout-aware),
+  `ctrl`/`shift`/`alt`, `width`/`height` (resize), `time`.
+- Polling (games): `surfaceMouseX/Y(s)`, `surfaceMouseDown(s)`, `surfaceKeyDown(s, "Left")`.
+- Misc: `surfaceWidth/Height(s)`, `surfaceTitle(s, title)`, `surfaceGetPixel(s, x, y)`,
+  `surfaceSave(s, "frame.png")`, `surfacePostEvent(s, event)` (synthetic input for tests/demos),
+  `clipboardGet()` / `clipboardSet(text)`, `timeMs()` (milliseconds).
+- `NX_HEADLESS=1` - a canvas without a window (tests, CI).
+- Demo: `nx programs/surface_demo.nx`.
+
 ### Built-in Functions
 - `print(val)` - console output
 - `readLine()`, `readInt()`, `readDouble()` - read from the console
