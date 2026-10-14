@@ -26,6 +26,16 @@ public class Parser
     private bool IsAtEnd() => Peek().Type == TokenType.EOF;
     private Token Consume(TokenType type, string msg) { if (Peek().Type == type) return Advance(); throw new Exception($"{msg} на рядку {Peek().Line}, стовпець {Peek().Column}"); }
 
+    // Назва нової змінної: слово мови (print, abs, max...) - зрозуміла
+    // помилка замість "Очікується назва змінної" (новачки часто так пишуть).
+    private Token ConsumeVarName(string msg)
+    {
+        var t = Peek();
+        if (t.Type == TokenType.Keyword && t.Value is string kw && kw.Length > 0 && char.IsLetter(kw[0]))
+            throw new Exception($"«{kw}» - слово мови (вбудоване), змінну так назвати не можна - візьми іншу назву, напр. «мій_{kw}», на рядку {t.Line}, стовпець {t.Column}");
+        return Consume(TokenType.Identifier, msg);
+    }
+
     public ProgramNode ParseProgram()
     {
         var program = new ProgramNode();
@@ -351,7 +361,7 @@ public class Parser
             isVolatile = true;
         }
 
-        var name = Consume(TokenType.Identifier, "Очікується назва змінної");
+        var name = ConsumeVarName("Очікується назва змінної");
 
         string? type = null;
         if (Peek().Type == TokenType.Punctuation && Peek().Value == ":")
@@ -429,7 +439,7 @@ public class Parser
     private ForStatement ParseForStatement()
     {
         Advance();
-        var varName = Consume(TokenType.Identifier, "Очікується назва змінної");
+        var varName = ConsumeVarName("Очікується назва змінної");
         if (Peek().Type == TokenType.Keyword && Peek().Value == "in") Advance();
         else throw new Exception($"Очікується 'in' на рядку {Peek().Line}, стовпець {Peek().Column}");
 
