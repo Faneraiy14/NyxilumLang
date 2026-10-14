@@ -1,0 +1,11 @@
+// Модуль зі своїм main і локальною змінною з тим самим ім'ям у функції.
+func findMain(names) {
+    var main = null
+    for n in names { if (n == "main") { main = n } }
+    if (main == null) { return "нема" }
+    return "є"
+}
+
+func main() {
+    print("main модуля не має запускатись")
+}

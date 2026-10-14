@@ -155,8 +155,11 @@ public static class ModuleResolver
 
                 var refs = new HashSet<string>(StringComparer.Ordinal);
                 CollectReferences(decl, refs, new HashSet<object>(ReferenceEqualityComparer.Instance));
+                // main модуля - точка входу, а не залежність: збіг з
+                // локальною змінною "main" не має тягнути main() модуля
+                // (інакше - "main оголошена двічі" у того, хто імпортує)
                 foreach (var r in refs)
-                    queue.Enqueue(r);
+                    if (r != "main") queue.Enqueue(r);
 
                 // структура тягне свої методи, оголошені окремо як
                 // "func Struct.method" (повне ім'я "Struct.method")

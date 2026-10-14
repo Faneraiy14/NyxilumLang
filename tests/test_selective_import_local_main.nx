@@ -1,0 +1,8 @@
+// Регресія: локальна змінна "main" у функції модуля не тягне за собою
+// main() модуля при вибірковому import (раніше - "Функція 'main' оголошена
+// двічі", знайдено в Nx IDE: code_to_blocks.nx).
+import "modules/lib_local_main.nx" { findMain }
+
+func main() {
+    print(findMain(["a", "main"]))   // є
+}
