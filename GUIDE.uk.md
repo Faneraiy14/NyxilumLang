@@ -552,6 +552,7 @@ func main() {
 `nx program.nx`
 
 Інші команди:
+- `nx ide [тека]` - Nx IDE: середовище з блоками (як Scratch) і кодом, уроками й прикладами (входить у реліз NyxilumNode; з клону - `NX_IDE_HOME=/шлях/до/NyxilumIDE nx ide`)
 - `nx format program.nx` - вивести відформатований код
 - `nx lint program.nx` - перевірити код на типові помилки (невикористані змінні, задовгі рядки, порожні блоки)
 - `nx check program.nx` - лише Lexer+Parser (без Compiler/VM) - "чи взагалі валідний синтаксис", без побічних ефектів; виводить `OK` або `Parse Error: ...`

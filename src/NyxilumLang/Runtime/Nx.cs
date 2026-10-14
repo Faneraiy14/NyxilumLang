@@ -106,6 +106,15 @@ public class Nx
             return;
         }
 
+        // nx ide [тека] - Nx IDE (середовище з блоками й кодом, написане на
+        // NyxilumLang). Шукається: $NX_IDE_HOME/src/ide.nx, потім ide/src/ide.nx
+        // поруч з виконуваним nx (так вона лежить в архіві релізу NyxilumNode).
+        if (command == "ide")
+        {
+            RunIde(args.Skip(1).ToArray());
+            return;
+        }
+
         if (command == "update")
         {
             RunUpdate(args.Length > 1 ? args[1] : null);
@@ -392,6 +401,29 @@ public class Nx
         {
             throw new Exception($"{cmd} {args} -> код {proc.ExitCode}\n{stderr}");
         }
+    }
+
+    private static void RunIde(string[] ideArgs)
+    {
+        var candidates = new List<string>();
+        var home = Environment.GetEnvironmentVariable("NX_IDE_HOME");
+        if (!string.IsNullOrEmpty(home)) candidates.Add(Path.Combine(home, "src", "ide.nx"));
+        var exeDir = Path.GetDirectoryName(Environment.ProcessPath ?? AppContext.BaseDirectory) ?? ".";
+        candidates.Add(Path.Combine(exeDir, "ide", "src", "ide.nx"));
+        candidates.Add(Path.Combine(AppContext.BaseDirectory, "ide", "src", "ide.nx"));
+        var ide = candidates.FirstOrDefault(File.Exists);
+        if (ide == null)
+        {
+            Console.WriteLine("Nx IDE не знайдено. Шукав:");
+            foreach (var c in candidates.Distinct()) Console.WriteLine("  " + c);
+            Console.WriteLine("Вона входить в архів релізу NyxilumNode (тека ide/ поруч з nx),");
+            Console.WriteLine("або вкажи теку клону NyxilumIDE: NX_IDE_HOME=/шлях/до/NyxilumIDE nx ide");
+            Environment.Exit(1);
+            return;
+        }
+        NyxilumLang.Runtime.Modules.OsModule.ScriptArgs = ideArgs.ToList();
+        NyxilumLang.Runtime.Modules.OsModule.ScriptDir = Path.GetDirectoryName(Path.GetFullPath(ide)) ?? ".";
+        RunFile(ide);
     }
 
     private static void RunFile(string path)

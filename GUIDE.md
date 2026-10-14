@@ -570,6 +570,7 @@ platform (Windows/Linux/Mac) — pass it a file path:
 `nx program.nx`
 
 Other commands:
+- `nx ide [folder]` - Nx IDE: a blocks (Scratch-like) + code environment with lessons and examples (shipped in the NyxilumNode release; from a clone - `NX_IDE_HOME=/path/to/NyxilumIDE nx ide`)
 - `nx format program.nx` - print formatted code
 - `nx lint program.nx` - check the code for common mistakes (unused variables, overly long lines, empty blocks)
 - `nx check program.nx` - Lexer+Parser only (no Compiler/VM) - "is the syntax even valid", with no side effects; prints `OK` or `Parse Error: ...`
