@@ -336,6 +336,10 @@ public class Compiler
         }
     }
 
+    // Уже скомпільовані тіла функцій (RegisterFunctions заздалегідь заносить
+    // усі назви в _functions, тож дублікат видно лише тут).
+    private readonly HashSet<string> _compiledFunctionNames = new();
+
     private void CompileFunctions(IEnumerable<StatementNode> statements)
     {
         foreach (var stmt in statements)
@@ -343,6 +347,11 @@ public class Compiler
             if (stmt is FunctionDeclaration func)
             {
                 string qualifiedName = QualifyFunctionName(func.Name);
+                // Друга функція з тією самою назвою (у тому ж файлі чи в
+                // імпортованому) раніше МОВЧКИ перекривала першу - підступний
+                // баг (так зламалась палітра блоків Nx IDE). Тепер - помилка.
+                if (!_compiledFunctionNames.Add(qualifiedName))
+                    throw new Exception($"рядок {func.Line}: Функція '{func.Name}' оголошена двічі - перейменуй одну з них (друга перекрила б першу)");
                 _functions[qualifiedName] = _bytecode!.Code.Count;
                 _bytecode.FunctionAddresses[qualifiedName] = _bytecode.Code.Count;
                 // Стек "батьків" має містити ЦЮ функцію вже під час компіляції
