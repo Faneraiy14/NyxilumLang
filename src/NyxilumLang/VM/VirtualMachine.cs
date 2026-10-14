@@ -29,6 +29,10 @@ internal sealed class NxFormattedException : Exception
 
 public class VirtualMachine
 {
+    // UTF-8 без BOM, і "зламаний" символ (половинка емодзі) стає �
+    // замість винятку - файл користувача зберігається завжди.
+    private static readonly System.Text.UTF8Encoding SafeUtf8 = new(false, false);
+
     private readonly byte[] _code;
     private readonly List<object> _constants;
     private readonly ValueStack _stack = new();
@@ -541,13 +545,13 @@ public class VirtualMachine
         _nativeFunctions["writeFile"] = args => {
             var path = args[0]?.ToString() ?? "";
             NyxilumLang.Runtime.Sandbox.CheckPath(path);
-            File.WriteAllText(path, args[1]?.ToString() ?? "");
+            File.WriteAllText(path, args[1]?.ToString() ?? "", SafeUtf8);
             return true;
         };
         _nativeFunctions["appendFile"] = args => {
             var path = args[0]?.ToString() ?? "";
             NyxilumLang.Runtime.Sandbox.CheckPath(path);
-            File.AppendAllText(path, args[1]?.ToString() ?? "");
+            File.AppendAllText(path, args[1]?.ToString() ?? "", SafeUtf8);
             return true;
         };
         _nativeFunctions["fileExists"] = args => {
@@ -1414,13 +1418,13 @@ public class VirtualMachine
                 case OpCode.WRITE_FILE:
                     var content = _stack.Pop()?.ToString() ?? "";
                     var filePath = _stack.Pop()?.ToString() ?? "";
-                    try { File.WriteAllText(filePath, content); _stack.Push(true); }
+                    try { File.WriteAllText(filePath, content, SafeUtf8); _stack.Push(true); }
                     catch { _stack.Push(false); }
                     break;
                 case OpCode.APPEND_FILE:
                     content = _stack.Pop()?.ToString() ?? "";
                     filePath = _stack.Pop()?.ToString() ?? "";
-                    try { File.AppendAllText(filePath, content); _stack.Push(true); }
+                    try { File.AppendAllText(filePath, content, SafeUtf8); _stack.Push(true); }
                     catch { _stack.Push(false); }
                     break;
                 case OpCode.FILE_EXISTS:

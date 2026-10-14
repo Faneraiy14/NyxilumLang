@@ -101,6 +101,14 @@ public static class ProcessModule
                 foreach (var kv in envMap.Entries)
                     psi.Environment[kv.Key.ToString() ?? ""] = kv.Value?.ToString() ?? "";
         }
+        // rawArgs: рядок аргументів як є (без екранування .NET). Потрібно для
+        // cmd.exe /s /c "команда": cmd розбирає лапки по-своєму, і \" від
+        // ArgumentList ламав би git commit -m "два слова".
+        if (options != null && options.Entries.TryGetValue("rawArgs", out var raw) && raw != null)
+        {
+            psi.ArgumentList.Clear();
+            psi.Arguments = raw.ToString();
+        }
 
         // PID батька - для NX_EXIT_WITH_PARENT=1 у дочірній nx-програмі
         // (Nx IDE: гра на сцені не має лишатись жити, якщо IDE впала).

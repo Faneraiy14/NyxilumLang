@@ -232,7 +232,8 @@ public sealed class SoftCanvas
         for (int i = 0; i < text.Length; i++)
         {
             int cp = text[i];
-            if (char.IsHighSurrogate(text[i]) && i + 1 < text.Length) { cp = char.ConvertToUtf32(text[i], text[i + 1]); i++; }
+            if (char.IsHighSurrogate(text[i]) && i + 1 < text.Length && char.IsLowSurrogate(text[i + 1])) { cp = char.ConvertToUtf32(text[i], text[i + 1]); i++; }
+            else if (char.IsSurrogate(text[i])) cp = 0xFFFD; // половинка емодзі - не падати
             if (cp == '\t') { w += space * 4; continue; }
             w += CharWidth(f, em, cp, size, bold);
         }
@@ -253,7 +254,8 @@ public sealed class SoftCanvas
         for (int i = 0; i < text.Length; i++)
         {
             int cp = text[i];
-            if (char.IsHighSurrogate(text[i]) && i + 1 < text.Length) { cp = char.ConvertToUtf32(text[i], text[i + 1]); i++; }
+            if (char.IsHighSurrogate(text[i]) && i + 1 < text.Length && char.IsLowSurrogate(text[i + 1])) { cp = char.ConvertToUtf32(text[i], text[i + 1]); i++; }
+            else if (char.IsSurrogate(text[i])) cp = 0xFFFD; // половинка емодзі - не падати
             if (cp == '\t') { pen += space * 4; continue; }
             var ff = FallbackFace(f, cp, bold);
             if (ff == null)
@@ -300,7 +302,7 @@ public sealed class SoftCanvas
         if (FontFace != "pixel") return (int)Math.Round(TtfWidth(text, size, bold));
         var (font, scale) = PsfFont.ForSize(size, bold);
         int n = 0;
-        for (int i = 0; i < text.Length; i++) { if (char.IsHighSurrogate(text[i])) i++; n++; }
+        for (int i = 0; i < text.Length; i++) { if (char.IsHighSurrogate(text[i]) && i + 1 < text.Length && char.IsLowSurrogate(text[i + 1])) i++; n++; }
         return n * font.Width * scale;
     }
 
@@ -323,7 +325,8 @@ public sealed class SoftCanvas
         for (int i = 0; i < text.Length; i++)
         {
             int cp = text[i];
-            if (char.IsHighSurrogate(text[i]) && i + 1 < text.Length) { cp = char.ConvertToUtf32(text[i], text[i + 1]); i++; }
+            if (char.IsHighSurrogate(text[i]) && i + 1 < text.Length && char.IsLowSurrogate(text[i + 1])) { cp = char.ConvertToUtf32(text[i], text[i + 1]); i++; }
+            else if (char.IsSurrogate(text[i])) cp = 0xFFFD; // половинка емодзі - не падати
             if (cp == '\t') { cx += gw * 4; continue; }
             if (cp != ' ' && cx + gw > _cx0 && cx < _cx1)
             {
