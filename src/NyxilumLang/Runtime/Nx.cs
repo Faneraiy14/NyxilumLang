@@ -27,6 +27,26 @@ public class Nx
 
         Console.OutputEncoding = Encoding.UTF8;
 
+        // NX_EXIT_WITH_PARENT=1 (+ NX_PARENT_PID від procStart): завершитись,
+        // щойно батьківський процес зник - програма, запущена з Nx IDE, не
+        // лишається сиротою, якщо IDE закрилась аварійно.
+        if (Environment.GetEnvironmentVariable("NX_EXIT_WITH_PARENT") == "1"
+            && int.TryParse(Environment.GetEnvironmentVariable("NX_PARENT_PID"), out var parentPid))
+        {
+            var watcher = new Thread(() =>
+            {
+                while (true)
+                {
+                    Thread.Sleep(1000);
+                    bool alive;
+                    try { alive = !System.Diagnostics.Process.GetProcessById(parentPid).HasExited; }
+                    catch { alive = false; }
+                    if (!alive) Environment.Exit(0);
+                }
+            }) { IsBackground = true };
+            watcher.Start();
+        }
+
         if (args.Length == 0)
         {
             RunRepl();

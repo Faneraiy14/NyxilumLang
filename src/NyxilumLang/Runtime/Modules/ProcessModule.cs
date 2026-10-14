@@ -102,6 +102,10 @@ public static class ProcessModule
                     psi.Environment[kv.Key.ToString() ?? ""] = kv.Value?.ToString() ?? "";
         }
 
+        // PID батька - для NX_EXIT_WITH_PARENT=1 у дочірній nx-програмі
+        // (Nx IDE: гра на сцені не має лишатись жити, якщо IDE впала).
+        psi.Environment["NX_PARENT_PID"] = Environment.ProcessId.ToString();
+
         var handle = new ProcHandle();
         var proc = new Process { StartInfo = psi, EnableRaisingEvents = true };
         // OutputDataReceived/ErrorDataReceived спрацьовують на ThreadPool-
