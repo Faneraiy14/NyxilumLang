@@ -121,6 +121,20 @@ public sealed class X11Client
         return waiter.Result!;
     }
 
+    // Увімкнути XKB для цього з'єднання, щоб клавіатурні події несли номер
+    // розкладки (група, біти 13-14 state). false - розширення нема.
+    public bool EnableXkb()
+    {
+        try
+        {
+            var q = Request(X11Protocol.BuildQueryExtension("XKEYBOARD"));
+            if (q.Head[8] == 0) return false;
+            var r = Request(X11Protocol.BuildXkbUseExtension(q.Head[9]));
+            return r.Head[1] != 0; // supported
+        }
+        catch { return false; }
+    }
+
     public void Close()
     {
         _closed = true;

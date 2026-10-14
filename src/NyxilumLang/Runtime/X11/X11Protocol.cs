@@ -246,6 +246,34 @@ public static class X11Protocol
         return buf;
     }
 
+    // QueryExtension (98): відповідь - Head[8] present, Head[9] major opcode.
+    public static byte[] BuildQueryExtension(string name)
+    {
+        var nameBytes = System.Text.Encoding.ASCII.GetBytes(name);
+        int len = 8 + nameBytes.Length + Pad(nameBytes.Length);
+        var buf = new byte[len];
+        buf[0] = 98;
+        BinaryPrimitives.WriteUInt16LittleEndian(buf.AsSpan(2), (ushort)(len / 4));
+        BinaryPrimitives.WriteUInt16LittleEndian(buf.AsSpan(4), (ushort)nameBytes.Length);
+        nameBytes.CopyTo(buf, 8);
+        return buf;
+    }
+
+    // XkbUseExtension (мінорний 0) версії 1.0. Поки клієнт цього не зробив,
+    // сервер вважає його "не знаючим XKB" і НЕ повідомляє номер розкладки
+    // (групу) у бітах 13-14 стану клавіатурних подій - друга розкладка
+    // (українська) для такого клієнта невидима.
+    public static byte[] BuildXkbUseExtension(byte majorOpcode)
+    {
+        var buf = new byte[8];
+        buf[0] = majorOpcode;
+        buf[1] = 0;
+        BinaryPrimitives.WriteUInt16LittleEndian(buf.AsSpan(2), 2);
+        BinaryPrimitives.WriteUInt16LittleEndian(buf.AsSpan(4), 1);
+        BinaryPrimitives.WriteUInt16LittleEndian(buf.AsSpan(6), 0);
+        return buf;
+    }
+
     public static byte[] BuildGetImage(uint drawable, short x, short y, ushort width, ushort height, byte format = 2, uint planeMask = 0xffffffff)
     {
         var buf = new byte[20];

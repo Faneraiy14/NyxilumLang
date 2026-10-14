@@ -10,7 +10,8 @@ public sealed class X11SurfaceBackend : ISurfaceBackend
 {
     private readonly X11Window _win;
     private readonly Surface _surface;
-    private readonly Keymap _keymap;
+    private volatile Keymap _keymap;
+    private static readonly bool KeyDebug = Environment.GetEnvironmentVariable("NX_KEYDEBUG") == "1";
     private readonly int _bpp;
 
     public X11SurfaceBackend(Surface surface, string title, int width, int height)
@@ -19,6 +20,8 @@ public sealed class X11SurfaceBackend : ISurfaceBackend
         _win = X11Window.Create(width: width, height: height, title: title, background: 0x000000,
             extraEventMask: X11Protocol.EventMask.PointerMotion | X11Protocol.EventMask.KeyRelease);
         _win.MarkHasDeleteRequestListener();
+        bool xkb = _win.Client.EnableXkb();
+        if (KeyDebug) Console.Error.WriteLine($"[key] XKB: {(xkb ? "увімкнено" : "недоступне")}");
         _keymap = Keymap.Load(_win.Client, _win.Client.Conn);
         var conn = _win.Client.Conn;
         _bpp = conn.PixmapFormats.TryGetValue(_win.Screen.RootDepth, out var b) ? b : 32;
@@ -40,6 +43,16 @@ public sealed class X11SurfaceBackend : ISurfaceBackend
             var e = Surface.MakeEvent("mousemove");
             AddMouse(e, evt);
             _surface.Post(e);
+        };
+        // GNOME/Wayland перемикає розкладку для X11-клієнтів, ПІДМІНЯЮЧИ карту
+        // клавіш (сервер шле MappingNotify) - стару карту треба перечитати.
+        // Request з потоку читання сокета заблокував би сам себе (відповідь
+        // читає той самий потік) - тому окремим завданням.
+        _win.Client.OnEvent += evt =>
+        {
+            if (evt.Name != "MappingNotify") return;
+            if (KeyDebug) Console.Error.WriteLine("[key] MappingNotify - перечитую карту клавіш");
+            Task.Run(() => { try { _keymap = Keymap.Load(_win.Client, _win.Client.Conn); } catch { } });
         };
         _win.OnKey += evt => PostKey(evt, true);
         _win.OnKeyRelease += evt => PostKey(evt, false);
@@ -84,6 +97,8 @@ public sealed class X11SurfaceBackend : ISurfaceBackend
     private void PostKey(X11Event evt, bool down)
     {
         var syms = _keymap.KeycodeToKeysyms(evt.Detail);
+        if (KeyDebug && down)
+            Console.Error.WriteLine($"[key] keycode={evt.Detail} state=0x{evt.State:x} група={(evt.State >> 13) & 3} keysyms=[{string.Join(" ", syms.Select(k => "0x" + k.ToString("x")))}]");
         if (syms.Length == 0) return;
         bool shift = (evt.State & 0x1) != 0, caps = (evt.State & 0x2) != 0;
         bool ctrl = (evt.State & 0x4) != 0, alt = (evt.State & 0x8) != 0;
@@ -104,6 +119,16 @@ public sealed class X11SurfaceBackend : ISurfaceBackend
         // група2+Shift, ...].
         int group = (evt.State >> 13) & 3;
         uint lower = Sym(syms, group * 2), upper = Sym(syms, group * 2 + 1);
+        // AltGr (ISO_Level3_Shift, mod5 = 0x80) - рівні 3/4 клавіші. Core-мапа
+        // XKB: [г1р1, г1р2, г2р1, г2р2, далі зайві рівні груп по черзі]; коли
+        // перша група (us) має лише 2 рівні, рівні 3/4 другої групи стоять на
+        // індексах 4/5 (перевірено на us+ua під XWayland). Точний розклад для
+        // будь-яких розкладок - лише через XkbGetMap; поки - цей випадок.
+        if ((evt.State & 0x80) != 0 && group == 1)
+        {
+            uint l3 = Sym(syms, 4), l4 = Sym(syms, 5);
+            if (l3 != 0) { lower = l3; upper = l4; }
+        }
         if (lower == 0) { lower = syms[0]; upper = Sym(syms, 1); }
         int cpLower = KeysymToCodepoint(lower), cpUpper = upper != 0 ? KeysymToCodepoint(upper) : -1;
         bool useUpper = shift;

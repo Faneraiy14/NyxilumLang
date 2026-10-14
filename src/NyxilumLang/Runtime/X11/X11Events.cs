@@ -28,7 +28,7 @@ public sealed class X11Event
         [2] = "KeyPress", [3] = "KeyRelease", [4] = "ButtonPress", [5] = "ButtonRelease",
         [6] = "MotionNotify", [7] = "EnterNotify", [8] = "LeaveNotify", [9] = "FocusIn", [10] = "FocusOut",
         [12] = "Expose", [17] = "DestroyNotify", [18] = "UnmapNotify", [19] = "MapNotify",
-        [21] = "ReparentNotify", [22] = "ConfigureNotify", [28] = "PropertyNotify", [33] = "ClientMessage"
+        [21] = "ReparentNotify", [22] = "ConfigureNotify", [28] = "PropertyNotify", [33] = "ClientMessage", [34] = "MappingNotify"
     };
 
     public static X11Event Parse(byte[] head)
