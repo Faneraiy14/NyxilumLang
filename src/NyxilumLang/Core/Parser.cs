@@ -261,7 +261,7 @@ public class Parser
                     continue;
                 }
                 
-                var pName = Consume(TokenType.Identifier, "Очікується назва параметра");
+                var pName = ConsumeVarName("Очікується назва параметра");
                 string pType = "any";
 
                 if (Peek().Type == TokenType.Punctuation && Peek().Value == ":")
@@ -686,7 +686,7 @@ public class Parser
                 do
                 {
                     if (Peek().Type == TokenType.Punctuation && Peek().Value == ",") { Advance(); continue; }
-                    var pName = Consume(TokenType.Identifier, "Очікується назва параметра");
+                    var pName = ConsumeVarName("Очікується назва параметра");
                     lambdaParams.Add(new FunctionParameter(pName.Value, "any"));
                     if (Peek().Type == TokenType.Punctuation && Peek().Value == ",") Advance();
                 } while (Peek().Type != TokenType.Punctuation || Peek().Value != ")");
