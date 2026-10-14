@@ -206,6 +206,24 @@ public sealed class SoftCanvas
         return (f, em, baseline);
     }
 
+    // Гліфа нема в поточному TTF: інший Noto, далі піксельний Terminus
+    // (стрілки, √, ▶... - у Noto Sans їх нема). null - Terminus.
+    private static TtfFont? FallbackFace(TtfFont f, int cp, bool bold)
+    {
+        if (f.HasGlyph(cp)) return f;
+        var other = TtfFont.Face(FontFace == "mono" ? "sans" : "mono", bold);
+        if (other.HasGlyph(cp)) return other;
+        return null;
+    }
+
+    private static float CharWidth(TtfFont f, float em, int cp, int size, bool bold)
+    {
+        var ff = FallbackFace(f, cp, bold);
+        if (ff != null) return ff.AdvanceUnits(ff.GlyphIndex(cp)) * em / ff.UnitsPerEm;
+        var (pf, scale) = PsfFont.ForSize(size, bold);
+        return pf.Width * scale;
+    }
+
     private static float TtfWidth(string text, int size, bool bold)
     {
         var (f, em, _) = Ttf(size, bold);
@@ -216,7 +234,7 @@ public sealed class SoftCanvas
             int cp = text[i];
             if (char.IsHighSurrogate(text[i]) && i + 1 < text.Length) { cp = char.ConvertToUtf32(text[i], text[i + 1]); i++; }
             if (cp == '\t') { w += space * 4; continue; }
-            w += f.AdvanceUnits(f.GlyphIndex(cp)) * s;
+            w += CharWidth(f, em, cp, size, bold);
         }
         return w;
     }
@@ -237,7 +255,24 @@ public sealed class SoftCanvas
             int cp = text[i];
             if (char.IsHighSurrogate(text[i]) && i + 1 < text.Length) { cp = char.ConvertToUtf32(text[i], text[i + 1]); i++; }
             if (cp == '\t') { pen += space * 4; continue; }
-            var g = f.Render(f.GlyphIndex(cp), em);
+            var ff = FallbackFace(f, cp, bold);
+            if (ff == null)
+            {
+                // піксельний гліф Terminus у тій самій клітинці
+                var (pf, sc) = PsfFont.ForSize(size, bold);
+                int pg = pf.GlyphIndex(cp);
+                int px0 = (int)Math.Round(pen), py0 = y + (size - pf.Height * sc) / 2;
+                for (int gy2 = 0; gy2 < pf.Height; gy2++)
+                    for (int gx2 = 0; gx2 < pf.Width; gx2++)
+                        if (pf.Pixel(pg, gx2, gy2))
+                        {
+                            if (sc == 1) Plot(px0 + gx2, py0 + gy2, color);
+                            else FillRect(px0 + gx2 * sc, py0 + gy2 * sc, sc, sc, color);
+                        }
+                pen += pf.Width * sc;
+                continue;
+            }
+            var g = ff.Render(ff.GlyphIndex(cp), em);
             int gx = (int)Math.Round(pen) + g.Left, gy = by + g.Top;
             if (g.W > 0 && gx < _cx1 && gx + g.W > _cx0 && gy < _cy1 && gy + g.H > _cy0)
             {
