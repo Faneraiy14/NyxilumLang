@@ -33,6 +33,24 @@ public class VirtualMachine
     private readonly List<object> _constants;
     private readonly ValueStack _stack = new();
     private Func<object[], object?>?[]? _nativeCache;
+
+    // Пул кадрів: виклик функції бере готовий кадр замість нового масиву.
+    // Після RETURN кадр ніхто не тримає - замикання копіюють значення
+    // (MAKE_CLOSURE), а не посилаються на кадр.
+    private readonly Stack<Frame> _framePool = new();
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.AggressiveInlining)]
+    private Frame RentFrame() => _framePool.Count > 0 ? _framePool.Pop() : new Frame();
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.AggressiveInlining)]
+    private void ReturnFrame(Frame f)
+    {
+        if (_framePool.Count < 256)
+        {
+            f.Reset();
+            _framePool.Push(f);
+        }
+    }
     // ВИПРАВЛЕНО: раніше всі змінні (параметри й локальні) лежали в ОДНОМУ
     // спільному словнику на всю програму, а номер слота призначався один раз
     // на етапі компіляції. Рекурсивний виклик функції використовував ті самі
@@ -70,13 +88,46 @@ public class VirtualMachine
     // для кожної функції (Compiler.cs скидає _varCounter=0 при вході в
     // FunctionDeclaration), тому спільний слот для глобальних не спрацював
     // би: два різні виклики просто не бачили б одне значення.
-    private readonly Dictionary<string, object> _globals;
+    // Кожна глобальна - комірка; інструкція кешує комірку за номером
+    // константи з назвою (раніше - пошук у словнику за рядком на КОЖНЕ
+    // читання/запис глобальної).
+    private sealed class GlobalCell
+    {
+        public object? Value;
+        public bool IsSet;
+    }
+    private readonly Dictionary<string, GlobalCell> _globals = new();
+    private GlobalCell?[]? _globalCache;
+
+    private GlobalCell CellAt(int constIdx)
+    {
+        _globalCache ??= new GlobalCell?[Math.Max(_constants.Count, 1)];
+        if (constIdx < _globalCache.Length && _globalCache[constIdx] is { } cached) return cached;
+        var name = (string)_constants[constIdx];
+        if (!_globals.TryGetValue(name, out var cell)) _globals[name] = cell = new GlobalCell();
+        if (constIdx < _globalCache.Length) _globalCache[constIdx] = cell;
+        return cell;
+    }
+
+    private void InitGlobals(IReadOnlyDictionary<string, object>? initial)
+    {
+        if (initial == null) return;
+        foreach (var kv in initial) _globals[kv.Key] = new GlobalCell { Value = kv.Value, IsSet = true };
+    }
 
     // Дозволяє викликачу (напр. REPL в Nx.cs) забрати значення
     // глобальних змінних після Run() і передати їх у КОНСТРУКТОР наступної
     // VM — так глобальна var, оголошена в одному рядку REPL, лишається
     // видимою й зі своїм значенням у наступних рядках.
-    public IReadOnlyDictionary<string, object> Globals => _globals;
+    public IReadOnlyDictionary<string, object> Globals
+    {
+        get
+        {
+            var d = new Dictionary<string, object>();
+            foreach (var kv in _globals) if (kv.Value.IsSet) d[kv.Key] = kv.Value.Value!;
+            return d;
+        }
+    }
 
     // try/catch: кожен активний try запам'ятовує, куди стрибнути і до якої
     // глибини стеку/фреймів/викликів відкотитись, якщо всередині нього
@@ -736,7 +787,7 @@ public class VirtualMachine
         _constants = bytecode.Constants;
         _functionAddresses = bytecode.FunctionAddresses;
         _lineMap = bytecode.LineMap;
-        _globals = initialGlobals != null ? new Dictionary<string, object>(initialGlobals) : new();
+        InitGlobals(initialGlobals);
     }
 
     // Використовується spawn() (ConcurrencyModule.cs): нова VM для окремого
@@ -751,7 +802,7 @@ public class VirtualMachine
         _constants = template._constants;
         _functionAddresses = template._functionAddresses;
         _lineMap = template._lineMap;
-        _globals = initialGlobals != null ? new Dictionary<string, object>(initialGlobals) : new();
+        InitGlobals(initialGlobals);
     }
 
     // Дозволяє нативним функціям (sort/mapArr/filter/reduce тощо) знайти
@@ -964,14 +1015,15 @@ public class VirtualMachine
                 case OpCode.STORE_VAR: _currentFrame[ReadArg()] = _stack.Pop(); break;
                 case OpCode.GET_GLOBAL:
                     {
-                        var name = (string)_constants[ReadArg()];
-                        _stack.Push(_globals.TryGetValue(name, out var gv) ? gv : 0);
+                        var cell = CellAt(ReadArg());
+                        _stack.Push(cell.IsSet ? cell.Value : 0);
                     }
                     break;
                 case OpCode.SET_GLOBAL:
                     {
-                        var name = (string)_constants[ReadArg()];
-                        _globals[name] = _stack.Pop();
+                        var cell = CellAt(ReadArg());
+                        cell.Value = _stack.Pop();
+                        cell.IsSet = true;
                     }
                     break;
                 case OpCode.ADD:
@@ -1022,6 +1074,36 @@ public class VirtualMachine
                         _ip = target;
                     }
                     break;
+                case OpCode.CALL:
+                    {
+                        int addr = ReadArg();
+                        CheckCallDepth();
+                        _callStack.Push(_ip);
+                        _frameStack.Push(_currentFrame);
+                        _currentFrame = RentFrame();
+                        _ip = addr;
+                    }
+                    break;
+                case OpCode.RETURN:
+                    if (_callStack.Count > 0)
+                    {
+                        // Компілятор гарантує, що кожен RETURN кладе власне
+                        // значення (див. Compiler.cs), тому стек тут порожнім
+                        // бути не має. Якщо все ж порожній — це помилка VM, і
+                        // повертати 0 було б тихим приховуванням: раніше саме
+                        // так "Stack empty" перетворювалось на значення функції.
+                        var returnVal = _stack.Count > 0 ? _stack.Pop() : null;
+                        // Якщо return стався всередині try (без TRY_END), приберемо
+                        // обробники, що належали фрейму, який зараз завершується —
+                        // інакше вони лишились би "висіти" і зловили б чужу помилку.
+                        while (_handlers.Count > 0 && _handlers.Peek().CallStackDepth >= _callStack.Count) _handlers.Pop();
+                        _ip = _callStack.Pop();
+                        var finished = _currentFrame;
+                        _currentFrame = _frameStack.Pop();
+                        ReturnFrame(finished);
+                        _stack.Push(returnVal);
+                    }
+                    break;
                 default: return StepRest(op);
             }
             }
@@ -1061,40 +1143,15 @@ public class VirtualMachine
                 case OpCode.STORE_VAR: _currentFrame[ReadArg()] = _stack.Pop(); break;
                 case OpCode.GET_GLOBAL:
                     {
-                        var name = (string)_constants[ReadArg()];
-                        _stack.Push(_globals.TryGetValue(name, out var gv) ? gv : 0);
+                        var cell = CellAt(ReadArg());
+                        _stack.Push(cell.IsSet ? cell.Value : 0);
                     }
                     break;
                 case OpCode.SET_GLOBAL:
                     {
-                        var name = (string)_constants[ReadArg()];
-                        _globals[name] = _stack.Pop();
-                    }
-                    break;
-                case OpCode.CALL:
-                    int addr = ReadArg();
-                    CheckCallDepth();
-                    _callStack.Push(_ip);
-                    _frameStack.Push(_currentFrame);
-                    _currentFrame = new Frame();
-                    _ip = addr;
-                    break;
-                case OpCode.RETURN:
-                    if (_callStack.Count > 0)
-                    {
-                        // Компілятор гарантує, що кожен RETURN кладе власне
-                        // значення (див. Compiler.cs), тому стек тут порожнім
-                        // бути не має. Якщо все ж порожній — це помилка VM, і
-                        // повертати 0 було б тихим приховуванням: раніше саме
-                        // так "Stack empty" перетворювалось на значення функції.
-                        var returnVal = _stack.Count > 0 ? _stack.Pop() : null;
-                        // Якщо return стався всередині try (без TRY_END), приберемо
-                        // обробники, що належали фрейму, який зараз завершується —
-                        // інакше вони лишились би "висіти" і зловили б чужу помилку.
-                        while (_handlers.Count > 0 && _handlers.Peek().CallStackDepth >= _callStack.Count) _handlers.Pop();
-                        _ip = _callStack.Pop();
-                        _currentFrame = _frameStack.Pop();
-                        _stack.Push(returnVal);
+                        var cell = CellAt(ReadArg());
+                        cell.Value = _stack.Pop();
+                        cell.IsSet = true;
                     }
                     break;
                 case OpCode.ADD:

@@ -540,8 +540,8 @@ public class Compiler
                     int arrLoopStart = _bytecode.Code.Count;
                     _bytecode.Emit(OpCode.LOAD_VAR, idxSlot);
                     _bytecode.Emit(OpCode.LOAD_VAR, arrSlot);
-                    int lenNameConst = _bytecode.AddConstant("len");
-                    _bytecode.Emit(OpCode.CALL_NATIVE, lenNameConst, 1);
+                    // LEN-інструкція, а не виклик вбудованої len на кожній ітерації
+                    _bytecode.Emit(OpCode.LEN);
                     _bytecode.Emit(OpCode.LT);
                     _bytecode.Emit(OpCode.JUMP_IF_FALSE, 0);
                     int arrEndJump = _bytecode.Code.Count - Bytecode.ArgSize;

@@ -12,6 +12,7 @@ public sealed class Frame
 {
     private static readonly object Unset = new();
     private object?[] _slots;
+    private int _used;   // 1 + найбільший заповнений слот (для швидкого Reset)
 
     public Frame()
     {
@@ -42,7 +43,15 @@ public sealed class Frame
         {
             if ((uint)idx >= (uint)_slots.Length) Grow(idx);
             _slots[idx] = value;
+            if (idx >= _used) _used = idx + 1;
         }
+    }
+
+    // Повторне використання кадру (пул у VM): лише заповнена частина.
+    public void Reset()
+    {
+        if (_used > 0) Array.Fill(_slots, Unset, 0, _used);
+        _used = 0;
     }
 
     private void Grow(int idx)
