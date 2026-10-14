@@ -33,6 +33,10 @@ public static class SurfaceModule
             var s = new Surface(w, h);
             // NX_HEADLESS=1 - полотно без вікна (автотести, CI без дисплея):
             // малювання, surfaceSave і surfacePostEvent працюють як завжди.
+            // NX_STAGE_DIR - програма запущена з Nx IDE: кадри - у сцену IDE
+            // (важливіше за NX_HEADLESS, яке успадковується від тестів IDE)
+            var stage = Environment.GetEnvironmentVariable("NX_STAGE_DIR");
+            if (!string.IsNullOrEmpty(stage)) { s.Backend = new StageBackend(s, stage); return s; }
             if (Environment.GetEnvironmentVariable("NX_HEADLESS") == "1") { s.Backend = new HeadlessSurfaceBackend(); return s; }
 #if WINDOWS
             s.Backend = new WinFormsSurfaceBackend(s, title, w, h);
@@ -72,6 +76,19 @@ public static class SurfaceModule
         {
             var c = S(a[0]).Canvas; int x = I(a[1]), y = I(a[2]);
             return x < 0 || y < 0 || x >= c.Width || y >= c.Height ? -1.0 : (double)c.Pixels[y * c.Width + x];
+        };
+        // surfaceDrawFrame(s, файл, x, y, w, h) - кадр сцени (frame.raw від
+        // програми з NX_STAGE_DIR), вписаний у прямокутник зі збереженням
+        // пропорцій. Повертає [ширина кадру, висота кадру] або null.
+        r["surfaceDrawFrame"] = a =>
+        {
+            var frame = StageBackend.LoadFrame(a[1]?.ToString() ?? "");
+            if (frame == null) return null;
+            int x = I(a[2]), y = I(a[3]), w = I(a[4]), h = I(a[5]);
+            double k = Math.Min((double)w / frame.Width, (double)h / frame.Height);
+            int dw = (int)(frame.Width * k), dh = (int)(frame.Height * k);
+            S(a[0]).Canvas.BlitScaled(frame, x + (w - dw) / 2, y + (h - dh) / 2, dw, dh);
+            return new List<object> { (double)frame.Width, (double)frame.Height };
         };
         r["surfaceClip"] = a => { S(a[0]).Canvas.PushClip(I(a[1]), I(a[2]), I(a[3]), I(a[4])); return null; };
         r["surfaceUnclip"] = a => { S(a[0]).Canvas.PopClip(); return null; };

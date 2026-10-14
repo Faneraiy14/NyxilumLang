@@ -248,6 +248,24 @@ public sealed class SoftCanvas
         return cx - x;
     }
 
+    // Масштабоване (найближчий піксель) копіювання src у прямокутник dx,dy,dw,dh.
+    public void BlitScaled(SoftCanvas src, int dx, int dy, int dw, int dh)
+    {
+        if (dw <= 0 || dh <= 0) return;
+        int y0 = Math.Max(dy, _cy0), y1 = Math.Min(dy + dh, _cy1);
+        int x0 = Math.Max(dx, _cx0), x1 = Math.Min(dx + dw, _cx1);
+        for (int y = y0; y < y1; y++)
+        {
+            int sy = (int)((long)(y - dy) * src.Height / dh);
+            int srow = sy * src.Width, drow = y * Width;
+            for (int x = x0; x < x1; x++)
+            {
+                int sx = (int)((long)(x - dx) * src.Width / dw);
+                Pixels[drow + x] = src.Pixels[srow + sx];
+            }
+        }
+    }
+
     // Копія області іншого полотна (або цього ж) - для зображень/спрайтів.
     public void Blit(SoftCanvas src, int dx, int dy)
     {

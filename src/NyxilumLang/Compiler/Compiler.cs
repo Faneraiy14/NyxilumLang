@@ -202,7 +202,7 @@ public class Compiler
         "surfacePresent", "surfaceClear", "surfaceRect", "surfaceRectLine", "surfaceRoundRect", "surfaceCircle",
         "surfaceCircleLine", "surfaceLine", "surfacePolygon", "surfaceText", "textWidth", "textHeight",
         "surfaceClip", "surfaceUnclip", "surfaceNextEvent", "surfaceMouseX", "surfaceMouseY", "surfaceMouseDown",
-        "surfaceKeyDown", "surfaceGetPixel", "surfaceSave", "surfacePostEvent", "clipboardGet", "clipboardSet",
+        "surfaceKeyDown", "surfaceDrawFrame", "surfaceGetPixel", "surfaceSave", "surfacePostEvent", "clipboardGet", "clipboardSet",
         "gc_stats", "gc_collect", "gc_limit", "exit",
         "dbOpen", "dbClose", "dbSet", "dbGet", "dbHas", "dbDelete", "dbKeys", "dbCount", "dbCheckpoint",
         "procStart", "procRun", "procWait", "procIsRunning", "procKill", "procPid", "procExitCode",

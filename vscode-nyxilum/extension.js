@@ -50,7 +50,7 @@ const BUILTINS = [
     'surfacePresent', 'surfaceClear', 'surfaceRect', 'surfaceRectLine', 'surfaceRoundRect', 'surfaceCircle',
     'surfaceCircleLine', 'surfaceLine', 'surfacePolygon', 'surfaceText', 'textWidth', 'textHeight',
     'surfaceClip', 'surfaceUnclip', 'surfaceNextEvent', 'surfaceMouseX', 'surfaceMouseY', 'surfaceMouseDown',
-    'surfaceKeyDown', 'surfaceGetPixel', 'surfaceSave', 'surfacePostEvent', 'clipboardGet', 'clipboardSet',
+    'surfaceKeyDown', 'surfaceDrawFrame', 'surfaceGetPixel', 'surfaceSave', 'surfacePostEvent', 'clipboardGet', 'clipboardSet',
     'guiWindow', 'guiButton', 'guiLabel', 'guiTextBox', 'guiAdd',
     'guiOnAction', 'guiShow', 'guiSetText', 'guiGetText',
     'guiCheckbox', 'guiDropdown', 'guiScrollList', 'guiProgressBar', 'guiEntry',
