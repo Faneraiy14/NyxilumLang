@@ -31,15 +31,16 @@ public class VirtualMachine
 {
     private readonly byte[] _code;
     private readonly List<object> _constants;
-    private readonly Stack<object> _stack = new();
+    private readonly ValueStack _stack = new();
+    private Func<object[], object?>?[]? _nativeCache;
     // ВИПРАВЛЕНО: раніше всі змінні (параметри й локальні) лежали в ОДНОМУ
     // спільному словнику на всю програму, а номер слота призначався один раз
     // на етапі компіляції. Рекурсивний виклик функції використовував ті самі
     // слоти, що й батьківський виклик, — локальна змінна могла тихо
     // затертись вкладеним викликом. Тепер кожен виклик отримує власний,
     // окремий фрейм змінних; _frameStack зберігає фрейми викликачів.
-    private Dictionary<int, object> _currentFrame = new();
-    private readonly Stack<Dictionary<int, object>> _frameStack = new();
+    private Frame _currentFrame = new();
+    private readonly Stack<Frame> _frameStack = new();
     private readonly Stack<int> _callStack = new();
 
     // Некерована рекурсія (напр. func f(n) { return f(n+1) } без умови
@@ -114,7 +115,12 @@ public class VirtualMachine
     }
 
     private const int HotThreshold = 512;
-    private readonly Dictionary<int, int> _backEdgeHits = new();
+    // Лічильник проходів зворотних переходів (за адресою цілі); після
+    // HotThreshold більше не рахується - раніше Dictionary на КОЖНІЙ ітерації.
+    private int[]? _backEdgeHits;
+    // _hasSuper[ip] - чи стоїть тут superinstruction (дешева перевірка на
+    // кожну інструкцію замість копіювання SuperOp? з масиву).
+    private bool[]? _hasSuper;
     private SuperOp?[]? _super;
     private readonly bool _jitEnabled = Environment.GetEnvironmentVariable("NX_JIT") != "0";
 
@@ -879,7 +885,7 @@ public class VirtualMachine
 
         _callStack.Push(_ip);
         _frameStack.Push(_currentFrame);
-        _currentFrame = new Dictionary<int, object>();
+        _currentFrame = new Frame();
         if (funcRef.Captured != null)
             foreach (var kv in funcRef.Captured) _currentFrame[kv.Key] = kv.Value;
         foreach (var a in args) _stack.Push(a);
@@ -911,7 +917,7 @@ public class VirtualMachine
         int targetCallDepth = _callStack.Count;
         _callStack.Push(_ip);
         _frameStack.Push(_currentFrame);
-        _currentFrame = new Dictionary<int, object>();
+        _currentFrame = new Frame();
         if (funcRef.Captured != null)
             foreach (var kv in funcRef.Captured) _currentFrame[kv.Key] = kv.Value;
         foreach (var a in args) _stack.Push(a);
@@ -935,14 +941,116 @@ public class VirtualMachine
         return _stack.Count > 0 ? _stack.Pop() : null;
     }
 
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.AggressiveOptimization)]
     private bool Step()
     {
-            var installed = _super?[_ip];
-            if (installed.HasValue && TryExecSuper(installed.Value)) return true;
+            if (_hasSuper != null && _hasSuper[_ip] && TryExecSuper(_super![_ip]!.Value)) return true;
 
             try
             {
             var op = (OpCode)_code[_ip++];
+            switch (op)
+            {
+                // Часті інструкції - тут, решта - у StepRest: інакше метод
+                // з усіма ~70 інструкціями завеликий, і .NET JIT компілює його
+                // без оптимізацій (MinOpts) - кожна інструкція в рази повільніша.
+                case OpCode.LOAD_CONST: _stack.Push(_constants[ReadArg()]); break;
+                case OpCode.LOAD_VAR:
+                    {
+                        int idx = ReadArg();
+                        _stack.Push(_currentFrame.TryGetValue(idx, out var v) ? v : 0);
+                    }
+                    break;
+                case OpCode.STORE_VAR: _currentFrame[ReadArg()] = _stack.Pop(); break;
+                case OpCode.GET_GLOBAL:
+                    {
+                        var name = (string)_constants[ReadArg()];
+                        _stack.Push(_globals.TryGetValue(name, out var gv) ? gv : 0);
+                    }
+                    break;
+                case OpCode.SET_GLOBAL:
+                    {
+                        var name = (string)_constants[ReadArg()];
+                        _globals[name] = _stack.Pop();
+                    }
+                    break;
+                case OpCode.ADD:
+                    {
+                        var b = _stack.Pop();
+                        var a = _stack.Pop();
+                        if (a is double da && b is double db) _stack.Push(Box(da + db));
+                        else if (a is string || b is string) _stack.Push(FormatValue(a) + FormatValue(b));
+                        else _stack.Push(Box(Convert.ToDouble(a) + Convert.ToDouble(b)));
+                    }
+                    break;
+                case OpCode.SUB: { var b = PopNum(); var a = PopNum(); _stack.Push(Box(a - b)); } break;
+                case OpCode.MUL: { var b = PopNum(); var a = PopNum(); _stack.Push(Box(a * b)); } break;
+                case OpCode.LT: { var b = PopNum(); var a = PopNum(); _stack.Push(BoxBool(a < b)); } break;
+                case OpCode.LTE: { var b = PopNum(); var a = PopNum(); _stack.Push(BoxBool(a <= b)); } break;
+                case OpCode.GT: { var b = PopNum(); var a = PopNum(); _stack.Push(BoxBool(a > b)); } break;
+                case OpCode.GTE: { var b = PopNum(); var a = PopNum(); _stack.Push(BoxBool(a >= b)); } break;
+                case OpCode.EQ: { var b = _stack.Pop(); var a = _stack.Pop(); _stack.Push(BoxBool(ValuesEqual(a, b))); } break;
+                case OpCode.NEQ: { var b = _stack.Pop(); var a = _stack.Pop(); _stack.Push(BoxBool(!ValuesEqual(a, b))); } break;
+                case OpCode.NOT: _stack.Push(BoxBool(!PopBool())); break;
+                case OpCode.JUMP_IF_FALSE:
+                    {
+                        int addr2 = ReadArg();
+                        if (!PopBool()) _ip = addr2;
+                    }
+                    break;
+                case OpCode.POP: if (_stack.Count > 0) _stack.Pop(); break;
+                case OpCode.JUMP:
+                    {
+                        int jumpInstrAddr = _ip - 1;
+                        int target = ReadArg();
+                        // Зворотний перехід (target ще раніше по коду, ніж сам
+                        // JUMP) — це саме те, у що компілюються while/for
+                        // (Compiler.cs: JUMP на startPos/forStart). Рахуємо
+                        // скільки разів пройшли через кожен такий заголовок
+                        // циклу і після HotThreshold ітерацій пробуємо
+                        // встановити superinstruction-и для нього.
+                        if (_jitEnabled && target < jumpInstrAddr)
+                        {
+                            _backEdgeHits ??= new int[_code.Length];
+                            int hits = _backEdgeHits[target];
+                            if (hits < HotThreshold)
+                            {
+                                _backEdgeHits[target] = ++hits;
+                                if (hits == HotThreshold) InstallSuperOps(target, jumpInstrAddr);
+                            }
+                        }
+                        _ip = target;
+                    }
+                    break;
+                default: return StepRest(op);
+            }
+            }
+            catch (NxThrowException)
+            {
+                // Явний throw без активного обробника — це вже вирішено в THROW
+                // (там або UnwindToHandler, або кидається саме цей виняток нагору,
+                // тому тут його просто пропускаємо далі, до Nx.cs).
+                throw;
+            }
+            catch (Exception ex) when (_handlers.Count > 0)
+            {
+                // Внутрішня помилка VM (ділення на нуль, вихід за межі масиву,
+                // помилка нативної функції тощо) під час активного try —
+                // перехоплюємо її так само, як явний throw. Номер рядка тут
+                // так само корисний, як і в необробленому Runtime Error —
+                // catch(e) у самому NyxilumLang-скрипті теж хоче знати ДЕ.
+                int line = CurrentLine();
+                string prefix = line > 0 ? $"рядок {line}: " : "";
+                UnwindToHandler(prefix + ex.Message);
+            }
+        return true;
+    }
+
+    // Рідші інструкції (див. коментар у Step). Винятки звідси летять у
+    // try/catch самого Step - обробка помилок та сама.
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.AggressiveOptimization)]
+    private bool StepRest(OpCode op)
+    {
             switch (op)
             {
                 case OpCode.LOAD_CONST: _stack.Push(_constants[ReadArg()]); break;
@@ -968,7 +1076,7 @@ public class VirtualMachine
                     CheckCallDepth();
                     _callStack.Push(_ip);
                     _frameStack.Push(_currentFrame);
-                    _currentFrame = new Dictionary<int, object>();
+                    _currentFrame = new Frame();
                     _ip = addr;
                     break;
                 case OpCode.RETURN:
@@ -998,22 +1106,23 @@ public class VirtualMachine
                         // "текст" + f(), де f нічого не повернула, — надто
                         // звичайна ситуація, щоб бути аварійною.
                         if (a is string || b is string) _stack.Push(FormatValue(a) + FormatValue(b));
-                        else _stack.Push(Convert.ToDouble(a) + Convert.ToDouble(b));
+                        else if (a is double da && b is double db) _stack.Push(Box(da + db));
+                        else _stack.Push(Box(Convert.ToDouble(a) + Convert.ToDouble(b)));
                     }
                     break;
-                case OpCode.SUB: { var b = PopNum(); var a = PopNum(); _stack.Push(a - b); } break;
-                case OpCode.MUL: { var b = PopNum(); var a = PopNum(); _stack.Push(a * b); } break;
-                case OpCode.DIV: { var b = PopNum(); var a = PopNum(); _stack.Push(a / b); } break;
-                case OpCode.MOD: { var b = PopNum(); var a = PopNum(); _stack.Push(a % b); } break;
-                case OpCode.EQ: { var b = _stack.Pop(); var a = _stack.Pop(); _stack.Push(ValuesEqual(a, b)); } break;
-                case OpCode.NEQ: { var b = _stack.Pop(); var a = _stack.Pop(); _stack.Push(!ValuesEqual(a, b)); } break;
-                case OpCode.LT: { var b = PopNum(); var a = PopNum(); _stack.Push(a < b); } break;
-                case OpCode.LTE: { var b = PopNum(); var a = PopNum(); _stack.Push(a <= b); } break;
-                case OpCode.GT: { var b = PopNum(); var a = PopNum(); _stack.Push(a > b); } break;
-                case OpCode.GTE: { var b = PopNum(); var a = PopNum(); _stack.Push(a >= b); } break;
-                case OpCode.AND: { var b = Convert.ToBoolean(_stack.Pop()); var a = Convert.ToBoolean(_stack.Pop()); _stack.Push(a && b); } break;
-                case OpCode.OR: { var b = Convert.ToBoolean(_stack.Pop()); var a = Convert.ToBoolean(_stack.Pop()); _stack.Push(a || b); } break;
-                case OpCode.NOT: _stack.Push(!Convert.ToBoolean(_stack.Pop())); break;
+                case OpCode.SUB: { var b = PopNum(); var a = PopNum(); _stack.Push(Box(a - b)); } break;
+                case OpCode.MUL: { var b = PopNum(); var a = PopNum(); _stack.Push(Box(a * b)); } break;
+                case OpCode.DIV: { var b = PopNum(); var a = PopNum(); _stack.Push(Box(a / b)); } break;
+                case OpCode.MOD: { var b = PopNum(); var a = PopNum(); _stack.Push(Box(a % b)); } break;
+                case OpCode.EQ: { var b = _stack.Pop(); var a = _stack.Pop(); _stack.Push(BoxBool(ValuesEqual(a, b))); } break;
+                case OpCode.NEQ: { var b = _stack.Pop(); var a = _stack.Pop(); _stack.Push(BoxBool(!ValuesEqual(a, b))); } break;
+                case OpCode.LT: { var b = PopNum(); var a = PopNum(); _stack.Push(BoxBool(a < b)); } break;
+                case OpCode.LTE: { var b = PopNum(); var a = PopNum(); _stack.Push(BoxBool(a <= b)); } break;
+                case OpCode.GT: { var b = PopNum(); var a = PopNum(); _stack.Push(BoxBool(a > b)); } break;
+                case OpCode.GTE: { var b = PopNum(); var a = PopNum(); _stack.Push(BoxBool(a >= b)); } break;
+                case OpCode.AND: { var b = PopBool(); var a = PopBool(); _stack.Push(BoxBool(a && b)); } break;
+                case OpCode.OR: { var b = PopBool(); var a = PopBool(); _stack.Push(BoxBool(a || b)); } break;
+                case OpCode.NOT: _stack.Push(BoxBool(!PopBool())); break;
                 // Побітові (Фаза N8, 16.09.2026) - числа тут усе одно boxed
                 // double, тож конвертуємо через (int) - ЗВИЧАЙНЕ, СИГНАЛЬНЕ
                 // 32-бітне ціле, точнісінько те, що native-компілятор дає
@@ -1041,17 +1150,20 @@ public class VirtualMachine
                         // встановити superinstruction-и для нього.
                         if (_jitEnabled && target < jumpInstrAddr)
                         {
-                            _backEdgeHits.TryGetValue(target, out var hits);
-                            hits++;
-                            _backEdgeHits[target] = hits;
-                            if (hits == HotThreshold) InstallSuperOps(target, jumpInstrAddr);
+                            _backEdgeHits ??= new int[_code.Length];
+                            int hits = _backEdgeHits[target];
+                            if (hits < HotThreshold)
+                            {
+                                _backEdgeHits[target] = ++hits;
+                                if (hits == HotThreshold) InstallSuperOps(target, jumpInstrAddr);
+                            }
                         }
                         _ip = target;
                     }
                     break;
                 case OpCode.JUMP_IF_FALSE:
                     int addr2 = ReadArg();
-                    if (!Convert.ToBoolean(_stack.Pop())) _ip = addr2;
+                    if (!PopBool()) _ip = addr2;
                     break;
                 case OpCode.PRINT: { var printed = _stack.Pop(); Console.WriteLine(printed == null ? null : FormatValue(printed)); } break;
                 
@@ -1213,17 +1325,25 @@ public class VirtualMachine
                     {
                         int nameIdx = ReadArg();
                         int argCount = ReadArg();
-                        var name = (string)_constants[nameIdx];
                         var args = new object[argCount];
                         for (int i = argCount - 1; i >= 0; i--)
                             args[i] = _stack.Count > 0 ? _stack.Pop() : null!;
+                        // Делегат вбудованої функції - з кешу за номером константи
+                        // (раніше пошук за назвою в словнику на кожен виклик).
+                        _nativeCache ??= new Func<object[], object?>?[_constants.Count];
+                        var native = nameIdx < _nativeCache.Length ? _nativeCache[nameIdx] : null;
+                        if (native == null)
+                        {
+                            var name = (string)_constants[nameIdx];
+                            if (!_nativeFunctions.TryGetValue(name, out native))
+                                throw new Exception($"Функція '{name}' недоступна на цій платформі (потребує Windows — GUI/графіка на Windows Forms)");
+                            if (nameIdx < _nativeCache.Length) _nativeCache[nameIdx] = native;
+                        }
                         // Компілятор реєструє gui*/canvas*-функції як "оголошені"
                         // на всіх платформах (щоб .nx-файл однаково компілювався
                         // скрізь), але сама реалізація доступна лише на Windows
                         // (Windows Forms). Без цієї перевірки виклик на Linux/Mac
                         // впав би з сирим .NET KeyNotFoundException.
-                        if (!_nativeFunctions.TryGetValue(name, out var native))
-                            throw new Exception($"Функція '{name}' недоступна на цій платформі (потребує Windows — GUI/графіка на Windows Forms)");
                         var result = native(args);
                         // ВИПРАВЛЕНО: раніше `result ?? 0` тихо перетворював БУДЬ-ЯКЕ
                         // легітимне null-значення, повернуте нативною функцією
@@ -1250,7 +1370,7 @@ public class VirtualMachine
                                 CheckCallDepth();
                                 _callStack.Push(_ip);
                                 _frameStack.Push(_currentFrame);
-                                _currentFrame = new Dictionary<int, object>();
+                                _currentFrame = new Frame();
                                 _ip = methodAddr;
                             }
                             else
@@ -1298,7 +1418,7 @@ public class VirtualMachine
                         CheckCallDepth();
                         _callStack.Push(_ip);
                         _frameStack.Push(_currentFrame);
-                        _currentFrame = new Dictionary<int, object>();
+                        _currentFrame = new Frame();
                         if (funcRef.Captured != null)
                             foreach (var kv in funcRef.Captured) _currentFrame[kv.Key] = kv.Value;
                         foreach (var a in callArgs) _stack.Push(a);
@@ -1335,25 +1455,6 @@ public class VirtualMachine
 
                 case OpCode.HALT: return false;
             }
-            }
-            catch (NxThrowException)
-            {
-                // Явний throw без активного обробника — це вже вирішено в THROW
-                // (там або UnwindToHandler, або кидається саме цей виняток нагору,
-                // тому тут його просто пропускаємо далі, до Nx.cs).
-                throw;
-            }
-            catch (Exception ex) when (_handlers.Count > 0)
-            {
-                // Внутрішня помилка VM (ділення на нуль, вихід за межі масиву,
-                // помилка нативної функції тощо) під час активного try —
-                // перехоплюємо її так само, як явний throw. Номер рядка тут
-                // так само корисний, як і в необробленому Runtime Error —
-                // catch(e) у самому NyxilumLang-скрипті теж хоче знати ДЕ.
-                int line = CurrentLine();
-                string prefix = line > 0 ? $"рядок {line}: " : "";
-                UnwindToHandler(prefix + ex.Message);
-            }
         return true;
     }
 
@@ -1362,6 +1463,7 @@ public class VirtualMachine
     // (нічого не займає з _stack, не рухає _ip), якщо guard типів не
     // пройшов, — тоді Step() просто продовжує звичайний switch з того ж
     // самого _ip, наче superinstruction тут і не було.
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.AggressiveOptimization)]
     private bool TryExecSuper(SuperOp s)
     {
         switch (s.Kind)
@@ -1426,6 +1528,7 @@ public class VirtualMachine
     private void InstallSuperOps(int loopStart, int jumpInstrAddr)
     {
         _super ??= new SuperOp?[_code.Length];
+        _hasSuper ??= new bool[_code.Length];
 
         for (int i = loopStart; i < jumpInstrAddr;)
         {
@@ -1452,6 +1555,7 @@ public class VirtualMachine
         if (!TryReadOperand(ref i, loopEndExclusive, out var jmpOp, out var jmpArg)) return;
         if (jmpOp != OpCode.JUMP_IF_FALSE) return;
 
+        _hasSuper![loopStart] = true;
         _super![loopStart] = new SuperOp
         {
             Kind = SuperOpKind.CmpJump,
@@ -1483,6 +1587,7 @@ public class VirtualMachine
         if (slot1 != slot2) return;
         if (i != jumpInstrAddr) return;
 
+        _hasSuper![start] = true;
         _super![start] = new SuperOp
         {
             Kind = SuperOpKind.IncLocal,
@@ -1506,6 +1611,7 @@ public class VirtualMachine
     }
 
     // Операнд інструкції - 4 байти (див. Bytecode.ArgSize)
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.AggressiveInlining)]
     private int ReadArg()
     {
         int val = _code[_ip] | (_code[_ip + 1] << 8) | (_code[_ip + 2] << 16) | (_code[_ip + 3] << 24);
@@ -1513,7 +1619,40 @@ public class VirtualMachine
         return val;
     }
 
-    private double PopNum() => Convert.ToDouble(_stack.Pop());
+    // Швидкі шляхи: майже завжди значення вже double / bool - Convert (через
+    // IConvertible, з перевірками типу) лише для решти.
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.AggressiveInlining)]
+    private double PopNum()
+    {
+        var o = _stack.Pop();
+        return o is double d ? d : Convert.ToDouble(o);
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.AggressiveInlining)]
+    private bool PopBool()
+    {
+        var o = _stack.Pop();
+        return o is bool b ? b : Convert.ToBoolean(o);
+    }
+
+    // Готові "коробки" для цілих -256..4095 і true/false: i + 1, лічильники
+    // циклів, індекси - без нової алокації на кожну операцію.
+    private static readonly object[] SmallInts = Enumerable.Range(-256, 4352).Select(i => (object)(double)i).ToArray();
+    private static readonly object BoxedTrue = true, BoxedFalse = false;
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.AggressiveInlining)]
+    internal static object Box(double d)
+    {
+        if (d >= -256 && d < 4096)
+        {
+            int i = (int)d;
+            if (i == d && !(d == 0 && double.IsNegative(d))) return SmallInts[i + 256];
+        }
+        return d;
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.AggressiveInlining)]
+    internal static object BoxBool(bool b) => b ? BoxedTrue : BoxedFalse;
 
     // Порівняння на рівність. Раніше тут був object.Equals, який порівнює ще й
     // ТИПИ "коробок": int 2 та double 2.0 вважались різними, тому x == 2 давало

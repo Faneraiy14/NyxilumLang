@@ -1,0 +1,70 @@
+// Бенчмарк VM: типові навантаження (цикли, виклики, рядки, масиви,
+// глобальні змінні, структури). nx tests/bench/vm_bench.nx
+var counter = 0
+
+struct P {
+    x: i32
+    y: i32
+}
+
+func fib(n) {
+    if (n < 2) { return n }
+    return fib(n - 1) + fib(n - 2)
+}
+
+func bump() { counter = counter + 1 }
+
+func main() {
+    var total = timeMs()
+
+    var t = timeMs()
+    var sum = 0
+    var i = 0
+    while (i < 1000000) {
+        sum = sum + i * 2
+        i = i + 1
+    }
+    print("while 1M:        " + toString(timeMs() - t) + " мс")
+
+    t = timeMs()
+    sum = 0
+    for k in 0..1000000 { sum = sum + k }
+    print("for 1M:          " + toString(timeMs() - t) + " мс")
+
+    t = timeMs()
+    var f = fib(24)
+    print("fib(24) виклики: " + toString(timeMs() - t) + " мс")
+
+    t = timeMs()
+    for k in 0..300000 { bump() }
+    print("глобальні 300K:  " + toString(timeMs() - t) + " мс")
+
+    t = timeMs()
+    var arr = []
+    for k in 0..300000 { append(arr, k) }
+    var s2 = 0
+    for x in arr { s2 = s2 + x }
+    print("масив 300K:      " + toString(timeMs() - t) + " мс")
+
+    t = timeMs()
+    var line = "func привітати(імя) { print(імя + 1) } // коментар"
+    var spaces = 0
+    for r in 0..3000 {
+        var j = 0
+        while (j < len(line)) {
+            if (line[j] == " ") { spaces = spaces + 1 }
+            j = j + 1
+        }
+    }
+    print("рядок 150K симв: " + toString(timeMs() - t) + " мс")
+
+    t = timeMs()
+    var p = P { x: 0, y: 0 }
+    for k in 0..300000 {
+        p.x = p.x + 1
+        p.y = p.y + p.x
+    }
+    print("структура 300K:  " + toString(timeMs() - t) + " мс")
+
+    print("РАЗОМ:           " + toString(timeMs() - total) + " мс")
+}

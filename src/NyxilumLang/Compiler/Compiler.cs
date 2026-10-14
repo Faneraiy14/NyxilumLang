@@ -591,7 +591,9 @@ public class Compiler
                 foreach (var pos in forLoop.ContinueJumps) PatchJumpTo(pos, forIncrPos);
 
                 _bytecode.Emit(OpCode.LOAD_VAR, _vars[f.VariableName]);
-                _bytecode.Emit(OpCode.LOAD_CONST, _bytecode.AddConstant(1));
+                // 1.0, а не 1: числа мови - double; int-константа йшла повільним
+                // шляхом ADD і не давала встановити superinstruction INC_LOCAL.
+                _bytecode.Emit(OpCode.LOAD_CONST, _bytecode.AddConstant(1.0));
                 _bytecode.Emit(OpCode.ADD);
                 _bytecode.Emit(OpCode.STORE_VAR, _vars[f.VariableName]);
                 _bytecode.Emit(OpCode.JUMP, forStart);
