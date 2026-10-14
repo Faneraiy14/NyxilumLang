@@ -501,7 +501,7 @@ func main() {
 - `max/min(a,b)` або `max/min(arr)` - максимум/мінімум двох чисел або всього масиву
 - `toFixed(x,n)` - число як рядок з n знаками після коми, напр. `toFixed(3.14159, 2)` -> `"3.14"`
 - `readFile(path)`, `writeFile(path, content)`, `appendFile(path, content)`, `fileExists(path)`, `readLines(path)` - робота з файлами
-- `deleteFile(path)`, `makeDir(path)`, `dirExists(path)`, `deleteDir(path)` (рекурсивно), `listDir(path)` (масив імен файлів/тек усередині) - файли й теки
+- `deleteFile(path)`, `makeDir(path)`, `dirExists(path)`, `deleteDir(path)` (рекурсивно), `listDir(path)` (масив імен файлів/тек усередині), `movePath(from, to)` (перейменувати/перемістити файл чи теку, не перезаписує), `copyFile(from, to)` - файли й теки
 - `zipCreate(zipPath, sourceDir)` - запакувати теку в архів; `zipExtract(zipPath, destDir)` - розпакувати ввесь архів, повертає кількість файлів; `zipEntries(zipPath)` - список імен файлів усередині БЕЗ розпаковування; `zipExtractEntry(zipPath, entryName, destPath)` - витягнути лише один файл, повертає `true`/`false` (є така точка в архіві?)
 - `toString(v)`, `toInt(v)`, `toDouble(v)`, `typeOf(v)`, `isNumber/isString/isArray/isBool(v)` - перетворення та перевірка типів. Числові рядки завжди парсяться з "." як десятковим роздільником незалежно від локалі ОС, на якій запущено `Nx` (процес примусово стартує з `CultureInfo.InvariantCulture`) - `toDouble("0.083")` дає однаковий результат що на en-US, що на uk-UA машині
 - `charCode(s)` - код першого символу рядка (наприклад, `charCode("A")` -> 65); `fromCharCode(code)` - символ за кодом

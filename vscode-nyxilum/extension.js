@@ -24,7 +24,7 @@ const BUILTINS = [
     'print', 'printNoNewLine',
     'readLine', 'readInt', 'readDouble',
     'readFile', 'writeFile', 'appendFile', 'fileExists', 'readLines',
-    'deleteFile', 'makeDir', 'dirExists', 'deleteDir', 'listDir',
+    'deleteFile', 'movePath', 'copyFile', 'makeDir', 'dirExists', 'deleteDir', 'listDir',
     'sqrt', 'abs', 'pow', 'sin', 'cos', 'tan',
     'round', 'floor', 'ceil', 'max', 'min', 'clamp',
     'toString', 'toInt', 'toDouble', 'toFixed', 'len',

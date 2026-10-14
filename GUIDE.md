@@ -519,7 +519,7 @@ func main() {
 - `max/min(a,b)` or `max/min(arr)` - maximum/minimum of two numbers or of an entire array
 - `toFixed(x,n)` - number as a string with n digits after the decimal point, e.g. `toFixed(3.14159, 2)` -> `"3.14"`
 - `readFile(path)`, `writeFile(path, content)`, `appendFile(path, content)`, `fileExists(path)`, `readLines(path)` - file operations
-- `deleteFile(path)`, `makeDir(path)`, `dirExists(path)`, `deleteDir(path)` (recursive), `listDir(path)` (array of file/directory names inside) - files and directories
+- `deleteFile(path)`, `makeDir(path)`, `dirExists(path)`, `deleteDir(path)` (recursive), `listDir(path)` (array of file/directory names inside), `movePath(from, to)` (rename/move a file or directory, never overwrites), `copyFile(from, to)` - files and directories
 - `zipCreate(zipPath, sourceDir)` - packs a directory into an archive; `zipExtract(zipPath, destDir)` - extracts the whole archive, returns the file count; `zipEntries(zipPath)` - list of filenames inside WITHOUT extracting; `zipExtractEntry(zipPath, entryName, destPath)` - extracts just one file, returns `true`/`false` (does that entry exist in the archive?)
 - `toString(v)`, `toInt(v)`, `toDouble(v)`, `typeOf(v)`, `isNumber/isString/isArray/isBool(v)` - type conversion and checking. Numeric strings are always parsed with "." as the decimal separator regardless of the OS locale `Nx` runs under (the process forcibly starts with `CultureInfo.InvariantCulture`) - `toDouble("0.083")` gives the same result on an en-US machine as on a uk-UA one
 - `charCode(s)` - the code of a string's first character (e.g. `charCode("A")` -> 65); `fromCharCode(code)` - the character for a given code

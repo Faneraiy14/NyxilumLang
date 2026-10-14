@@ -589,6 +589,28 @@ public class VirtualMachine
             Directory.Delete(path, recursive: true);
             return true;
         };
+        // movePath(звідки, куди) - перейменувати/перемістити файл або теку
+        // (IDE: "Перейменувати" в Провіднику). Не перезаписує: якщо "куди"
+        // вже є - помилка. copyFile(звідки, куди) - копія файла (байти як є).
+        _nativeFunctions["movePath"] = args => {
+            var from = args[0]?.ToString() ?? "";
+            var to = args[1]?.ToString() ?? "";
+            NyxilumLang.Runtime.Sandbox.CheckPath(from);
+            NyxilumLang.Runtime.Sandbox.CheckPath(to);
+            if (File.Exists(to) || Directory.Exists(to)) throw new Exception($"movePath: '{to}' вже існує");
+            if (Directory.Exists(from)) Directory.Move(from, to);
+            else if (File.Exists(from)) File.Move(from, to);
+            else throw new Exception($"movePath: '{from}' не існує");
+            return true;
+        };
+        _nativeFunctions["copyFile"] = args => {
+            var from = args[0]?.ToString() ?? "";
+            var to = args[1]?.ToString() ?? "";
+            NyxilumLang.Runtime.Sandbox.CheckPath(from);
+            NyxilumLang.Runtime.Sandbox.CheckPath(to);
+            File.Copy(from, to, overwrite: false);
+            return true;
+        };
         _nativeFunctions["listDir"] = args => {
             var path = args[0]?.ToString() ?? "";
             NyxilumLang.Runtime.Sandbox.CheckPath(path);

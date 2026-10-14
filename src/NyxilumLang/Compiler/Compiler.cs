@@ -171,7 +171,7 @@ public class Compiler
         "print", "printNoNewLine",
         "readLine", "readInt", "readDouble",
         "readFile", "writeFile", "appendFile", "fileExists", "readLines",
-        "deleteFile", "makeDir", "dirExists", "deleteDir", "listDir",
+        "deleteFile", "makeDir", "dirExists", "deleteDir", "listDir", "movePath", "copyFile",
         "sqrt", "abs", "pow", "sin", "cos", "tan",
         "round", "floor", "ceil", "max", "min", "clamp",
         "toString", "toInt", "toDouble", "toFixed", "len",
