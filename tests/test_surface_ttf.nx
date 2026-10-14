@@ -1,0 +1,44 @@
+// Згладжені шрифти (surfaceFont "sans"/"mono" - вбудовані Noto, власний
+// розбір TrueType і растеризація): перемикання, ширини, кирилиця,
+// згладжування (проміжні відтінки), жирний ширший, піксельний - як раніше.
+import "../lib/testing.nx" { assertEqual, assertTrue }
+
+func main() {
+    var s = surfaceOpen("шрифти", 300, 60)
+    assertEqual(surfaceFont("mono"), "pixel", "типово - піксельний шрифт")
+    var m = textWidth("M", 16)
+    assertTrue(m >= 7 && m <= 12, "mono: ширина літери в розумних межах")
+    assertEqual(textWidth("MMMMMMMMMM", 16), textWidth("iiiiiiiiii", 16), "mono: усі літери однакової ширини")
+    assertEqual(textHeight(16), 16, "висота клітинки = розмір (розкладка не зсувається)")
+
+    surfaceFont("sans")
+    assertTrue(textWidth("iiii", 16) < textWidth("MMMM", 16), "sans: пропорційний")
+    assertTrue(textWidth("Привіт", 16, true) >= textWidth("Привіт", 16), "жирний не вужчий")
+    assertTrue(textWidth("Їжак ґудзик Єва", 16) > 60, "кирилиця має гліфи (Ї, ґ, Є)")
+
+    surfaceClear(s, 0x000000)
+    var w = surfaceText(s, "Ж", 10, 10, 32, 0xffffff)
+    assertTrue(w > 10, "surfaceText повертає ширину")
+    var mid = 0
+    var full = 0
+    var y = 10
+    while (y < 42) {
+        var x = 10
+        while (x < 10 + w) {
+            var p = surfaceGetPixel(s, x, y) % 256
+            if (p == 255) { full = full + 1 }
+            if (p > 0 && p < 255) { mid = mid + 1 }
+            x = x + 1
+        }
+        y = y + 1
+    }
+    assertTrue(full > 20, "гліф намальовано")
+    assertTrue(mid > 10, "краї згладжені (проміжні відтінки)")
+
+    assertEqual(surfaceFont("pixel"), "sans", "surfaceFont повертає попередній")
+    assertEqual(textWidth("MMMM", 16), 32, "піксельний Terminus 16 - 8 пікселів на літеру")
+    var bad = false
+    try { surfaceFont("comic") } catch (e) { bad = true }
+    assertTrue(bad, "невідомий шрифт - помилка")
+    print("OK: ttf")
+}

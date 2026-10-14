@@ -191,8 +191,78 @@ public sealed class SoftCanvas
 
     // ---- Текст ----
 
+    // Поточний шрифт тексту (surfaceFont): "pixel" - Terminus, "sans"/"mono" - TTF.
+    public static string FontFace = "pixel";
+
+    // TTF: розмір гліфа (em) і базова лінія для "клітинки" висотою size -
+    // щоб розкладка, розрахована на піксельний шрифт, не зсувалась.
+    private static (TtfFont f, float em, int baseline) Ttf(int size, bool bold)
+    {
+        var f = TtfFont.Face(FontFace, bold);
+        float em = size * 0.94f;
+        float s = em / f.UnitsPerEm;
+        float asc = f.Ascender * s, desc = -f.Descender * s;
+        int baseline = (int)Math.Round((size - (asc + desc)) / 2 + asc);
+        return (f, em, baseline);
+    }
+
+    private static float TtfWidth(string text, int size, bool bold)
+    {
+        var (f, em, _) = Ttf(size, bold);
+        float s = em / f.UnitsPerEm, w = 0;
+        float space = f.AdvanceUnits(f.GlyphIndex(' ')) * s;
+        for (int i = 0; i < text.Length; i++)
+        {
+            int cp = text[i];
+            if (char.IsHighSurrogate(text[i]) && i + 1 < text.Length) { cp = char.ConvertToUtf32(text[i], text[i + 1]); i++; }
+            if (cp == '\t') { w += space * 4; continue; }
+            w += f.AdvanceUnits(f.GlyphIndex(cp)) * s;
+        }
+        return w;
+    }
+
+    private int DrawTtf(string text, int x, int y, int size, uint color, bool bold)
+    {
+        var (f, em, baseline) = Ttf(size, bold);
+        if (y >= _cy1 || y + size * 2 <= _cy0) return (int)Math.Round(TtfWidth(text, size, bold));
+        float s = em / f.UnitsPerEm;
+        float pen = x;
+        float space = f.AdvanceUnits(f.GlyphIndex(' ')) * s;
+        uint ca = color >> 24;
+        if (ca == 0) ca = 255;
+        uint col = color & 0xffffff;
+        int by = y + baseline;
+        for (int i = 0; i < text.Length; i++)
+        {
+            int cp = text[i];
+            if (char.IsHighSurrogate(text[i]) && i + 1 < text.Length) { cp = char.ConvertToUtf32(text[i], text[i + 1]); i++; }
+            if (cp == '\t') { pen += space * 4; continue; }
+            var g = f.Render(f.GlyphIndex(cp), em);
+            int gx = (int)Math.Round(pen) + g.Left, gy = by + g.Top;
+            if (g.W > 0 && gx < _cx1 && gx + g.W > _cx0 && gy < _cy1 && gy + g.H > _cy0)
+            {
+                int y0 = Math.Max(gy, _cy0), y1 = Math.Min(gy + g.H, _cy1);
+                int x0 = Math.Max(gx, _cx0), x1 = Math.Min(gx + g.W, _cx1);
+                for (int yy = y0; yy < y1; yy++)
+                {
+                    int src = (yy - gy) * g.W - gx, dst = yy * Width;
+                    for (int xx = x0; xx < x1; xx++)
+                    {
+                        uint a = g.Alpha[src + xx];
+                        if (a == 0) continue;
+                        a = a * ca / 255;
+                        Pixels[dst + xx] = a >= 255 ? col : Blend(Pixels[dst + xx], col, a);
+                    }
+                }
+            }
+            pen += g.Advance;
+        }
+        return (int)Math.Round(pen - x);
+    }
+
     public static int TextWidth(string text, int size, bool bold = false)
     {
+        if (FontFace != "pixel") return (int)Math.Round(TtfWidth(text, size, bold));
         var (font, scale) = PsfFont.ForSize(size, bold);
         int n = 0;
         for (int i = 0; i < text.Length; i++) { if (char.IsHighSurrogate(text[i])) i++; n++; }
@@ -201,6 +271,7 @@ public sealed class SoftCanvas
 
     public static int TextHeight(int size, bool bold = false)
     {
+        if (FontFace != "pixel") return size;
         var (font, scale) = PsfFont.ForSize(size, bold);
         return font.Height * scale;
     }
@@ -209,6 +280,7 @@ public sealed class SoftCanvas
     // '\t' - як 4 пробіли; інших керуючих символів шрифт не має.
     public int DrawText(string text, int x, int y, int size, uint color, bool bold = false)
     {
+        if (FontFace != "pixel") return DrawTtf(text, x, y, size, color, bold);
         var (font, scale) = PsfFont.ForSize(size, bold);
         int gw = font.Width * scale, gh = font.Height * scale;
         int cx = x;

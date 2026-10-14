@@ -72,6 +72,17 @@ public static class SurfaceModule
         r["surfaceText"] = a => (double)S(a[0]).Canvas.DrawText(a[1]?.ToString() ?? "", I(a[2]), I(a[3]), I(a[4]), C(a[5]), OptB(a, 6));
         r["textWidth"] = a => (double)SoftCanvas.TextWidth(a[0]?.ToString() ?? "", I(a[1]), OptB(a, 2));
         r["textHeight"] = a => (double)SoftCanvas.TextHeight(I(a[0]), OptB(a, 1));
+        // surfaceFont("pixel" | "sans" | "mono") -> попередній. Шрифт для
+        // наступних surfaceText/textWidth/textHeight: піксельний Terminus
+        // (типово) або згладжені Noto Sans / Noto Sans Mono.
+        r["surfaceFont"] = a =>
+        {
+            string prev = SoftCanvas.FontFace;
+            string f = a.Length > 0 ? a[0]?.ToString() ?? "pixel" : "pixel";
+            if (f != "pixel" && f != "sans" && f != "mono") throw new Exception("surfaceFont: \"pixel\", \"sans\" або \"mono\"");
+            SoftCanvas.FontFace = f;
+            return prev;
+        };
         r["surfaceGetPixel"] = a =>
         {
             var c = S(a[0]).Canvas; int x = I(a[1]), y = I(a[2]);

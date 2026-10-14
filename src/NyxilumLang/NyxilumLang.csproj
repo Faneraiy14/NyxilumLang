@@ -37,6 +37,8 @@
     <!-- Растрові шрифти полотна surface* (Terminus Font, SIL OFL 1.1 -
          Runtime/Canvas/Fonts/LICENSE-TerminusFont.txt): латиниця + кирилиця. -->
     <EmbeddedResource Include="Runtime/Canvas/Fonts/*.psf.gz" LogicalName="NyxilumLang.Fonts.%(Filename)%(Extension)" />
+    <!-- Noto Sans / Noto Sans Mono (OFL-1.1, Fonts/LICENSE-NotoFonts.txt) - surfaceFont("sans"/"mono") -->
+    <EmbeddedResource Include="Runtime/Canvas/Fonts/*.ttf" LogicalName="NyxilumLang.Fonts.%(Filename)%(Extension)" />
   </ItemGroup>
 
   <ItemGroup>

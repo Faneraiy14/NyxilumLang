@@ -200,7 +200,7 @@ public class Compiler
         "guiSetProgress",
         "timeMs", "rgb", "rgba", "surfaceOpen", "surfaceClose", "surfaceIsOpen", "surfaceWidth", "surfaceHeight", "surfaceTitle",
         "surfacePresent", "surfaceClear", "surfaceRect", "surfaceRectLine", "surfaceRoundRect", "surfaceCircle",
-        "surfaceCircleLine", "surfaceLine", "surfacePolygon", "surfaceText", "textWidth", "textHeight",
+        "surfaceCircleLine", "surfaceLine", "surfacePolygon", "surfaceText", "textWidth", "textHeight", "surfaceFont",
         "surfaceClip", "surfaceUnclip", "surfaceNextEvent", "surfaceMouseX", "surfaceMouseY", "surfaceMouseDown",
         "surfaceKeyDown", "surfaceDrawFrame", "surfaceGetPixel", "surfaceSave", "surfacePostEvent", "clipboardGet", "clipboardSet",
         "gc_stats", "gc_collect", "gc_limit", "exit",
