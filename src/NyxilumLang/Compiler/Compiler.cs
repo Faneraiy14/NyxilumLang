@@ -387,6 +387,7 @@ public class Compiler
                 {
                     var p = func.Parameters[j];
                     _vars[p.Name] = _varCounter++;
+                    _bytecode.DeclareVar(_vars[p.Name], p.Name);
                     _bytecode.Emit(OpCode.STORE_VAR, _vars[p.Name]);
                 }
 
@@ -500,6 +501,7 @@ public class Compiler
                 else
                 {
                     _vars[v.Name] = _varCounter++;
+                    _bytecode!.DeclareVar(_vars[v.Name], v.Name);
                     _bytecode!.Emit(OpCode.STORE_VAR, _vars[v.Name]);
                 }
                 break;
@@ -545,6 +547,7 @@ public class Compiler
                     _bytecode.Emit(OpCode.STORE_VAR, idxSlot);
 
                     _vars[f.VariableName] = _varCounter++;
+                    _bytecode.DeclareVar(_vars[f.VariableName], f.VariableName);
 
                     int arrLoopStart = _bytecode.Code.Count;
                     _bytecode.Emit(OpCode.LOAD_VAR, idxSlot);
@@ -581,6 +584,7 @@ public class Compiler
                 break;
             case ForStatement f:
                 _vars[f.VariableName] = _varCounter++;
+                _bytecode!.DeclareVar(_vars[f.VariableName], f.VariableName);
                 CompileExpression(f.Start);
                 _bytecode!.Emit(OpCode.STORE_VAR, _vars[f.VariableName]);
 
@@ -628,6 +632,7 @@ public class Compiler
                 {
                     _vars[t.CatchVariableName] = _varCounter++;
                     int catchVarSlot = _vars[t.CatchVariableName];
+                    _bytecode!.DeclareVar(catchVarSlot, t.CatchVariableName);
 
                     _bytecode!.Emit(OpCode.TRY_BEGIN, 0, catchVarSlot);
                     int catchAddrPatchPos = _bytecode.Code.Count - 2 * Bytecode.ArgSize;
@@ -936,6 +941,7 @@ public class Compiler
                     {
                         var p = fn.Parameters[j];
                         _vars[p.Name] = _varCounter++;
+                        _bytecode.DeclareVar(_vars[p.Name], p.Name);
                         _bytecode.Emit(OpCode.STORE_VAR, _vars[p.Name]);
                     }
 

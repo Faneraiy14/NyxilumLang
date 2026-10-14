@@ -86,6 +86,13 @@ public class Bytecode
     // послідовно), тож VirtualMachine шукає останній запис з Offset <= IP.
     public List<(int Offset, int Line)> LineMap { get; } = new();
 
+    // Для налагоджувача (NX_DEBUG=1): де в байткоді оголошено змінну з
+    // якою назвою в якому слоті - слоти нумеруються з 0 для кожної функції,
+    // тож назву шукаємо серед оголошень у межах тієї самої функції.
+    public List<(int Offset, int Slot, string Name)> VarDecls { get; } = new();
+
+    public void DeclareVar(int slot, string name) => VarDecls.Add((Code.Count, slot, name));
+
     public void MarkLine(int line)
     {
         // Кілька виразів в одному рядку джерела не повинні плодити

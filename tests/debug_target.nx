@@ -1,0 +1,15 @@
+var лічильник = 0
+
+func подвоїти(x) {
+    var r = x * 2
+    return r
+}
+
+func main() {
+    var a = 5
+    var b = подвоїти(a)
+    for i in 0..2 {
+        лічильник = лічильник + i
+    }
+    print("b = " + toString(b))
+}

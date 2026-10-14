@@ -809,6 +809,9 @@ public class VirtualMachine
         _constants = bytecode.Constants;
         _functionAddresses = bytecode.FunctionAddresses;
         _lineMap = bytecode.LineMap;
+        _varDecls = bytecode.VarDecls;
+        _debug = Environment.GetEnvironmentVariable("NX_DEBUG") == "1";
+        if (_debug) foreach (var (off, _) in _lineMap) _lineStarts.Add(off);
         InitGlobals(initialGlobals);
     }
 
@@ -858,6 +861,133 @@ public class VirtualMachine
     // функцією, всередині якої ми зараз). null-адреса (ip до першої
     // функції, тобто код верхнього рівня файлу) — не помилка, а
     // "<основний код>".
+    // ---------- налагоджувач (NX_DEBUG=1, для покрокового запуску в Nx IDE) ----------
+    //
+    // Перед першим байтом кожного нового рядка джерела (LineMap) VM вирішує,
+    // чи зупинитись: крок (s), крок без заходу у функції (n), вийти з функції
+    // (o), до точки зупинки (c). Зупинка - один рядок JSON у stderr з
+    // префіксом \u0001NXDBG (IDE відрізняє його від звичайного виводу), далі
+    // VM читає команду зі stdin. На старті - рукостискання: IDE надсилає
+    // точки зупинки ("b 3,7") і перший режим. stdin у паузі належить
+    // налагоджувачу, поза паузою - програмі (readLine) - IDE не змішує їх.
+    // Номери рядків - без назви файлу: точно для програм з одного файла.
+    private readonly List<(int Offset, int Slot, string Name)> _varDecls = new();
+    private readonly bool _debug;
+    private readonly HashSet<int> _lineStarts = new();
+    private readonly HashSet<int> _breakpoints = new();
+    private string _dbgMode = "step";
+    private int _dbgDepth;
+
+    private void DebugHandshake()
+    {
+        Console.Error.WriteLine("\u0001NXDBG {\"event\":\"ready\"}");
+        Console.Error.Flush();
+        DebugReadCommand();
+    }
+
+    private void DebugHook()
+    {
+        int depth = _callStack.Count;
+        // код верхнього рівня (ініціалізація глобальних, службові слоти VM) -
+        // не для покрокового перегляду: зупинки лише всередині функцій
+        if (depth == 0) return;
+        int line = LineAt(_ip);
+        bool pause = _dbgMode switch
+        {
+            "step" => true,
+            "next" => depth <= _dbgDepth,
+            "out" => depth < _dbgDepth,
+            _ => _breakpoints.Contains(line)
+        };
+        if (!pause) return;
+        var ev = new Dictionary<string, object?>
+        {
+            ["event"] = "paused",
+            ["line"] = line,
+            ["func"] = FunctionNameAt(_ip),
+            ["depth"] = depth,
+            ["locals"] = DebugLocals(),
+            ["globals"] = DebugGlobals()
+        };
+        Console.Out.Flush();
+        Console.Error.WriteLine("\u0001NXDBG " + System.Text.Json.JsonSerializer.Serialize(ev));
+        Console.Error.Flush();
+        DebugReadCommand();
+    }
+
+    private void DebugReadCommand()
+    {
+        while (true)
+        {
+            var cmd = Console.In.ReadLine();
+            if (cmd == null) { _dbgMode = "off"; return; }
+            cmd = cmd.Trim();
+            if (cmd.StartsWith("b"))
+            {
+                _breakpoints.Clear();
+                foreach (var part in cmd.Substring(1).Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+                    if (int.TryParse(part, out var ln)) _breakpoints.Add(ln);
+                continue;
+            }
+            switch (cmd)
+            {
+                case "s": _dbgMode = "step"; return;
+                case "n": _dbgMode = "next"; _dbgDepth = _callStack.Count; return;
+                case "o": _dbgMode = "out"; _dbgDepth = _callStack.Count; return;
+                case "c": _dbgMode = "cont"; return;
+                case "q": Environment.Exit(0); return;
+            }
+        }
+    }
+
+    private static string DebugType(object? v) => v switch
+    {
+        null => "null",
+        double or int or long => "число",
+        string => "текст",
+        bool => "так/ні",
+        List<object> => "масив",
+        NxMap => "мапа",
+        Dictionary<string, object> => "структура",
+        NxFunctionRef => "функція",
+        _ => v.GetType().Name
+    };
+
+    private static string DebugShort(object? v)
+    {
+        var s = v is string str ? "\"" + str + "\"" : (v == null ? "null" : FormatValue(v));
+        return s.Length > 120 ? s.Substring(0, 117) + "..." : s;
+    }
+
+    private List<object> DebugLocals()
+    {
+        int start = 0, end = int.MaxValue;
+        foreach (var (_, addr) in _functionAddresses)
+        {
+            if (addr <= _ip && addr > start) start = addr;
+        }
+        foreach (var (_, addr) in _functionAddresses)
+        {
+            if (addr > start && addr < end) end = addr;
+        }
+        var names = new Dictionary<int, string>();
+        foreach (var (off, slot, name) in _varDecls)
+            if (off >= start && off < end && off <= _ip) names[slot] = name;
+        var list = new List<object>();
+        foreach (var (slot, value) in _currentFrame.Entries())
+            if (names.TryGetValue(slot, out var n)) list.Add(new[] { n, DebugShort(value), DebugType(value) });
+        return list;
+    }
+
+    private List<object> DebugGlobals()
+    {
+        var list = new List<object>();
+        foreach (var kv in _globals)
+            if (kv.Value.IsSet && kv.Value.Value is not NxFunctionRef)
+                list.Add(new[] { kv.Key, DebugShort(kv.Value.Value), DebugType(kv.Value.Value) });
+        return list;
+    }
+
     private string FunctionNameAt(int ip)
     {
         string? best = null;
@@ -918,10 +1048,12 @@ public class VirtualMachine
         _currentFrame[0] = this; // Store VM in globals for callbacks if needed
         _currentFrame[1] = _nativeFunctions; // Allow access to native functions if needed
 
+        if (_debug) DebugHandshake();
         while (_ip < _code.Length)
         {
             try
             {
+                if (_debug && _lineStarts.Contains(_ip)) DebugHook();
                 if (!Step()) return;
             }
             // _handlers.Count == 0 тут означає "жоден NyxilumLang try/catch це

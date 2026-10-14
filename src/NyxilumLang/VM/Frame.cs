@@ -47,6 +47,13 @@ public sealed class Frame
         }
     }
 
+    // Заповнені слоти (для налагоджувача).
+    public IEnumerable<(int Slot, object? Value)> Entries()
+    {
+        for (int i = 0; i < _used && i < _slots.Length; i++)
+            if (!ReferenceEquals(_slots[i], Unset)) yield return (i, _slots[i]);
+    }
+
     // Повторне використання кадру (пул у VM): лише заповнена частина.
     public void Reset()
     {
