@@ -487,9 +487,13 @@ public class Parser
 
     private ReturnStatement ParseReturnStatement()
     {
-        Advance();
+        var ret = Advance();
         ExpressionNode? value = null;
-        if (Peek().Type != TokenType.Punctuation || Peek().Value != "}") value = ParseExpression();
+        // значення - лише в тому ж рядку: "return" і з нового рядка "print(2)" -
+        // це голий return і мертвий код після нього, а не "return print(2)"
+        var next = Peek();
+        bool bare = next.Type == TokenType.EOF || (next.Type == TokenType.Punctuation && next.Value == "}") || next.Line != ret.Line;
+        if (!bare) value = ParseExpression();
         return new ReturnStatement(value);
     }
 

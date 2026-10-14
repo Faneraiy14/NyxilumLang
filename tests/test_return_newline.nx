@@ -1,0 +1,23 @@
+// Регресія: голий return, а з нового рядка - вираз. Раніше розбиралось як
+// "return print(2)" - і print(2) ВИКОНУВАВСЯ. Тепер значення return - лише
+// в тому ж рядку, а код нижче - мертвий (Anylint: dead-code-after-return).
+import "../lib/testing.nx" { assertEqual }
+
+var лічильник = 0
+
+func крок() {
+    лічильник = лічильник + 1
+    return
+    лічильник = лічильник + 100
+}
+
+func значення() {
+    return 7
+}
+
+func main() {
+    крок()
+    assertEqual(лічильник, 1, "код після голого return не виконується")
+    assertEqual(значення(), 7, "return зі значенням у тому ж рядку")
+    print("OK: return")
+}
