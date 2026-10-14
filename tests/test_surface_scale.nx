@@ -1,0 +1,37 @@
+// Масштаб інтерфейсу (surfaceScale): програма працює в логічних пікселях,
+// полотно - у фізичних; події миші повертаються в логічних.
+import "../lib/testing.nx" { assertEqual, assertTrue }
+
+func main() {
+    var s = surfaceOpen("масштаб", 200, 100)
+    assertEqual(surfaceScale(2), 1, "типово масштаб 1")
+    assertEqual(surfaceWidth(s), 100, "логічна ширина = фізична / 2")
+    assertEqual(surfaceHeight(s), 50, "логічна висота")
+    surfaceClear(s, 0)
+    surfaceRect(s, 10, 10, 5, 5, 0xff0000)
+    // surfaceGetPixel - теж у логічних координатах
+    assertEqual(surfaceGetPixel(s, 12, 12), 0xff0000, "прямокутник на місці")
+    assertEqual(surfaceGetPixel(s, 15, 15), 0, "права межа не входить")
+    surfaceSave(s, scriptDir() + "/../.scale_test.png")
+    deleteFile(scriptDir() + "/../.scale_test.png")
+    // подія: логічна -> у черзі фізична -> програмі знову логічна
+    var e = newMap()
+    mapSet(e, "type", "mousedown")
+    mapSet(e, "x", 33)
+    mapSet(e, "y", 21)
+    mapSet(e, "button", 1)
+    surfacePostEvent(s, e)
+    var got = surfaceNextEvent(s, 0)
+    assertEqual(got.x, 33, "x події в логічних пікселях")
+    assertEqual(got.y, 21, "y події в логічних пікселях")
+    assertEqual(surfaceMouseX(s), 33, "surfaceMouseX у логічних")
+    surfaceFont("sans")
+    var w1 = textWidth("Привіт, світе", 16)
+    surfaceScale(1)
+    var w2 = textWidth("Привіт, світе", 16)
+    assertTrue(abs(w1 - w2) <= 2, "ширина тексту майже та сама на будь-якому масштабі")
+    assertEqual(surfaceScale(1.5), 1, "повертає попередній")
+    assertEqual(surfaceWidth(s), 133, "масштаб 1.5")
+    surfaceScale(1)
+    print("OK: scale")
+}
