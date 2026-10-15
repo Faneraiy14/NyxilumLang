@@ -71,6 +71,9 @@ func outer() {
 print(outer()) // 42
 ```
 
+Значення `return` - лише в тому ж рядку: `return` і вираз з нового рядка - це голий `return`, а код
+нижче вже не виконується (Anylint позначить його як мертвий).
+
 ### Управляючі конструкції
 ```nx
 if (x > 0) {
@@ -481,6 +484,13 @@ func main() {
 - Текст (вшитий шрифт Terminus: латиниця, кирилиця, ґ/є/і/ї, стрілки): `surfaceText(s, текст, x, y, розмір, колір, жирний?)`
   повертає ширину; розміри 12/14/16/20/24/28/32 (більші - збільшені). `textWidth(текст, розмір)`, `textHeight(розмір)`.
   Шрифт моноширинний - зручно для редакторів коду.
+- Шрифти: `surfaceFont("pixel" | "sans" | "mono")` повертає попередній. `"pixel"` (типово) - Terminus;
+  `"sans"`/`"mono"` - згладжені Noto Sans / Noto Sans Mono (вшиті, OFL; у мові власний розбір і
+  растеризація TrueType, тож текст однаковий на всіх платформах). Гліфи, яких у шрифті нема (стрілки, √),
+  беруться з іншого шрифту чи Terminus. Клітинка тексту - так само `size` пікселів заввишки, тож
+  розкладка під піксельний шрифт не зсувається.
+- Масштаб інтерфейсу: `surfaceScale(k)` (напр. `1.5`) повертає попередній. Програма далі малює й отримує
+  координати миші в логічних пікселях, полотно - у `k` разів більше, TTF-текст лишається чітким.
 - Обрізання: `surfaceClip(s, x, y, w, h)` ... `surfaceUnclip(s)` (вкладаються).
 - Події: `surfaceNextEvent(s, чекатиМс?)` - структура або `null`. Поля: `type`
   (`mousedown`/`mouseup`/`mousemove`/`wheel`/`key`/`keyup`/`text`/`resize`/`close`),
@@ -534,7 +544,7 @@ func main() {
 - `osProcessList()` - масив усіх процесів ОС (не лише дочірніх, як `procRun`/`procStart`), кожен - `{pid, name, memMB, cpuPercent}`; `cpuPercent` рахується як `top`/`htop` - двома замірами `TotalProcessorTime` з паузою ~200мс між ними, тож виклик не миттєвий. Процеси, що завершились між замірами, просто пропускаються, не валять виклик
 - `osDiskFree(path?)` - `{freeGB, totalGB}` для тому, що містить `path` (типово поточна директорія)
 - `notify(title, message)` - системне push-сповіщення ОС (не власне вікно програми - справжній баблик поверх усіх вікон, як у месенджерів): `notify-send` на Linux, `osascript` на macOS, `NotifyIcon`-балон через PowerShell на Windows
-- `procStart(cmd, args?, options?)` - запускає зовнішній процес ОС і одразу повертає хендл, НЕ чекаючи завершення (`args` - масив рядків, `options` - мапа з `cwd`/`env`); `procRun(cmd, args?, options?)` - те саме, але БЛОКУЄ до завершення й повертає мапу `{exitCode, stdout, stderr}`; `procWait(h)` - чекає завершення вже запущеного `procStart`, повертає код виходу; `procIsRunning(h)`, `procKill(h)`, `procPid(h)`, `procExitCode(h)` (`null`, доки процес ще працює); `procOutput(h)`/`procErrorOutput(h)` - усе, що процес вивів у stdout/stderr ДОСІ (можна перечитувати повторно, поки процес ще працює). У пісочниці (`NX_SANDBOX=1`) заборонено завжди
+- `procStart(cmd, args?, options?)` - запускає зовнішній процес ОС і одразу повертає хендл, НЕ чекаючи завершення (`args` - масив рядків, `options` - мапа з `cwd`/`env`/`interactive` (stdin відкритий для `procWrite`)/`rawArgs` (рядок аргументів як є, напр. `cmd.exe /s /c "..."` на Windows)); дочірній `nx`, запущений з `env` `NX_EXIT_WITH_PARENT=1`, завершується сам, коли батьківського процесу не стало; `procRun(cmd, args?, options?)` - те саме, але БЛОКУЄ до завершення й повертає мапу `{exitCode, stdout, stderr}`; `procWait(h)` - чекає завершення вже запущеного `procStart`, повертає код виходу; `procIsRunning(h)`, `procKill(h)`, `procPid(h)`, `procExitCode(h)` (`null`, доки процес ще працює); `procOutput(h)`/`procErrorOutput(h)` - усе, що процес вивів у stdout/stderr ДОСІ (можна перечитувати повторно, поки процес ще працює). У пісочниці (`NX_SANDBOX=1`) заборонено завжди
 - `httpGet(url)`, `urlStatus(url)` - HTTP-запити
 - `httpPost(url, body)` - POST-запит з тілом `body` (Content-Type `application/json`), повертає тіло відповіді рядком
 - `httpRequest(url, method, body?, headers?)` - запит довільним методом (`"PUT"`, `"DELETE"`, `"PATCH"` тощо), повертає мапу `{status, body}`; `headers` - мапа (`newMap`/`mapSet`) для заголовків на кшталт `Authorization`
@@ -552,6 +562,7 @@ func main() {
 `nx program.nx`
 
 Інші команди:
+- `nx update-self [--check] [--force]` - оновити сам nx (і Nx IDE, `lib/`, документацію поруч) до останнього релізу NyxilumNode
 - `nx ide [тека]` - Nx IDE: середовище з блоками (як Scratch) і кодом, уроками й прикладами (входить у реліз NyxilumNode; з клону - `NX_IDE_HOME=/шлях/до/NyxilumIDE nx ide`)
 - `nx format program.nx` - вивести відформатований код
 - `nx lint program.nx` - перевірити код на типові помилки (невикористані змінні, задовгі рядки, порожні блоки)

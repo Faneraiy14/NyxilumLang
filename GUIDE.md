@@ -72,6 +72,9 @@ func outer() {
 print(outer()) // 42
 ```
 
+The value of `return` must be on the same line: `return` followed by an expression on the next line is a
+bare `return`, and the code below it no longer runs (Anylint flags it as dead code).
+
 ### Control Flow
 ```nx
 if (x > 0) {
@@ -499,6 +502,13 @@ func main() {
   `surfaceCircleLine`, `surfaceLine`, `surfacePolygon(s, [x1, y1, x2, y2, ...], color)`.
 - Text (embedded Terminus font: Latin, Cyrillic, arrows): `surfaceText(s, text, x, y, size, color, bold?)`
   returns the width; sizes 12/14/16/20/24/28/32 (larger ones are scaled). `textWidth(text, size)`, `textHeight(size)`. Monospace.
+- Fonts: `surfaceFont("pixel" | "sans" | "mono")` returns the previous one. `"pixel"` (default) - Terminus;
+  `"sans"`/`"mono"` - antialiased Noto Sans / Noto Sans Mono (embedded, OFL; the language has its own
+  TrueType parser and rasterizer, so text looks the same on every platform). Glyphs a font lacks
+  (arrows, √) come from the other font or Terminus. The text cell is still `size` pixels tall, so a
+  layout made for the pixel font doesn't shift.
+- UI scale: `surfaceScale(k)` (e.g. `1.5`) returns the previous one. The program keeps drawing and
+  receiving mouse coordinates in logical pixels, the canvas is `k` times larger, TTF text stays crisp.
 - Clipping: `surfaceClip(s, x, y, w, h)` ... `surfaceUnclip(s)` (nestable).
 - Events: `surfaceNextEvent(s, waitMs?)` - a struct or `null`. Fields: `type`
   (`mousedown`/`mouseup`/`mousemove`/`wheel`/`key`/`keyup`/`text`/`resize`/`close`),
@@ -552,7 +562,7 @@ func main() {
 - `osProcessList()` - array of every OS process (not just child ones like `procRun`/`procStart`), each `{pid, name, memMB, cpuPercent}`; `cpuPercent` is computed the way `top`/`htop` do it - two `TotalProcessorTime` samples with a ~200ms pause between them, so the call isn't instant. Processes that exited between the two samples are simply skipped, they don't fail the call
 - `osDiskFree(path?)` - `{freeGB, totalGB}` for the volume containing `path` (defaults to the current directory)
 - `notify(title, message)` - a native OS push notification (not the app's own window - a real bubble on top of everything else, like in messenger apps): `notify-send` on Linux, `osascript` on macOS, a `NotifyIcon` balloon via PowerShell on Windows
-- `procStart(cmd, args?, options?)` - launches an external OS process and returns a handle right away, NOT waiting for completion (`args` - array of strings, `options` - a map with `cwd`/`env`); `procRun(cmd, args?, options?)` - the same, but BLOCKS until completion and returns the map `{exitCode, stdout, stderr}`; `procWait(h)` - waits for an already-started `procStart` to finish, returns the exit code; `procIsRunning(h)`, `procKill(h)`, `procPid(h)`, `procExitCode(h)` (`null` while the process is still running); `procOutput(h)`/`procErrorOutput(h)` - everything the process has written to stdout/stderr SO FAR (can be re-read repeatedly while the process is still running). Always forbidden in the sandbox (`NX_SANDBOX=1`)
+- `procStart(cmd, args?, options?)` - launches an external OS process and returns a handle right away, NOT waiting for completion (`args` - array of strings, `options` - a map with `cwd`/`env`/`interactive` (stdin open for `procWrite`)/`rawArgs` (the argument string passed as is, e.g. `cmd.exe /s /c "..."` on Windows)); a child `nx` started with `env` `NX_EXIT_WITH_PARENT=1` exits by itself when the parent process is gone; `procRun(cmd, args?, options?)` - the same, but BLOCKS until completion and returns the map `{exitCode, stdout, stderr}`; `procWait(h)` - waits for an already-started `procStart` to finish, returns the exit code; `procIsRunning(h)`, `procKill(h)`, `procPid(h)`, `procExitCode(h)` (`null` while the process is still running); `procOutput(h)`/`procErrorOutput(h)` - everything the process has written to stdout/stderr SO FAR (can be re-read repeatedly while the process is still running). Always forbidden in the sandbox (`NX_SANDBOX=1`)
 - `httpGet(url)`, `urlStatus(url)` - HTTP requests
 - `httpPost(url, body)` - a POST request with body `body` (Content-Type `application/json`), returns the response body as a string
 - `httpRequest(url, method, body?, headers?)` - a request with an arbitrary method (`"PUT"`, `"DELETE"`, `"PATCH"`, etc.), returns the map `{status, body}`; `headers` - a map (`newMap`/`mapSet`) for headers like `Authorization`
@@ -570,6 +580,7 @@ platform (Windows/Linux/Mac) — pass it a file path:
 `nx program.nx`
 
 Other commands:
+- `nx update-self [--check] [--force]` - update nx itself (and Nx IDE, `lib/`, docs next to it) to the latest NyxilumNode release
 - `nx ide [folder]` - Nx IDE: a blocks (Scratch-like) + code environment with lessons and examples (shipped in the NyxilumNode release; from a clone - `NX_IDE_HOME=/path/to/NyxilumIDE nx ide`)
 - `nx format program.nx` - print formatted code
 - `nx lint program.nx` - check the code for common mistakes (unused variables, overly long lines, empty blocks)
