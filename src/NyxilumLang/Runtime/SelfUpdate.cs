@@ -63,6 +63,21 @@ public static class SelfUpdate
         string repo = Opt(args, "--repo") ?? DefaultRepo;
         string prefix = Opt(args, "--prefix") ?? "Nx";
         string? currentOpt = Opt(args, "--current");
+        // nx усередині окремої програми Nx IDE (поруч nx-ide.json): за
+        // замовчуванням оновлюємо саму програму, а не ставимо поверх неї
+        // архів NyxilumNode з іншою будовою
+        var appJson = Path.Combine(Path.GetDirectoryName(Environment.ProcessPath ?? "") ?? "", "nx-ide.json");
+        if (Opt(args, "--repo") == null && File.Exists(appJson))
+        {
+            try
+            {
+                using var j = JsonDocument.Parse(File.ReadAllText(appJson));
+                if (j.RootElement.TryGetProperty("repo", out var r)) repo = r.GetString() ?? repo;
+                if (j.RootElement.TryGetProperty("version", out var v)) currentOpt ??= v.GetString();
+                prefix = "NxIDE";
+            }
+            catch { /* зіпсований json - як звичайний nx */ }
+        }
         var rid = Rid();
         if (rid == null)
         {
