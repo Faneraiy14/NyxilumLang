@@ -8,6 +8,12 @@ namespace NyxilumLang.Runtime;
 // nx update-self [--check] [--force] - оновити сам nx (і Nx IDE, бібліотеку,
 // документацію поруч з ним) до останнього релізу NyxilumNode.
 //
+// Окрема програма Nx IDE (свої релізи в NyxilumIDE, свій вбудований nx)
+// оновлюється тим самим механізмом:
+//   nx update-self --repo Faneraiy14/NyxilumIDE --prefix NxIDE --current 1.0.0
+// --repo - звідки брати релізи, --prefix - назва архіву (<prefix>-<rid>.<ext>),
+// --current - встановлена версія програми (замість версії самого nx).
+//
 // Береться реліз з GitHub API, архів під цю платформу (linux-x64, osx-x64,
 // osx-arm64, win-x64), розпаковується в тимчасову теку й копіюється поверх
 // теки встановлення (там, де лежить сам nx). Запущений nx.exe Windows не
@@ -16,7 +22,13 @@ namespace NyxilumLang.Runtime;
 // Дані користувача (~/.nyx-ide, теки з програмами) не чіпаються.
 public static class SelfUpdate
 {
-    private const string Repo = "Faneraiy14/NyxilumNode";
+    private const string DefaultRepo = "Faneraiy14/NyxilumNode";
+
+    private static string? Opt(string[] args, string name)
+    {
+        int i = Array.IndexOf(args, name);
+        return i >= 0 && i + 1 < args.Length ? args[i + 1] : null;
+    }
 
     public static string? Rid()
     {
@@ -48,6 +60,9 @@ public static class SelfUpdate
     {
         bool checkOnly = args.Contains("--check");
         bool force = args.Contains("--force");
+        string repo = Opt(args, "--repo") ?? DefaultRepo;
+        string prefix = Opt(args, "--prefix") ?? "Nx";
+        string? currentOpt = Opt(args, "--current");
         var rid = Rid();
         if (rid == null)
         {
@@ -57,14 +72,16 @@ public static class SelfUpdate
         var exe = Environment.ProcessPath ?? throw new Exception("не знайдено шлях до nx");
         var dir = Path.GetDirectoryName(exe)!;
 
-        Console.WriteLine("Перевіряю останній реліз NyxilumNode...");
+        Console.WriteLine($"Перевіряю останній реліз {repo.Split('/').Last()}...");
         JsonDocument rel;
         using (var http = NewClient())
         {
-            try { rel = JsonDocument.Parse(http.GetStringAsync($"https://api.github.com/repos/{Repo}/releases/latest").Result); }
+            try { rel = JsonDocument.Parse(http.GetStringAsync($"https://api.github.com/repos/{repo}/releases/latest").Result); }
             catch (Exception e)
             {
-                Console.WriteLine("Не вдалося зв'язатися з GitHub: " + (e.InnerException?.Message ?? e.Message));
+                var msg = e.InnerException?.Message ?? e.Message;
+                if (msg.Contains("404")) { Console.WriteLine($"У {repo} ще нема релізів."); return 0; }
+                Console.WriteLine("Не вдалося зв'язатися з GitHub: " + msg);
                 return 1;
             }
         }
@@ -72,6 +89,8 @@ public static class SelfUpdate
         if (!Version.TryParse(tag.TrimStart('v'), out var latest)) { Console.WriteLine("Незрозуміла версія релізу: " + tag); return 1; }
         latest = new Version(latest.Major, latest.Minor, Math.Max(0, latest.Build));
         var cur = Current();
+        if (currentOpt != null && Version.TryParse(currentOpt.TrimStart('v'), out var co))
+            cur = new Version(co.Major, co.Minor, Math.Max(0, co.Build));
         Console.WriteLine($"Встановлено: v{cur}   останній: v{latest}");
         if (latest <= cur && !force)
         {
@@ -85,7 +104,7 @@ public static class SelfUpdate
         }
 
         string ext = rid.StartsWith("win") ? "zip" : "tar.gz";
-        string want = $"Nx-{rid}.{ext}";
+        string want = $"{prefix}-{rid}.{ext}";
         string? url = null;
         foreach (var a in rel.RootElement.GetProperty("assets").EnumerateArray())
             if (a.GetProperty("name").GetString() == want) url = a.GetProperty("browser_download_url").GetString();
