@@ -1150,7 +1150,7 @@ public class VirtualMachine
         return _stack.Count > 0 ? _stack.Pop() : null;
     }
 
-    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.AggressiveOptimization)]
+    // [AggressiveOptimization] прибрано: такі методи не беруться з ReadyToRun і JIT-яться при кожному старті (+~100 мс)
     private bool Step()
     {
             if (_hasSuper != null && _hasSuper[_ip] && TryExecSuper(_super![_ip]!.Value)) return true;
@@ -1288,7 +1288,7 @@ public class VirtualMachine
 
     // Рідші інструкції (див. коментар у Step). Винятки звідси летять у
     // try/catch самого Step - обробка помилок та сама.
-    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.AggressiveOptimization)]
+    // [AggressiveOptimization] прибрано: такі методи не беруться з ReadyToRun і JIT-яться при кожному старті (+~100 мс)
     private bool StepRest(OpCode op)
     {
             switch (op)
@@ -1678,7 +1678,7 @@ public class VirtualMachine
     // (нічого не займає з _stack, не рухає _ip), якщо guard типів не
     // пройшов, — тоді Step() просто продовжує звичайний switch з того ж
     // самого _ip, наче superinstruction тут і не було.
-    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.AggressiveOptimization)]
+    // [AggressiveOptimization] прибрано: такі методи не беруться з ReadyToRun і JIT-яться при кожному старті (+~100 мс)
     private bool TryExecSuper(SuperOp s)
     {
         switch (s.Kind)

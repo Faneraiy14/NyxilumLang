@@ -34,6 +34,10 @@ public static class ModuleResolver
         public readonly HashSet<string> InProgress = new(StringComparer.OrdinalIgnoreCase);
     }
 
+    // Файли, прочитані останнім ResolveImports (для BytecodeCache: кеш
+    // дійсний, лише поки жоден з них не змінився).
+    [ThreadStatic] public static List<string>? LastFiles;
+
     public static ProgramNode ResolveImports(ProgramNode program, string entryFilePath)
     {
         var ctx = new Context();
@@ -41,6 +45,7 @@ public static class ModuleResolver
         ctx.InProgress.Add(entry);
         var baseDir = Path.GetDirectoryName(entry) ?? ".";
         var flat = Expand(program, baseDir, ctx);
+        LastFiles = ctx.Cache.Keys.ToList();
 
         var merged = new ProgramNode();
         var seen = new HashSet<StatementNode>(ReferenceEqualityComparer.Instance);

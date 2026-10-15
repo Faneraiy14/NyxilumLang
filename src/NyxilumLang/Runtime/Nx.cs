@@ -532,18 +532,56 @@ public class Nx
         }
     }
 
+    // NX_TRACE_STARTUP=1 - скільки займає кожен етап запуску (stderr):
+    // для пошуку, що сповільнює старт програм і Nx IDE.
+    private static readonly bool TraceStartup = Environment.GetEnvironmentVariable("NX_TRACE_STARTUP") == "1";
+    private static System.Diagnostics.Stopwatch? _traceSw;
+    private static void Trace(string stage)
+    {
+        if (!TraceStartup) return;
+        if (_traceSw == null)
+        {
+            var sinceStart = DateTime.Now - System.Diagnostics.Process.GetCurrentProcess().StartTime;
+            Console.Error.WriteLine($"[старт] від запуску процесу до Main-етапів: {sinceStart.TotalMilliseconds:F0} мс");
+            _traceSw = System.Diagnostics.Stopwatch.StartNew();
+        }
+        Console.Error.WriteLine($"[старт] {stage}: {_traceSw.Elapsed.TotalMilliseconds:F1} мс");
+        _traceSw.Restart();
+    }
+
     private static void Execute(string code, string? sourcePath = null)
     {
-        var lexer = new Lexer(code);
-        var tokens = lexer.Tokenize();
-        var parser = new Parser(tokens);
-        var program = parser.ParseProgram();
+        // скомпільований раніше байткод, якщо жоден файл не змінився
+        Trace("старт");
+        bool cacheable = sourcePath != null && BytecodeCache.Enabled;
+        Compiler.Bytecode? bytecode = cacheable ? BytecodeCache.TryLoad(sourcePath!) : null;
+        if (bytecode != null) Trace("байткод з кешу");
+        else
+        {
+            Trace("до лексера");
+            var lexer = new Lexer(code);
+            var tokens = lexer.Tokenize();
+            Trace("лексер");
+            var parser = new Parser(tokens);
+            var program = parser.ParseProgram();
+            Trace("парсер");
 
-        if (sourcePath != null)
-            program = ModuleResolver.ResolveImports(program, sourcePath);
+            ModuleResolver.LastFiles = null;
+            if (sourcePath != null)
+                program = ModuleResolver.ResolveImports(program, sourcePath);
+            Trace("import (модулі)");
 
-        var compiler = new Compiler.Compiler();
-        var bytecode = compiler.Compile(program);
+            var compiler = new Compiler.Compiler();
+            bytecode = compiler.Compile(program);
+            Trace("компілятор");
+            if (cacheable)
+            {
+                var deps = new List<string> { sourcePath! };
+                if (ModuleResolver.LastFiles != null) deps.AddRange(ModuleResolver.LastFiles);
+                BytecodeCache.Save(sourcePath!, deps, bytecode);
+                Trace("запис у кеш");
+            }
+        }
 
         // Опційний ліміт на кількість NyxilumLang-виділень (масиви/структури/
         // мапи) за весь запуск — захист від некерованого циклу виділень
@@ -553,6 +591,8 @@ public class Nx
             NxGc.Instance.SetLimit(gcLimit);
 
         var vm = new VirtualMachine(bytecode);
+        Trace("створення VM");
         vm.Run();
+        Trace("виконання");
     }
 }

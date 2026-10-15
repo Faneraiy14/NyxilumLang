@@ -1,0 +1,31 @@
+// Кеш байткоду: другий запуск бере скомпільоване з кешу, а зміна будь-якого
+// файла (і головного, і імпортованого) - компілює заново, тож стара версія
+// програми ніколи не запускається.
+import "../lib/testing.nx" { assertEqual, assertTrue }
+
+func run(path) {
+    var r = procRun(nxPath(), [path])
+    return trim(r.stdout)
+}
+
+func main() {
+    var dir = scriptDir() + "/.cache_test"
+    if (dirExists(dir)) { deleteDir(dir) }
+    makeDir(dir)
+    writeFile(dir + "/lib.nx", "func value() { return 1 }\n")
+    writeFile(dir + "/main.nx", "import \"lib.nx\"\nfunc main() {\n    print(value())\n}\n")
+    assertEqual(run(dir + "/main.nx"), "1", "перший запуск")
+    assertEqual(run(dir + "/main.nx"), "1", "другий запуск - з кешу")
+    sleep(20)
+    writeFile(dir + "/lib.nx", "func value() { return 2 }\n")
+    assertEqual(run(dir + "/main.nx"), "2", "змінився імпортований файл - нова версія")
+    sleep(20)
+    writeFile(dir + "/main.nx", "import \"lib.nx\"\nfunc main() {\n    print(value() * 10)\n}\n")
+    assertEqual(run(dir + "/main.nx"), "20", "змінився головний файл - нова версія")
+    // той самий розмір файла, інший вміст - час зміни однаково інший
+    sleep(20)
+    writeFile(dir + "/lib.nx", "func value() { return 3 }\n")
+    assertEqual(run(dir + "/main.nx"), "30", "той самий розмір, інший вміст")
+    deleteDir(dir)
+    print("OK: bytecode cache")
+}

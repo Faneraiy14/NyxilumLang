@@ -24,6 +24,12 @@
          місяцями показувала застарілу версію. Тримаємо орієнтовно
          актуальним про людське око, критичності немає. -->
     <Version>1.4.0</Version>
+    <!-- Старт: головний цикл VM (Step) береться з ReadyToRun, а не JIT-иться
+         при кожному запуску (раніше AggressiveOptimization давав +~100 мс на
+         старт будь-якої програми й Nx IDE). PGO вимкнено: з ним гарячий код
+         спершу проходить ще й інструментований рівень - на бенчмарку VM
+         це +~17% процесорного часу; без PGO - як з AggressiveOptimization. -->
+    <TieredPGO>false</TieredPGO>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <UseWindowsForms Condition="'$(TargetFramework)' == 'net10.0-windows'">true</UseWindowsForms>
