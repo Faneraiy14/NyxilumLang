@@ -433,6 +433,13 @@ public class Nx
 
     private static void RunIde(string[] ideArgs)
     {
+        // параметр, що починається з "-", - не тека з програмами
+        if (ideArgs.Length > 0 && ideArgs[0].StartsWith("-"))
+        {
+            Console.WriteLine("Використання: nx ide [тека з програмами]");
+            Console.WriteLine("  без теки - ~/NyxПрограми; Nx IDE: блоки (як Scratch) і код, уроки, приклади.");
+            return;
+        }
         var candidates = new List<string>();
         var home = Environment.GetEnvironmentVariable("NX_IDE_HOME");
         if (!string.IsNullOrEmpty(home)) candidates.Add(Path.Combine(home, "src", "ide.nx"));
