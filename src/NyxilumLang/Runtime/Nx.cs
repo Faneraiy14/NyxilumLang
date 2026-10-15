@@ -53,6 +53,7 @@ public class Nx
             return;
         }
 
+        SelfUpdate.CleanupOld();
         string command = args[0];
         if (command == "--version" || command == "-v")
         {
@@ -132,6 +133,13 @@ public class Nx
         if (command == "ide")
         {
             RunIde(args.Skip(1).ToArray());
+            return;
+        }
+
+        // nx update-self [--check] [--force] - оновити сам nx до останнього релізу
+        if (command == "update-self")
+        {
+            Environment.Exit(SelfUpdate.Run(args.Skip(1).ToArray()));
             return;
         }
 
