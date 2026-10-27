@@ -1,0 +1,70 @@
+// Псевдотермінал: програма бачить справжній термінал (розмір, Ctrl+C,
+// код виходу), ptyKill зупиняє процес. Плюс fileModified.
+import "../lib/testing.nx" { assertEqual, assertTrue }
+
+func waitFor(h, text) {
+    var all = ""
+    var i = 0
+    while (i < 200 && !contains(all, text)) {
+        all = all + ptyRead(h)
+        sleep(20)
+        i = i + 1
+    }
+    return all
+}
+
+func main() {
+    var win = contains(osPlatform(), "Windows")
+    if (contains(osPlatform(), "Darwin")) {
+        print("OK: pty (пропущено на " + osPlatform() + ")")
+        return
+    }
+    if (!win) {
+        var o = newMap()
+        mapSet(o, "cols", 40)
+        mapSet(o, "rows", 10)
+        mapSet(o, "cwd", "/tmp")
+        var h = ptyStart("sh", [], o)
+        ptyWrite(h, "stty size; pwd; echo T=$TERM\r")
+        var out = waitFor(h, "T=xterm")
+        assertTrue(contains(out, "10 40"), "розмір терміналу: " + out)
+        assertTrue(contains(out, "/tmp"), "cwd")
+        ptyResize(h, 100, 30)
+        ptyWrite(h, "stty size\r")
+        assertTrue(contains(waitFor(h, "30 100"), "30 100"), "ptyResize")
+        ptyWrite(h, "sleep 30\r")
+        sleep(200)
+        ptyWrite(h, fromCharCode(3))
+        ptyWrite(h, "echo далі\r")
+        assertTrue(contains(waitFor(h, "далі\r\n"), "далі"), "Ctrl+C зупинив sleep, шел живий")
+        ptyWrite(h, "exit 7\r")
+        var i = 0
+        while (ptyIsRunning(h) && i < 200) { sleep(20)  i = i + 1 }
+        assertEqual(ptyExitCode(h), 7, "код виходу")
+    } else {
+        var h3 = ptyStart("cmd.exe", ["/c", "echo привіт"])
+        var out3 = waitFor(h3, "привіт")
+        assertTrue(contains(out3, "привіт"), "вивід cmd: " + out3)
+    }
+    var cmd = "sleep"
+    var args = ["100"]
+    if (win) {
+        cmd = "ping"
+        args = ["-n", "100", "127.0.0.1"]
+    }
+    var h2 = ptyStart(cmd, args)
+    assertTrue(ptyIsRunning(h2), "працює")
+    ptyKill(h2)
+    assertTrue(!ptyIsRunning(h2), "ptyKill зупинив")
+
+    var f = scriptDir() + "/.pty_mtime_test"
+    writeFile(f, "a")
+    var t = fileModified(f)
+    assertTrue(t > 0, "fileModified")
+    sleep(30)
+    writeFile(f, "b")
+    assertTrue(fileModified(f) > t, "fileModified росте")
+    deleteFile(f)
+    assertEqual(fileModified(f), -1, "файла нема")
+    print("OK: pty")
+}

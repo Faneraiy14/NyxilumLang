@@ -112,3 +112,11 @@ jobs:
       - name: Build (net10.0-windows)
         working-directory: NyxilumLang
         run: dotnet build src/NyxilumLang -f net10.0-windows --configuration Release
+
+      # Псевдотермінал (ConPTY) - лише на справжньому Windows і перевіриш
+      - name: PTY test (ConPTY)
+        working-directory: NyxilumLang
+        shell: bash
+        run: |
+          dotnet build src/NyxilumLang -f net10.0 --configuration Release
+          src/NyxilumLang/bin/Release/net10.0/Nx.exe tests/test_pty.nx

@@ -171,7 +171,7 @@ public class Compiler
         "print", "printNoNewLine",
         "readLine", "readInt", "readDouble",
         "readFile", "writeFile", "appendFile", "fileExists", "readLines",
-        "deleteFile", "makeDir", "dirExists", "deleteDir", "listDir", "movePath", "copyFile",
+        "deleteFile", "makeDir", "dirExists", "deleteDir", "listDir", "movePath", "copyFile", "fileModified",
         "sqrt", "abs", "pow", "sin", "cos", "tan",
         "round", "floor", "ceil", "max", "min", "clamp",
         "toString", "toInt", "toDouble", "toFixed", "len",
@@ -207,6 +207,7 @@ public class Compiler
         "dbOpen", "dbClose", "dbSet", "dbGet", "dbHas", "dbDelete", "dbKeys", "dbCount", "dbCheckpoint",
         "procStart", "procRun", "procWait", "procIsRunning", "procKill", "procPid", "procExitCode",
         "procOutput", "procErrorOutput", "procWrite", "procCloseInput",
+        "ptyStart", "ptyRead", "ptyWrite", "ptyResize", "ptyIsRunning", "ptyExitCode", "ptyKill",
         "zipExtract", "zipEntries", "zipExtractEntry", "zipCreate",
         "tcpConnect", "tcpSend", "tcpReceive", "tcpStartTls", "tcpClose"
     };

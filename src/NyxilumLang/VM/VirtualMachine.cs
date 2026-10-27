@@ -620,6 +620,15 @@ public class VirtualMachine
             NyxilumLang.Runtime.Sandbox.CheckPath(path);
             return Directory.GetFileSystemEntries(path).Select(p => (object)Path.GetFileName(p)).ToList();
         };
+        // fileModified(шлях) - час останньої зміни файла (мс від 1970, UTC),
+        // -1 - файла нема. IDE так помічає, що файл змінили ззовні
+        // (термінал, git, anylint --fix) і перечитує відкритий редактор.
+        _nativeFunctions["fileModified"] = args => {
+            var path = args[0]?.ToString() ?? "";
+            NyxilumLang.Runtime.Sandbox.CheckPath(path);
+            if (!File.Exists(path)) return -1.0;
+            return (double)new DateTimeOffset(File.GetLastWriteTimeUtc(path)).ToUnixTimeMilliseconds();
+        };
         _nativeFunctions["printNoNewLine"] = args => {
             Console.Write(args[0]);
             return null;
@@ -774,6 +783,7 @@ public class VirtualMachine
         // однаково на всіх платформах, тому поза #if WINDOWS (на відміну
         // від guiWindow/GraphicsModule нижче).
         NyxilumLang.Runtime.Modules.ProcessModule.Register(_nativeFunctions);
+        NyxilumLang.Runtime.Modules.PtyModule.Register(_nativeFunctions);
         NyxilumLang.Runtime.Modules.ArchiveModule.Register(_nativeFunctions);
         NyxilumLang.Runtime.Modules.NotificationModule.Register(_nativeFunctions);
         NyxilumLang.Runtime.Modules.TcpModule.Register(_nativeFunctions);
