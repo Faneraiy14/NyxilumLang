@@ -437,7 +437,7 @@ public class Nx
         if (ideArgs.Length > 0 && ideArgs[0].StartsWith("-"))
         {
             Console.WriteLine("Використання: nx ide [тека з програмами]");
-            Console.WriteLine("  без теки - ~/NyxПрограми; Nx IDE: блоки (як Scratch) і код, уроки, приклади.");
+            Console.WriteLine("  без теки - та, з якою працювали минулого разу (уперше - ~/NyxПрограми); Nx IDE: блоки (як Scratch) і код, уроки, приклади.");
             return;
         }
         var candidates = new List<string>();
