@@ -1,0 +1,82 @@
+// S3: пам'ять як у C - вкладені структури, масиви в полях, стек, addr, offsetof, memmove, free/realloc
+struct Vec3 {
+    x: float32
+    y: float32
+    z: float32
+}
+
+struct Entity {
+    id: uint16
+    pos: Vec3
+    name: [uint8; 13]
+    hist: [int64; 4]
+    next: ptr<Entity>
+}
+
+func bump(p: ptr<int64>) {
+    p[0] = p[0] + 1
+}
+
+func main() {
+    print(sizeof(Vec3))
+    print(sizeof(Entity))
+    print(offsetof(Entity, pos))
+    print(offsetof(Entity, name))
+    print(offsetof(Entity, hist))
+    print(offsetof(Entity, next))
+
+    var e = new(Entity)
+    e.id = 7
+    e.pos.y = 2.5
+    var nm = e.name
+    nm[0] = 72
+    nm[1] = 105
+    e.hist[3] = 99
+    print(e.pos.y)
+    print(e.name)
+    print(e.hist[3])
+
+    var arr: ptr<Entity> = alloc(3 * sizeof(Entity))
+    arr[2].id = 42
+    print(arr[2].id)
+    print(int64(asptr(arr[2])) - int64(asptr(arr)))
+
+    var local: [int32; 8]
+    for i in 0..8 {
+        local[i] = int32(i * 3)
+    }
+    print(local[7])
+    var v: Vec3
+    v.z = 1.25
+    print(v.z)
+
+    var n: int64 = 41
+    bump(addr(n))
+    print(n)
+    var pz = addr(e.pos.z)
+    pz[0] = 9.5
+    print(e.pos.z)
+
+    var buf: [uint8; 16]
+    for i in 0..10 {
+        buf[i] = uint8(48 + i)
+    }
+    memmove(buf + 2, buf, 6)
+    buf[10] = 0
+    print(buf)
+    memmove(buf, buf + 2, 6)
+    print(buf)
+    memset(buf, 65, 3)
+    print(buf)
+
+    var a1 = alloc(100)
+    free(a1)
+    var a2 = alloc(90)
+    print(a1 == a2)
+    var grow: ptr<int64> = alloc(2 * 8)
+    grow[1] = 777
+    grow = realloc(grow, 100000 * 8)
+    print(grow[1])
+    grow[99999] = 5
+    free(grow)
+}

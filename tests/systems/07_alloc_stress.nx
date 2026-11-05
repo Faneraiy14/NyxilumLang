@@ -1,0 +1,43 @@
+// S3: розподілювач - 2 мільйони alloc/free випадкових розмірів (1 Б..200 КБ) з перевіркою вмісту.
+// Пам'ять не має рости: звільнене видається знову.
+var seed: uint64 = 88172645463325252
+
+func rnd() -> uint64 {
+    seed = seed ^ (seed << 13)
+    seed = seed ^ (seed >> 7)
+    seed = seed ^ (seed << 17)
+    return seed
+}
+
+func main() -> int32 {
+    var slots: ptr<ptr<uint8>> = alloc(1024 * 8)
+    var sizes: ptr<int64> = alloc(1024 * 8)
+    var bad: int64 = 0
+    for step in 0..2000000 {
+        var k = int64(rnd() % 1024)
+        var p = slots[k]
+        if p != null {
+            var sz = sizes[k]
+            if p[0] != uint8(k) || p[sz - 1] != uint8(k) {
+                bad = bad + 1
+            }
+            free(p)
+        }
+        var n: int64 = int64(rnd() % 2000) + 1
+        if rnd() % 100 == 0 {
+            n = int64(rnd() % 200000) + 1
+        }
+        var q: ptr<uint8> = alloc(n)
+        if q[0] != 0 || q[n - 1] != 0 {
+            bad = bad + 1
+        }
+        q[0] = uint8(k)
+        q[n - 1] = uint8(k)
+        slots[k] = q
+        sizes[k] = n
+    }
+    print(bad)
+    var mb = __nx_mapped / 1048576
+    print(mb < 64)
+    return int32(bad)
+}

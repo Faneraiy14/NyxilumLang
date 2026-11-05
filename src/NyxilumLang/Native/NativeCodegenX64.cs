@@ -22,7 +22,7 @@ namespace NyxilumLang.Native;
 // лише явне перетворення: int32(x), uint8(x), float64(x)...
 //
 // Вбудовані: print(x) / put(x) (без нового рядка), syscall(n, ...),
-// alloc(n) -> ptr<void>, new(S) -> ptr<S> (нулі), S { поле: ... },
+// alloc(n) -> ptr<void> (нулі), free(p), realloc(p, n), memcpy/memmove/memset, addr(x), offsetof(S, поле), new(S) -> ptr<S> (нулі), S { поле: ... },
 // sizeof(T), stackbuf(N) -> ptr<uint8> (N байтів у кадрі функції),
 // asptr(ціле чи вказівник) -> ptr<void>, funcaddr(f) -> ptr<void>, callptr(f, ...) -> int64,
 // float64Bits(x) -> int64, bitsToFloat64(n) -> float64, asm("...") -> int64 (rax).
@@ -31,11 +31,11 @@ namespace NyxilumLang.Native;
 public sealed class NativeCodegenX64
 {
     // ---------- типи ----------
-    enum K { Int, Float, Bool, Ptr, Void, Struct }
+    enum K { Int, Float, Bool, Ptr, Void, Struct, Array }
 
     sealed class T
     {
-        public K Kind; public int Size; public bool Signed; public T? Elem; public string? Struct;
+        public K Kind; public int Size, Count, Align = 1; public bool Signed; public T? Elem; public string? Struct;
         public static readonly T I8 = new() { Kind = K.Int, Size = 1, Signed = true }, U8 = new() { Kind = K.Int, Size = 1 },
             I16 = new() { Kind = K.Int, Size = 2, Signed = true }, U16 = new() { Kind = K.Int, Size = 2 },
             I32 = new() { Kind = K.Int, Size = 4, Signed = true }, U32 = new() { Kind = K.Int, Size = 4 },
@@ -46,14 +46,15 @@ public sealed class NativeCodegenX64
         public bool IsInt => Kind == K.Int;
         public bool IsPtr => Kind == K.Ptr;
         public bool IsFloat => Kind == K.Float;
+        public bool IsAggregate => Kind is K.Struct or K.Array; // значення-«блоки» пам'яті: у виразах дають вказівник на себе
         public bool InReg => Kind is K.Int or K.Bool or K.Ptr;
         public override string ToString() => Kind switch
         {
             K.Int => (Signed ? "int" : "uint") + Size * 8,
             K.Float => "float" + Size * 8, K.Bool => "bool", K.Void => "void",
-            K.Ptr => $"ptr<{Elem}>", _ => Struct!,
+            K.Ptr => $"ptr<{Elem}>", K.Array => $"[{Elem}; {Count}]", _ => Struct!,
         };
-        public bool Same(T o) => Kind == K.Struct ? o.Kind == K.Struct && Struct == o.Struct : Kind == o.Kind && Size == o.Size && Signed == o.Signed && Struct == o.Struct
+        public bool Same(T o) => Kind == K.Struct ? o.Kind == K.Struct && Struct == o.Struct : Kind == K.Array ? o.Kind == K.Array && Count == o.Count && Elem!.Same(o.Elem!) : Kind == o.Kind && Size == o.Size && Signed == o.Signed && Struct == o.Struct
             && (Kind != K.Ptr || Elem!.Same(o.Elem!));
     }
 
@@ -92,7 +93,8 @@ public sealed class NativeCodegenX64
         all.AddRange(program.Statements);
 
         foreach (var s in all.OfType<StructDeclaration>()) _structs[s.Name] = new StructInfo { Name = s.Name };
-        foreach (var s in all.OfType<StructDeclaration>()) Layout(s);
+        foreach (var s in all.OfType<StructDeclaration>()) _structDecls[s.Name] = s;
+        foreach (var s in all.OfType<StructDeclaration>()) LayoutByName(s.Name);
 
         foreach (var st in all)
         {
@@ -157,12 +159,42 @@ public sealed class NativeCodegenX64
             case "bool": return T.Bool; case "void": return T.Void;
         }
         if (s != null && s.StartsWith("ptr<") && s.EndsWith(">")) return T.Ptr(ParseType(s[4..^1]));
+        if (s != null && s.StartsWith("[") && s.EndsWith("]") && s.Contains(';'))
+        {
+            var el = ParseType(s[1..s.LastIndexOf(';')]);
+            if (!int.TryParse(s[(s.LastIndexOf(';') + 1)..^1], out int cnt) || cnt <= 0) throw Err($"довжина масиву в {s} має бути додатним цілим");
+            if (el.Kind == K.Void) throw Err("масив void не має сенсу");
+            if (el.Kind == K.Struct) LayoutByName(el.Struct!);
+            int es = el.Kind == K.Struct ? _structs[el.Struct!].Size : el.Size;
+            return new T { Kind = K.Array, Elem = el, Count = cnt, Size = es * cnt, Align = AlignOf(el) };
+        }
         if (s != null && _structs.ContainsKey(s)) return new T { Kind = K.Struct, Size = _structs[s].Size, Struct = s };
         throw Err($"невідомий тип «{s ?? "(не вказано)"}» (є int8..int64, uint8..uint64, float32, float64, bool, ptr<T>, структури)");
     }
 
+    readonly Dictionary<string, StructDeclaration> _structDecls = new();
+    readonly HashSet<string> _laidOut = new(), _layingOut = new();
+
+    void LayoutByName(string name)
+    {
+        if (_laidOut.Contains(name)) return;
+        if (!_layingOut.Add(name)) throw Err($"структура {name} містить сама себе за значенням - тримай ptr<{name}>");
+        Layout(_structDecls[name]);
+        _layingOut.Remove(name);
+        _laidOut.Add(name);
+    }
+
+    int AlignOf(T t) => t.Kind switch
+    {
+        K.Struct => _structs[t.Struct!].Align,
+        K.Array => t.Align,
+        _ => Math.Max(1, t.Size),
+    };
+
+    // розмітка як у C: кожне поле вирівняне на свій розмір (структура/масив - на найбільше вирівнювання всередині)
     void Layout(StructDeclaration s)
     {
+        int saved = _line;
         _line = s.Line;
         if (s.ParentName != null) throw Err("extends у системному режимі ще немає");
         var si = _structs[s.Name];
@@ -170,14 +202,16 @@ public sealed class NativeCodegenX64
         foreach (var f in s.Fields)
         {
             var t = ParseType(f.Type);
-            if (t.Kind is K.Struct or K.Void) throw Err($"поле {s.Name}.{f.Name}: структура за значенням ще не підтримується - тримай ptr<{f.Type}>");
-            int a = t.Size;
+            if (t.Kind == K.Void) throw Err($"поле {s.Name}.{f.Name}: void не може бути полем");
+            if (t.Kind == K.Struct) { LayoutByName(t.Struct!); t = new T { Kind = K.Struct, Struct = t.Struct, Size = _structs[t.Struct!].Size }; }
+            int a = AlignOf(t);
             off = (off + a - 1) / a * a;
             si.Fields.Add((f.Name, t, off));
             off += t.Size;
             si.Align = Math.Max(si.Align, a);
         }
         si.Size = Math.Max(1, (off + si.Align - 1) / si.Align * si.Align);
+        _line = saved;
     }
 
     void Declare(FunctionDeclaration fd, string? owner)
@@ -366,7 +400,23 @@ public sealed class NativeCodegenX64
                 if (vd.TypeAnnotation != null)
                 {
                     t = ParseType(vd.TypeAnnotation);
-                    if (t.Kind is K.Struct or K.Void) throw Err($"змінна {vd.Name}: тип {t} - структуру тримай як ptr<{t}>");
+                    if (t.Kind == K.Void) throw Err($"змінна {vd.Name}: тип void");
+                    if (t.IsAggregate)
+                    {
+                        // масив чи структура на стеку (як у C): місце в кадрі, нулі; змінна - вказівник на нього
+                        if (vd.Initializer != null) throw Err($"змінна {vd.Name}: {t} на стеку без початкового значення - заповни після");
+                        int size = t.Kind == K.Struct ? _structs[t.Struct!].Size : t.Size;
+                        _frame += (size + 15) / 16 * 16;
+                        _frame = (_frame + 15) / 16 * 16;
+                        E($"lea {-_frame}(%rbp), %rdi");
+                        E($"mov ${size}, %ecx");
+                        E("xor %eax, %eax");
+                        E("rep stosb");
+                        E($"lea {-_frame}(%rbp), %rax");
+                        var pt = t.Kind == K.Array ? T.Ptr(t.Elem!) : T.Ptr(t);
+                        StoreLocal(Slot(vd.Name, pt), pt);
+                        break;
+                    }
                     if (vd.Initializer != null) Convert(Gen(vd.Initializer, t), t, $"змінна {vd.Name}");
                     else { E("xor %eax, %eax"); E("pxor %xmm0, %xmm0"); }
                 }
@@ -647,17 +697,12 @@ public sealed class NativeCodegenX64
             case BinaryExpression bin: return Binary(bin, want);
             case CallExpression call: return Call(call, want);
             case MethodCallExpression mc: return Method(mc);
-            case IndexExpression ix:
+            case IndexExpression or MemberAccessExpression:
             {
-                var et = Address(ix);
+                var et = Address(e);
+                if (et.IsAggregate) return et.Kind == K.Array ? T.Ptr(et.Elem!) : T.Ptr(et); // вкладена структура / масив - вказівник на нього
                 LoadMem("(%rax)", et);
                 return et;
-            }
-            case MemberAccessExpression ma:
-            {
-                var ft = Address(ma);
-                LoadMem("(%rax)", ft);
-                return ft;
             }
             case StructInitExpression si:
             {
@@ -669,6 +714,7 @@ public sealed class NativeCodegenX64
                 {
                     var f = info.Fields.FirstOrDefault(x => x.Name == fi.Name);
                     if (f.Name == null) throw Err($"у {info.Name} немає поля {fi.Name}");
+                    if (f.Type.IsAggregate) throw Err($"{info.Name}.{f.Name}: поле-{(f.Type.Kind == K.Array ? "масив" : "структуру")} заповнюй після створення");
                     Convert(Gen(fi.Value, f.Type), f.Type, $"{info.Name}.{f.Name}");
                     E("mov (%rsp), %rcx");
                     StoreMem($"{f.Offset}(%rcx)", f.Type);
@@ -690,12 +736,11 @@ public sealed class NativeCodegenX64
                 var pt = Gen(ix.Array, null);
                 if (!pt.IsPtr) throw Err($"індексувати можна лише ptr<T>, а тут {pt}");
                 if (pt.Elem!.Kind is K.Void) throw Err("ptr<void> не можна індексувати - спершу присвой у ptr<T>");
-                if (pt.Elem.Kind == K.Struct) throw Err("p[i] для структур ще немає - бери (p + i).поле");
                 Push(pt);
                 var it = Gen(ix.Index, IsIntLit(ix.Index) ? T.I64 : null);
                 if (!it.IsInt) throw Err($"індекс має бути цілим, а тут {it}");
                 PopTo("%rcx");
-                E($"lea (%rcx,%rax,{Scale(pt.Elem.Size, out var extra)}), %rax");
+                E($"lea (%rcx,%rax,{Scale(ElemSize(pt), out var extra)}), %rax");
                 if (extra != null) throw Err("внутрішня помилка масштабу");
                 return pt.Elem;
             }
@@ -741,6 +786,7 @@ public sealed class NativeCodegenX64
             throw Err($"невідома змінна «{v.Name}» (оголоси: var {v.Name} = ...)");
         }
         var t = Address(asg.Left);
+        if (t.IsAggregate) throw Err($"присвоїти {t} цілком не можна - копіюй memcpy(куди, звідки, sizeof(...)) або по полях");
         Push(T.VoidPtr);
         Convert(Gen(asg.Right, t), t, "присвоєння");
         PopTo("%rcx");
@@ -1047,6 +1093,71 @@ public sealed class NativeCodegenX64
             {
                 if (a.Count != 1) throw Err("alloc(байтів)");
                 return EmitCall(a, _funcs["__nx_alloc"].Params.Select(p => p.Type).ToList(), _funcs["__nx_alloc"].Label, T.VoidPtr);
+            }
+            case "addr":
+            {
+                // адреса змінної, елемента p[i] чи поля p.x
+                if (a.Count != 1) throw Err("addr(змінна, p[i] або p.поле)");
+                if (a[0] is VariableExpression av)
+                {
+                    if (TryLocal(av.Name, out var lv)) { E($"lea {lv.Off}(%rbp), %rax"); return T.Ptr(lv.Type); }
+                    if (_globals.TryGetValue(av.Name, out var gv)) { E($"lea {gv.Label}(%rip), %rax"); return T.Ptr(gv.Type); }
+                    throw Err($"невідома змінна «{av.Name}»");
+                }
+                var at = Address(a[0]);
+                return at.Kind == K.Array ? T.Ptr(at.Elem!) : T.Ptr(at);
+            }
+            case "offsetof":
+            {
+                if (a.Count != 2 || a[0] is not VariableExpression os || a[1] is not VariableExpression of || !_structs.TryGetValue(os.Name, out var oi)) throw Err("offsetof(Структура, поле)");
+                var fo = oi.Fields.FirstOrDefault(x => x.Name == of.Name);
+                if (fo.Name == null) throw Err($"у {oi.Name} немає поля {of.Name}");
+                E($"mov ${fo.Offset}, %eax");
+                return T.I64;
+            }
+            case "memcpy" or "memmove" or "memset":
+            {
+                // memcpy/memmove(куди, звідки, байтів) - перекриття дозволене; memset(куди, байт, байтів)
+                if (a.Count != 3) throw Err($"{n}(куди, {(n == "memset" ? "байт" : "звідки")}, байтів)");
+                for (int i = 0; i < 3; i++)
+                {
+                    var t = Gen(a[i], IsIntLit(a[i]) ? T.I64 : null);
+                    if (n == "memset" && i == 1 ? !t.IsInt : i == 2 ? !t.IsInt : !t.IsPtr) throw Err($"{n}: аргумент {i + 1} - {t} не підходить");
+                    Push(t);
+                }
+                PopTo("%rcx");
+                PopTo(n == "memset" ? "%rax" : "%rsi");
+                PopTo("%rdi");
+                if (n == "memset") { E("mov %rdi, %rdx"); E("rep stosb"); E("mov %rdx, %rax"); return T.VoidPtr; }
+                string back = NewLabel("mmback"), done = NewLabel("mmdone");
+                E("mov %rdi, %rdx");
+                E("cmp %rsi, %rdi");
+                E($"jbe {done}0");
+                E("lea (%rsi,%rcx), %rax");
+                E("cmp %rax, %rdi");
+                E($"jb {back}");
+                L($"{done}0");
+                E("rep movsb");
+                E($"jmp {done}");
+                L(back);
+                E("lea -1(%rsi,%rcx), %rsi");
+                E("lea -1(%rdi,%rcx), %rdi");
+                E("std");
+                E("rep movsb");
+                E("cld");
+                L(done);
+                E("mov %rdx, %rax");
+                return T.VoidPtr;
+            }
+            case "free":
+            {
+                if (a.Count != 1) throw Err("free(вказівник з alloc/new)");
+                return EmitCall(a, new List<T> { T.VoidPtr }, _funcs["__nx_release"].Label, T.Void);
+            }
+            case "realloc":
+            {
+                if (a.Count != 2) throw Err("realloc(вказівник, байтів)");
+                return EmitCall(a, new List<T> { T.VoidPtr, T.I64 }, _funcs["__nx_realloc"].Label, T.VoidPtr);
             }
             case "asm":
                 // вставка асемблера (AT&T) як є; значення - rax після вставки

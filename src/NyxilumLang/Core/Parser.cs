@@ -305,6 +305,8 @@ public class Parser
         return new FunctionDeclaration(fullName, parameters, body, returnType, isNaked);
     }
 
+    private bool _pendingTypeGt;
+
     private string ParseType()
     {
         if (Peek().Type == TokenType.Punctuation && Peek().Value == "[")
@@ -314,6 +316,14 @@ public class Parser
             if (Peek().Type != TokenType.Punctuation || Peek().Value != "]")
             {
                 elementType = ParseType();
+            }
+            // [T; N] - масив фіксованої довжини (поле структури в системному режимі x86-64)
+            if (Peek().Type == TokenType.Punctuation && Peek().Value == ";")
+            {
+                Advance();
+                var count = Consume(TokenType.Number, "Очікується довжина масиву після ';'");
+                Consume(TokenType.Punctuation, "Очікується ']'");
+                return $"[{elementType};{count.Value}]";
             }
             Consume(TokenType.Punctuation, "Очікується ']'");
             return $"[{elementType}]";
@@ -333,9 +343,12 @@ public class Parser
             {
                 Advance();
                 var elementType = ParseType();
-                if (Peek().Type != TokenType.Operator || Peek().Value != ">")
-                    throw new Exception($"Очікується '>' після типу елемента вказівника на рядку {Peek().Line}, стовпець {Peek().Column}");
-                Advance();
+                // ptr<ptr<T>>: лексер дає ">>" одним токеном (зсув) - внутрішній ptr забирає половину,
+                // друга половина чекає в _pendingTypeGt для зовнішнього
+                if (_pendingTypeGt) _pendingTypeGt = false;
+                else if (Peek().Type == TokenType.Operator && Peek().Value == ">") Advance();
+                else if (Peek().Type == TokenType.Operator && Peek().Value == ">>") { Advance(); _pendingTypeGt = true; }
+                else throw new Exception($"Очікується '>' після типу елемента вказівника на рядку {Peek().Line}, стовпець {Peek().Column}");
                 return $"ptr<{elementType}>";
             }
             return type;

@@ -1,0 +1,48 @@
+// S3: складна розмітка проти C - вкладені структури й масиви в полях
+struct Inner {
+    a: uint8
+    b: float64
+}
+
+struct Outer {
+    tag: int16
+    inner: Inner
+    arr: [int32; 3]
+    flag: bool
+    tail: [Inner; 2]
+    last: uint8
+}
+
+func nx_sizeof_outer() -> int64 {
+    return sizeof(Outer)
+}
+
+func nx_off(k: int64) -> int64 {
+    if k == 0 {
+        return offsetof(Outer, inner)
+    }
+    if k == 1 {
+        return offsetof(Outer, arr)
+    }
+    if k == 2 {
+        return offsetof(Outer, flag)
+    }
+    if k == 3 {
+        return offsetof(Outer, tail)
+    }
+    return offsetof(Outer, last)
+}
+
+func nx_fill(o: ptr<Outer>) {
+    o.tag = -3
+    o.inner.a = 200
+    o.inner.b = 0.5
+    o.arr[2] = -77
+    o.flag = true
+    o.tail[1].b = 6.25
+    o.last = 9
+}
+
+func nx_sum(o: ptr<Outer>) -> float64 {
+    return float64(o.tag) + float64(o.inner.a) + o.inner.b + float64(o.arr[0] + o.arr[1] + o.arr[2]) + o.tail[0].b + o.tail[1].b + float64(o.last)
+}

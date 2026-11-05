@@ -427,18 +427,96 @@ func __nx_print_f32(x: float32) {
     __nx_print_fp(int64(uint32(float32Bits(x))), 23, 8)
 }
 
-// Пам'ять: шматки по 4 МБ з mmap, великі запити - окремим mmap. Без free (етап S3).
-func __nx_alloc(n: int64) -> ptr<void> {
-    n = (n + 15) & ~15
-    if n >= 1048576 {
-        return asptr(syscall(9, 0, n, 3, 34, -1, 0))
-    }
+// ---------- пам'ять ----------
+// Блоки розмірів 32, 64, ... 65536 байтів (12 класів) з 16-байтовим заголовком: [0] - клас (або
+// мінус розмір для великих), [1] - наступний у списку вільних. Звільнений блок іде у список свого
+// класу й видається знову (пам'ять не росте). Більше 64 КБ - окремий mmap/munmap.
+// alloc завжди повертає нулі; realloc - як у C (нові байти не обнуляються).
+
+var __nx_freelists: ptr<ptr<int64>> = null
+var __nx_mapped: int64 = 0
+
+func __nx_mmap(n: int64) -> ptr<uint8> {
+    __nx_mapped = __nx_mapped + n
+    return asptr(syscall(9, 0, n, 3, 34, -1, 0))
+}
+
+func __nx_bump(n: int64) -> ptr<uint8> {
     if __nx_heap == null || __nx_heap + n > __nx_heap_end {
         var size: int64 = 4194304
-        __nx_heap = asptr(syscall(9, 0, size, 3, 34, -1, 0))
+        __nx_heap = __nx_mmap(size)
         __nx_heap_end = __nx_heap + size
     }
     var p = __nx_heap
     __nx_heap = __nx_heap + n
     return p
+}
+
+func __nx_alloc(n: int64) -> ptr<void> {
+    if n < 0 {
+        n = 0
+    }
+    var total = n + 16
+    if total > 65536 {
+        total = (total + 4095) & ~4095
+        var big: ptr<int64> = asptr(__nx_mmap(total))
+        big[0] = 0 - total
+        return big + 2
+    }
+    var c: int64 = 0
+    var size: int64 = 32
+    while size < total {
+        size = size * 2
+        c = c + 1
+    }
+    if __nx_freelists == null {
+        __nx_freelists = asptr(__nx_mmap(4096))
+    }
+    var b = __nx_freelists[c]
+    if b != null {
+        __nx_freelists[c] = asptr(b[1])
+        memset(b + 2, 0, size - 16)
+    } else {
+        b = asptr(__nx_bump(size))
+    }
+    b[0] = c
+    b[1] = 0
+    return b + 2
+}
+
+func __nx_release(p: ptr<void>) {
+    if p == null {
+        return
+    }
+    var b: ptr<int64> = asptr(p)
+    b = b - 2
+    var c = b[0]
+    if c < 0 {
+        __nx_mapped = __nx_mapped + c
+        syscall(11, b, 0 - c)
+        return
+    }
+    b[1] = int64(__nx_freelists[c])
+    __nx_freelists[c] = b
+}
+
+func __nx_realloc(p: ptr<void>, n: int64) -> ptr<void> {
+    if p == null {
+        return __nx_alloc(n)
+    }
+    var b: ptr<int64> = asptr(p)
+    b = b - 2
+    var cap: int64 = 0
+    if b[0] < 0 {
+        cap = 0 - b[0] - 16
+    } else {
+        cap = (32 << b[0]) - 16
+    }
+    if n <= cap {
+        return p
+    }
+    var q = __nx_alloc(n)
+    memcpy(q, p, cap)
+    __nx_release(p)
+    return q
 }
