@@ -170,7 +170,7 @@ func makeDouble(q: int64, e2: int64) -> int64 {
         return 9218868437227405312   // нескінченність
     }
     if exp <= 0 {
-        return 0                      // дуже малі (субнормальні) у літералах не трапляються - 0
+        return 0                      // субнормальні рахує parseDoubleBits сам
     }
     return (exp << 52) | (qq - 4503599627370496)
 }
@@ -184,7 +184,28 @@ func parseDoubleBits(s: ptr<uint8>) -> int64 {
     var i: int64 = 0
     while i < len {
         var c = int64(s[i])
-        if c == 46 {
+        if c == 101 || c == 69 {
+            // експонента: e[+-]цифри
+            var eneg = false
+            var ev: int64 = 0
+            i = i + 1
+            if i < len && (s[i] == 43 || s[i] == 45) {
+                eneg = s[i] == 45
+                i = i + 1
+            }
+            while i < len {
+                if ev < 100000 {
+                    ev = ev * 10 + int64(s[i]) - 48
+                }
+                i = i + 1
+            }
+            if eneg {
+                e10 = e10 - ev
+            } else {
+                e10 = e10 + ev
+            }
+            break
+        } else if c == 46 {
             seenDot = true
         } else if c >= 48 && c <= 57 {
             bigMulAdd(num, 10, c - 48)
@@ -197,6 +218,21 @@ func parseDoubleBits(s: ptr<uint8>) -> int64 {
     bigTrim(num)
     if num.n == 0 {
         return 0
+    }
+    // далеко за межами float64 - одразу 0 або нескінченність (щоб не множити величезні числа)
+    var digits: int64 = 0
+    var di: int64 = 0
+    while di < len && s[di] != 101 && s[di] != 69 {
+        if s[di] >= 48 && s[di] <= 57 {
+            digits = digits + 1
+        }
+        di = di + 1
+    }
+    if digits + e10 < 0 - 330 {
+        return 0
+    }
+    if digits + e10 > 330 {
+        return 9218868437227405312
     }
     if e10 >= 0 {
         var big = bigCopy(num, num.n + e10 / 9 + 4)
@@ -247,6 +283,10 @@ func parseDoubleBits(s: ptr<uint8>) -> int64 {
         k2 = k2 + 1
     }
     var kk = 53 + bigBits(den) - bigBits(num)
+    // субнормальні: менше 2^-1022 - фіксований показник 2^-1074, менше 53 біт мантиси
+    if kk > 1074 {
+        kk = 1074
+    }
     while true {
         var scaled: ptr<Big> = asptr(0)
         var dd = den
@@ -259,7 +299,7 @@ func parseDoubleBits(s: ptr<uint8>) -> int64 {
         var q2 = bigDivSmallQ(scaled, dd)
         if q2 >= 9007199254740992 {
             kk = kk - 1
-        } else if q2 < 4503599627370496 {
+        } else if q2 < 4503599627370496 && kk < 1074 {
             kk = kk + 1
         } else {
             // scaled тепер - залишок; порівняти 2*залишок з дільником
@@ -267,6 +307,9 @@ func parseDoubleBits(s: ptr<uint8>) -> int64 {
             var c2 = bigCmp(twice, dd)
             if c2 > 0 || (c2 == 0 && (q2 & 1) != 0) {
                 q2 = q2 + 1
+            }
+            if kk == 1074 && q2 <= 4503599627370496 {
+                return q2   // субнормальне (або 2^52 = найменше нормальне) - біти й є мантиса
             }
             return makeDouble(q2, 0 - kk)
         }

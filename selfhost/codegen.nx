@@ -627,7 +627,7 @@ func isIntText(e: ptr<Node>) -> bool {
     if e.flag != 0 {
         return true
     }
-    return !contains(e.s1, 46)
+    return !contains(e.s1, 46) && !contains(e.s1, 101) && !contains(e.s1, 69)
 }
 
 func literalType(e: ptr<Node>) -> ptr<Ty> {

@@ -102,6 +102,18 @@ public class Lexer
                         _pos++;
                     }
                 }
+                // експонента: 1e6, 2.5E-3, 1e+9 - завжди дробове (як у Java)
+                if (_pos + 1 < _source.Length && (_source[_pos] == 'e' || _source[_pos] == 'E'))
+                {
+                    int ep = _pos + 1;
+                    if (_source[ep] == '+' || _source[ep] == '-') ep++;
+                    if (ep < _source.Length && char.IsDigit(_source[ep]))
+                    {
+                        while (ep < _source.Length && char.IsDigit(_source[ep])) ep++;
+                        num += _source[_pos..ep];
+                        _pos = ep;
+                    }
+                }
                 _tokens.Add(new Token(TokenType.Number, num, _line, _column));
                 _column += num.Length;
                 continue;

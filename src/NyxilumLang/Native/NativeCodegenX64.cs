@@ -278,7 +278,7 @@ public sealed class NativeCodegenX64
         _ => throw Err("глобальна змінна: початкове значення має бути сталою"),
     };
 
-    static bool IsIntText(LiteralExpression l) => l.Value is double && (l.Raw == null ? Math.Floor((double)l.Value) == (double)l.Value && Math.Abs((double)l.Value) < 9e15 : !l.Raw.Contains('.'));
+    static bool IsIntText(LiteralExpression l) => l.Value is double && (l.Raw == null ? Math.Floor((double)l.Value) == (double)l.Value && Math.Abs((double)l.Value) < 9e15 : l.Raw.IndexOfAny(new[] { '.', 'e', 'E' }) < 0);
 
     long ConstInt(ExpressionNode e, T t)
     {

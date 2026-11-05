@@ -247,6 +247,20 @@ struct Lexer {
                         self.pos = self.pos + 1
                     }
                 }
+                // експонента: 1e6, 2.5E-3, 1e+9 - завжди дробове (як у Java)
+                var ec = self.at(self.pos)
+                if self.pos + 1 < self.n && (ec == 101 || ec == 69) {
+                    var ep = self.pos + 1
+                    if self.at(ep) == 43 || self.at(ep) == 45 {
+                        ep = ep + 1
+                    }
+                    if ep < self.n && isDigitB(self.at(ep)) {
+                        while ep < self.n && isDigitB(self.at(ep)) {
+                            ep = ep + 1
+                        }
+                        self.pos = ep
+                    }
+                }
                 self.emit(TK_NUMBER, self.src + ns, self.pos - ns)
                 self.col = self.col + (self.pos - ns)
                 continue
