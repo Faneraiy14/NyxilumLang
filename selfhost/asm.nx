@@ -1,0 +1,1586 @@
+// Асемблер x86-64 (AT&T, підмножина, яку видає nxc) і запис статичного ELF64 - S8 крок 6:
+// після нього для нативного шляху не потрібні ні GNU as, ні ld.
+// Усі переходи й виклики - rel32, адресація міток - disp32 (без «релаксації» коротких переходів),
+// тож розмір кожної інструкції відомий одразу: один прохід + виправлення адрес після розкладки.
+// Розкладка: сегмент 1 (R+X, з 0x400000) - заголовки, .text, .rodata; сегмент 2 (RW) - .data.
+import "std.nx"
+
+var AS_TEXT: int64 = 0
+var AS_RODATA: int64 = 1
+var AS_DATA: int64 = 2
+
+// операнди
+var OP_REG: int64 = 1
+var OP_XMM: int64 = 2
+var OP_ST: int64 = 3
+var OP_IMM: int64 = 4
+var OP_MEM: int64 = 5
+var OP_LBL: int64 = 6
+
+struct Opnd {
+    kind: int64
+    reg: int64       // номер 0..15 (для REG/XMM/ST), база для MEM (-1 - нема)
+    size: int64      // розмір регістра в байтах
+    index: int64     // -1 - нема
+    scale: int64
+    disp: int64
+    label: ptr<uint8>   // мітка: disp(%rip) або ціль переходу
+    seg: int64       // 0 або 0x64 (%fs)
+    star: bool       // *%reg - непрямий перехід
+    hi8: bool        // spl/bpl/sil/dil - потрібен REX
+}
+
+struct Fixup {
+    sec: int64
+    pos: int64       // де поле
+    kind: int64      // 1 - rel32 (ціль - кінець інструкції), 2 - abs64, 3 - .long a - b (32 біти)
+    end: int64       // кінець інструкції (для rel32)
+    a: ptr<uint8>
+    b: ptr<uint8>
+    line: int64
+}
+
+var as_secs: ptr<Vec> = null      // 3 x ptr<StrBuf> (байти)
+var as_sec: int64 = 0
+var as_labels: ptr<Map> = null    // ім'я -> sec * 2^40 + зсув + 1
+var as_fix: ptr<Vec> = null
+var as_regs: ptr<Map> = null      // ім'я -> 1 + номер | розмір << 8 | xmm << 16 | hi8 << 17
+var as_line: int64 = 0
+var as_localDefs: ptr<Map> = null // "1" -> скільки разів визначено
+var as_listing: ptr<StrBuf> = null
+
+// поточна інструкція (збирається тут, потім у секцію)
+var as_ib: ptr<uint8> = null
+var as_in: int64 = 0
+var as_ripPos: int64 = -1
+var as_ripLabel: ptr<uint8> = null
+
+func asFail(msg: ptr<uint8>, what: ptr<uint8>) {
+    var e = strBufNew()
+    e.add("asm: рядок ")
+    e.addInt(as_line)
+    e.add(": ")
+    e.add(msg)
+    if what != null {
+        e.add(": ")
+        e.add(what)
+    }
+    e.byte(10)
+    fdWrite(1, e.data, e.len)
+    exit(1)
+}
+
+func curSec() -> ptr<StrBuf> {
+    return asptr(as_secs.get(as_sec))
+}
+
+func ib(b: int64) {
+    as_ib[as_in] = uint8(b & 255)
+    as_in = as_in + 1
+}
+
+func ib32(v: int64) {
+    ib(v)
+    ib(v >> 8)
+    ib(v >> 16)
+    ib(v >> 24)
+}
+
+func ib64(v: int64) {
+    ib32(v)
+    ib32(v >> 32)
+}
+
+func fits8(v: int64) -> bool {
+    return v >= 0 - 128 && v <= 127
+}
+
+func fits32(v: int64) -> bool {
+    return v >= 0 - 2147483648 && v <= 2147483647
+}
+
+// ---------- регістри ----------
+func regAdd(names: ptr<uint8>, size: int64, flags: int64) {
+    var i: int64 = 0
+    var st: int64 = 0
+    var num: int64 = 0
+    while true {
+        if names[i] == 32 || names[i] == 0 {
+            var f = flags
+            if size == 1 && num >= 4 && num <= 7 {
+                f = f | 2
+            }
+            as_regs.putN(names + st, i - st, 1 + num + (size << 8) + (f << 16))
+            num = num + 1
+            st = i + 1
+            if names[i] == 0 {
+                return
+            }
+        }
+        i = i + 1
+    }
+}
+
+func asInitRegs() {
+    as_regs = mapNew()
+    regAdd("rax rcx rdx rbx rsp rbp rsi rdi r8 r9 r10 r11 r12 r13 r14 r15", 8, 0)
+    regAdd("eax ecx edx ebx esp ebp esi edi r8d r9d r10d r11d r12d r13d r14d r15d", 4, 0)
+    regAdd("ax cx dx bx sp bp si di r8w r9w r10w r11w r12w r13w r14w r15w", 2, 0)
+    regAdd("al cl dl bl spl bpl sil dil r8b r9b r10b r11b r12b r13b r14b r15b", 1, 0)
+    regAdd("xmm0 xmm1 xmm2 xmm3 xmm4 xmm5 xmm6 xmm7 xmm8 xmm9 xmm10 xmm11 xmm12 xmm13 xmm14 xmm15", 16, 1)
+}
+
+// ---------- розбір операндів ----------
+func isSp(c: int64) -> bool {
+    return c == 32 || c == 9 || c == 13
+}
+
+// ціле: -123, 0x1f, 123 (без перевірки переповнення - як as, з обгортанням)
+func parseNum(s: ptr<uint8>, n: int64, ok: ptr<int64>) -> int64 {
+    var i: int64 = 0
+    var neg = false
+    ok[0] = 0
+    if n > 0 && s[0] == 45 {
+        neg = true
+        i = 1
+    }
+    if i >= n {
+        return 0
+    }
+    var v: int64 = 0
+    if n - i > 2 && s[i] == 48 && (s[i + 1] == 120 || s[i + 1] == 88) {
+        i = i + 2
+        while i < n {
+            var c = int64(s[i])
+            var d: int64 = 0
+            if c >= 48 && c <= 57 {
+                d = c - 48
+            } else if c >= 97 && c <= 102 {
+                d = c - 87
+            } else if c >= 65 && c <= 70 {
+                d = c - 55
+            } else {
+                return 0
+            }
+            v = v * 16 + d
+            i = i + 1
+        }
+    } else {
+        while i < n {
+            var c2 = int64(s[i])
+            if c2 < 48 || c2 > 57 {
+                return 0
+            }
+            v = v * 10 + c2 - 48
+            i = i + 1
+        }
+    }
+    ok[0] = 1
+    if neg {
+        return 0 - v
+    }
+    return v
+}
+
+func regLookup(s: ptr<uint8>, n: int64) -> int64 {
+    return as_regs.getN(s, n, 0)
+}
+
+func opNew(kind: int64) -> ptr<Opnd> {
+    var o = new(Opnd)
+    memset(o, 0, sizeof(Opnd))
+    o.kind = kind
+    o.reg = 0 - 1
+    o.index = 0 - 1
+    o.scale = 1
+    return o
+}
+
+func opFromReg(r: int64) -> ptr<Opnd> {
+    var v = r - 1
+    var o = opNew(OP_REG)
+    if ((v >> 16) & 1) != 0 {
+        o.kind = OP_XMM
+    }
+    o.reg = v & 255
+    o.size = (v >> 8) & 255
+    o.hi8 = ((v >> 16) & 2) != 0
+    return o
+}
+
+// "1f" / "1b" -> внутрішнє ім'я локальної мітки
+func localRef(s: ptr<uint8>, n: int64) -> ptr<uint8> {
+    var digits = strNDup(s, n - 1)
+    var cnt = as_localDefs.get(digits, 0)
+    var b = strBufNew()
+    b.add(digits)
+    b.byte(64)
+    if s[n - 1] == 102 {
+        b.addInt(cnt)
+    } else {
+        b.addInt(cnt - 1)
+    }
+    return b.cstr()
+}
+
+func isDigitsThen(s: ptr<uint8>, n: int64) -> bool {
+    if n < 2 {
+        return false
+    }
+    var i: int64 = 0
+    while i < n - 1 {
+        if s[i] < 48 || s[i] > 57 {
+            return false
+        }
+        i = i + 1
+    }
+    return s[n - 1] == 102 || s[n - 1] == 98
+}
+
+func parseOperand(s0: ptr<uint8>, n0: int64) -> ptr<Opnd> {
+    var s = s0
+    var n = n0
+    while n > 0 && isSp(int64(s[0])) {
+        s = s + 1
+        n = n - 1
+    }
+    while n > 0 && isSp(int64(s[n - 1])) {
+        n = n - 1
+    }
+    var ok: int64 = 0
+    if n == 0 {
+        asFail("порожній операнд", asptr(0))
+    }
+    if s[0] == 36 {
+        var o = opNew(OP_IMM)
+        o.disp = parseNum(s + 1, n - 1, addr(ok))
+        if ok == 0 {
+            asFail("незрозуміла стала", strNDup(s, n))
+        }
+        return o
+    }
+    var star = false
+    if s[0] == 42 {
+        star = true
+        s = s + 1
+        n = n - 1
+    }
+    if s[0] == 37 {
+        // %fs:0 - пам'ять з сегментом
+        if n > 4 && s[1] == 102 && s[2] == 115 && s[3] == 58 {
+            var m = opNew(OP_MEM)
+            m.seg = 100
+            m.disp = parseNum(s + 4, n - 4, addr(ok))
+            return m
+        }
+        if n >= 6 && s[1] == 115 && s[2] == 116 && s[3] == 40 {
+            var st = opNew(OP_ST)
+            st.reg = int64(s[4]) - 48
+            return st
+        }
+        var r = regLookup(s + 1, n - 1)
+        if r == 0 {
+            asFail("невідомий регістр", strNDup(s, n))
+        }
+        var ro = opFromReg(r)
+        ro.star = star
+        return ro
+    }
+    // пам'ять: disp(base,index,scale) / label(%rip) / (base)
+    var lp: int64 = 0 - 1
+    var i: int64 = 0
+    while i < n {
+        if s[i] == 40 {
+            lp = i
+            break
+        }
+        i = i + 1
+    }
+    if lp < 0 {
+        // ціль переходу: мітка
+        var lo = opNew(OP_LBL)
+        if isDigitsThen(s, n) {
+            lo.label = localRef(s, n)
+        } else {
+            lo.label = strNDup(s, n)
+        }
+        lo.star = star
+        return lo
+    }
+    var mo = opNew(OP_MEM)
+    if lp > 0 {
+        var dv = parseNum(s, lp, addr(ok))
+        if ok != 0 {
+            mo.disp = dv
+        } else {
+            mo.label = strNDup(s, lp)
+        }
+    }
+    // усередині дужок: %base[,%index[,scale]]
+    var inner = s + lp + 1
+    var rest = n - lp - 2
+    var parts: [int64; 6]
+    var pc: int64 = 0
+    var ps: int64 = 0
+    var j: int64 = 0
+    while j <= rest {
+        if j == rest || inner[j] == 44 {
+            parts[pc * 2] = ps
+            parts[pc * 2 + 1] = j - ps
+            pc = pc + 1
+            ps = j + 1
+        }
+        j = j + 1
+    }
+    if parts[1] > 0 {
+        var bs = inner + parts[0]
+        if parts[1] == 4 && bs[1] == 114 && bs[2] == 105 && bs[3] == 112 {
+            mo.reg = 16   // rip
+        } else {
+            var br = regLookup(bs + 1, parts[1] - 1)
+            if br == 0 {
+                asFail("невідомий регістр бази", strNDup(s, n))
+            }
+            mo.reg = (br - 1) & 255
+        }
+    }
+    if pc > 1 {
+        var ir = regLookup(inner + parts[2] + 1, parts[3] - 1)
+        if ir == 0 {
+            asFail("невідомий регістр індексу", strNDup(s, n))
+        }
+        mo.index = (ir - 1) & 255
+    }
+    if pc > 2 {
+        mo.scale = parseNum(inner + parts[4], parts[5], addr(ok))
+    }
+    return mo
+}
+
+// ---------- кодування ----------
+// ModRM(+SIB+disp) для reg-поля regf і r/m-операнда o
+func modrm(regf: int64, o: ptr<Opnd>) {
+    var r3 = regf & 7
+    if o.kind == OP_REG || o.kind == OP_XMM {
+        ib(192 | (r3 << 3) | (o.reg & 7))
+        return
+    }
+    if o.kind == OP_ST {
+        ib(192 | (r3 << 3) | o.reg)
+        return
+    }
+    if o.reg == 16 {
+        // disp32(%rip) або мітка(%rip)
+        ib((r3 << 3) | 5)
+        as_ripPos = as_in
+        as_ripLabel = o.label
+        ib32(o.disp)
+        return
+    }
+    if o.reg < 0 && o.index < 0 {
+        // абсолютна адреса (%fs:0): SIB без бази й індексу
+        ib((r3 << 3) | 4)
+        ib(37)
+        ib32(o.disp)
+        return
+    }
+    var base = o.reg & 7
+    var mod: int64 = 0
+    if o.disp != 0 || base == 5 {
+        if fits8(o.disp) {
+            mod = 1
+        } else {
+            mod = 2
+        }
+    }
+    if o.index >= 0 || base == 4 {
+        var ss: int64 = 0
+        if o.scale == 2 {
+            ss = 1
+        } else if o.scale == 4 {
+            ss = 2
+        } else if o.scale == 8 {
+            ss = 3
+        }
+        var idx: int64 = 4
+        if o.index >= 0 {
+            idx = o.index & 7
+        }
+        ib((mod << 6) | (r3 << 3) | 4)
+        ib((ss << 6) | (idx << 3) | base)
+    } else {
+        ib((mod << 6) | (r3 << 3) | base)
+    }
+    if mod == 1 {
+        ib(o.disp)
+    } else if mod == 2 {
+        ib32(o.disp)
+    }
+}
+
+// префікси + REX + опкод (opn байтів, старші спершу) + ModRM; imm - imms байтів
+// pfx: до двох обов'язкових префіксів (молодший байт - перший), w - REX.W
+// заголовок: префікси (молодші 16 біт), REX.W (біт 16), довжина опкоду (біти 20+)
+func eh(pfx: int64, w: bool, opn: int64) -> int64 {
+    var h = pfx | (opn << 20)
+    if w {
+        h = h | 65536
+    }
+    return h
+}
+
+var as_imm: int64 = 0
+
+// безпосереднє значення - через глобальну (у системному режимі до 6 цілих параметрів)
+func ei(imm: int64, imms: int64) -> int64 {
+    as_imm = imm
+    return imms
+}
+
+func enc(hdr: int64, op: int64, regf: int64, regIs: ptr<Opnd>, rm: ptr<Opnd>, imms: int64) {
+    var pfx = hdr & 65535
+    var w = (hdr & 65536) != 0
+    var opn = hdr >> 20
+    var imm = as_imm
+    if rm != null && rm.kind == OP_MEM && rm.seg != 0 {
+        ib(rm.seg)
+    }
+    var p = pfx
+    while p != 0 {
+        ib(p & 255)
+        p = p >> 8
+    }
+    var rex: int64 = 64
+    if w {
+        rex = rex | 8
+    }
+    if regf >= 8 {
+        rex = rex | 4
+    }
+    var force = false
+    if regIs != null && regIs.hi8 {
+        force = true
+    }
+    if rm != null {
+        if rm.kind == OP_MEM {
+            if rm.index >= 8 {
+                rex = rex | 2
+            }
+            if rm.reg >= 8 && rm.reg != 16 {
+                rex = rex | 1
+            }
+        } else if rm.kind == OP_REG || rm.kind == OP_XMM {
+            if rm.reg >= 8 {
+                rex = rex | 1
+            }
+            if rm.hi8 {
+                force = true
+            }
+        }
+    }
+    if rex != 64 || force {
+        ib(rex)
+    }
+    var k = opn - 1
+    while k >= 0 {
+        ib(op >> (k * 8))
+        k = k - 1
+    }
+    if rm != null {
+        modrm(regf, rm)
+    }
+    if imms == 1 {
+        ib(imm)
+    } else if imms == 2 {
+        ib(imm)
+        ib(imm >> 8)
+    } else if imms == 4 {
+        ib32(imm)
+    } else if imms == 8 {
+        ib64(imm)
+    }
+}
+
+func addFix(kind: int64, pos: int64, end: int64, a: ptr<uint8>, b: ptr<uint8>) {
+    var f = new(Fixup)
+    f.sec = as_sec
+    f.pos = pos
+    f.kind = kind
+    f.end = end
+    f.a = a
+    f.b = b
+    f.line = as_line
+    as_fix.pushPtr(f)
+}
+
+// завершити інструкцію: у секцію, з виправленням для мітки(%rip)
+func flushIns(src: ptr<uint8>) {
+    var sb = curSec()
+    var start = sb.len
+    if as_ripLabel != null {
+        addFix(1, start + as_ripPos, start + as_in, as_ripLabel, asptr(0))
+    }
+    sb.addN(as_ib, as_in)
+    if as_listing != null {
+        as_listing.add(src)
+        as_listing.byte(9)
+        var i: int64 = 0
+        while i < as_in {
+            var b = int64(as_ib[i])
+            as_listing.byte(int64(HEXD[b >> 4]))
+            as_listing.byte(int64(HEXD[b & 15]))
+            i = i + 1
+        }
+        as_listing.byte(10)
+    }
+    as_in = 0
+    as_ripPos = 0 - 1
+    as_ripLabel = asptr(0)
+}
+
+var HEXD: ptr<uint8> = "0123456789abcdef"
+
+// розмір операції: суфікс (b/w/l/q) або регістр
+func opSize(mn: ptr<uint8>, base: ptr<uint8>, ops: ptr<Vec>) -> int64 {
+    var bl = strLen(base)
+    var ml = strLen(mn)
+    if ml == bl + 1 {
+        var c = int64(mn[bl])
+        if c == 98 {
+            return 1
+        } else if c == 119 {
+            return 2
+        } else if c == 108 {
+            return 4
+        } else if c == 113 {
+            return 8
+        }
+    }
+    var i = ops.len - 1
+    while i >= 0 {
+        var o: ptr<Opnd> = asptr(ops.get(i))
+        if o.kind == OP_REG {
+            return o.size
+        }
+        i = i - 1
+    }
+    return 8
+}
+
+func opAt(ops: ptr<Vec>, i: int64) -> ptr<Opnd> {
+    return asptr(ops.get(i))
+}
+
+// мнемоніка = base + (можливо) суфікс розміру
+func mnIs(mn: ptr<uint8>, base: ptr<uint8>) -> bool {
+    if strEq(mn, base) {
+        return true
+    }
+    var bl = strLen(base)
+    if strLen(mn) != bl + 1 || !strStarts(mn, base) {
+        return false
+    }
+    var c = int64(mn[bl])
+    return c == 98 || c == 119 || c == 108 || c == 113
+}
+
+func sizePfx(size: int64) -> int64 {
+    if size == 2 {
+        return 102
+    }
+    return 0
+}
+
+// ALU: add or adc sbb and sub xor cmp (номер /n і база опкоду)
+func aluIndex(mn: ptr<uint8>) -> int64 {
+    if mnIs(mn, "add") {
+        return 0
+    } else if mnIs(mn, "or") {
+        return 1
+    } else if mnIs(mn, "and") {
+        return 4
+    } else if mnIs(mn, "sub") {
+        return 5
+    } else if mnIs(mn, "xor") {
+        return 6
+    } else if mnIs(mn, "cmp") {
+        return 7
+    }
+    return 0 - 1
+}
+
+func ccCode(s: ptr<uint8>) -> int64 {
+    if strEq(s, "o") {
+        return 0
+    } else if strEq(s, "no") {
+        return 1
+    } else if strEq(s, "b") || strEq(s, "c") || strEq(s, "nae") {
+        return 2
+    } else if strEq(s, "ae") || strEq(s, "nb") || strEq(s, "nc") {
+        return 3
+    } else if strEq(s, "e") || strEq(s, "z") {
+        return 4
+    } else if strEq(s, "ne") || strEq(s, "nz") {
+        return 5
+    } else if strEq(s, "be") || strEq(s, "na") {
+        return 6
+    } else if strEq(s, "a") || strEq(s, "nbe") {
+        return 7
+    } else if strEq(s, "s") {
+        return 8
+    } else if strEq(s, "ns") {
+        return 9
+    } else if strEq(s, "p") || strEq(s, "pe") {
+        return 10
+    } else if strEq(s, "np") || strEq(s, "po") {
+        return 11
+    } else if strEq(s, "l") || strEq(s, "nge") {
+        return 12
+    } else if strEq(s, "ge") || strEq(s, "nl") {
+        return 13
+    } else if strEq(s, "le") || strEq(s, "ng") {
+        return 14
+    } else if strEq(s, "g") || strEq(s, "nle") {
+        return 15
+    }
+    return 0 - 1
+}
+
+// перехід/виклик на мітку: опкод + rel32 з виправленням
+func relJump(op: int64, opn: int64, label: ptr<uint8>) {
+    var k = opn - 1
+    while k >= 0 {
+        ib(op >> (k * 8))
+        k = k - 1
+    }
+    as_ripPos = as_in
+    as_ripLabel = label
+    ib32(0)
+}
+
+// SSE: pfx (66/F2/F3 або 0), опкод 0F xx; reg = xmm/gpr поле, rm - інший операнд
+func sse(pfx: int64, w: bool, op2: int64, regf: int64, rm: ptr<Opnd>) {
+    enc(eh(pfx, w, 2), 3840 | op2, regf, asptr(0), rm, ei(0, 0))
+}
+
+func encodeIns(mn: ptr<uint8>, ops: ptr<Vec>, src: ptr<uint8>) {
+    var nops = ops.len
+    var a: ptr<Opnd> = asptr(0)
+    var b: ptr<Opnd> = asptr(0)
+    var c: ptr<Opnd> = asptr(0)
+    if nops > 0 {
+        a = opAt(ops, 0)
+    }
+    if nops > 1 {
+        b = opAt(ops, 1)
+    }
+    if nops > 2 {
+        c = opAt(ops, 2)
+    }
+    // без операндів
+    if nops == 0 {
+        if strEq(mn, "ret") {
+            ib(195)
+        } else if strEq(mn, "leave") {
+            ib(201)
+        } else if strEq(mn, "syscall") {
+            ib(15)
+            ib(5)
+        } else if strEq(mn, "cqo") {
+            ib(72)
+            ib(153)
+        } else if strEq(mn, "std") {
+            ib(253)
+        } else if strEq(mn, "cld") {
+            ib(252)
+        } else if strEq(mn, "mfence") {
+            ib(15)
+            ib(174)
+            ib(240)
+        } else if strEq(mn, "pause") {
+            ib(243)
+            ib(144)
+        } else if strEq(mn, "fprem") {
+            ib(217)
+            ib(248)
+        } else if strEq(mn, "nop") {
+            ib(144)
+        } else if strEq(mn, "hlt") {
+            ib(244)
+        } else if strEq(mn, "ud2") {
+            ib(15)
+            ib(11)
+        } else {
+            asFail("невідома інструкція", src)
+        }
+        return
+    }
+    // переходи
+    if strEq(mn, "jmp") || strEq(mn, "call") {
+        var isCall = strEq(mn, "call")
+        if a.kind == OP_LBL && !a.star {
+            if isCall {
+                relJump(232, 1, a.label)
+            } else {
+                relJump(233, 1, a.label)
+            }
+            return
+        }
+        var ext: int64 = 4
+        if isCall {
+            ext = 2
+        }
+        enc(eh(0, false, 1), 255, ext, asptr(0), a, ei(0, 0))
+        return
+    }
+    if mn[0] == 106 && nops == 1 && a.kind == OP_LBL {
+        var cc = ccCode(mn + 1)
+        if cc < 0 {
+            asFail("невідомий перехід", src)
+        }
+        relJump(3968 | cc, 2, a.label)
+        return
+    }
+    if strStarts(mn, "set") && nops == 1 {
+        var cc2 = ccCode(mn + 3)
+        if cc2 < 0 {
+            asFail("невідома інструкція", src)
+        }
+        enc(eh(0, false, 2), 3984 | cc2, 0, asptr(0), a, ei(0, 0))
+        return
+    }
+    if strEq(mn, "push") {
+        if a.reg >= 8 {
+            ib(65)
+        }
+        ib(80 + (a.reg & 7))
+        return
+    }
+    if strEq(mn, "pop") {
+        if a.reg >= 8 {
+            ib(65)
+        }
+        ib(88 + (a.reg & 7))
+        return
+    }
+    var alu = aluIndex(mn)
+    if alu >= 0 && nops == 2 {
+        var sz = opSize(mn, "add", ops)
+        if strStarts(mn, "or") || strStarts(mn, "and") || strStarts(mn, "sub") || strStarts(mn, "xor") || strStarts(mn, "cmp") {
+            if strStarts(mn, "or") {
+                sz = opSize(mn, "or", ops)
+            } else {
+                sz = opSize(mn, "add", ops)
+            }
+        }
+        var w = sz == 8
+        var bop: int64 = alu * 8
+        if a.kind == OP_IMM && b.kind == OP_REG && b.reg == 0 && (sz == 1 || !fits8(a.disp)) {
+            if sz == 2 {
+                ib(102)
+            } else if sz == 8 {
+                ib(72)
+            }
+            if sz == 1 {
+                ib(bop + 4)
+                ib(a.disp)
+            } else if sz == 2 {
+                ib(bop + 5)
+                ib(a.disp)
+                ib(a.disp >> 8)
+            } else {
+                ib(bop + 5)
+                ib32(a.disp)
+            }
+            return
+        }
+        if a.kind == OP_IMM {
+            if sz == 1 {
+                enc(eh(0, false, 1), 128, alu, asptr(0), b, ei(a.disp, 1))
+            } else if fits8(a.disp) {
+                enc(eh(sizePfx(sz), w, 1), 131, alu, asptr(0), b, ei(a.disp, 1))
+            } else {
+                var isz: int64 = 4
+                if sz == 2 {
+                    isz = 2
+                }
+                enc(eh(sizePfx(sz), w, 1), 129, alu, asptr(0), b, ei(a.disp, isz))
+            }
+            return
+        }
+        if a.kind == OP_REG {
+            var o1: int64 = bop + 1
+            if sz == 1 {
+                o1 = bop
+            }
+            enc(eh(sizePfx(sz), w, 1), o1, a.reg, a, b, ei(0, 0))
+            return
+        }
+        // пам'ять -> регістр
+        var o3: int64 = bop + 3
+        if sz == 1 {
+            o3 = bop + 2
+        }
+        enc(eh(sizePfx(sz), w, 1), o3, b.reg, b, a, ei(0, 0))
+        return
+    }
+    if mnIs(mn, "test") {
+        var tsz = opSize(mn, "test", ops)
+        if a.kind == OP_IMM && b.kind == OP_REG && b.reg == 0 {
+            // коротка форма з акумулятором - як GNU as
+            if tsz == 2 {
+                ib(102)
+            } else if tsz == 8 {
+                ib(72)
+            }
+            if tsz == 1 {
+                ib(168)
+                ib(a.disp)
+            } else if tsz == 2 {
+                ib(169)
+                ib(a.disp)
+                ib(a.disp >> 8)
+            } else {
+                ib(169)
+                ib32(a.disp)
+            }
+            return
+        }
+        if a.kind == OP_IMM {
+            if tsz == 1 {
+                enc(eh(0, false, 1), 246, 0, asptr(0), b, ei(a.disp, 1))
+            } else if tsz == 2 {
+                enc(eh(102, false, 1), 247, 0, asptr(0), b, ei(a.disp, 2))
+            } else {
+                enc(eh(0, tsz == 8, 1), 247, 0, asptr(0), b, ei(a.disp, 4))
+            }
+            return
+        }
+        var top: int64 = 133
+        if tsz == 1 {
+            top = 132
+        }
+        enc(eh(sizePfx(tsz), tsz == 8, 1), top, a.reg, a, b, ei(0, 0))
+        return
+    }
+    if strEq(mn, "movabs") {
+        if b.reg >= 8 {
+            ib(73)
+        } else {
+            ib(72)
+        }
+        ib(184 + (b.reg & 7))
+        ib64(a.disp)
+        return
+    }
+    if mnIs(mn, "mov") && nops == 2 && a.kind != OP_XMM && b.kind != OP_XMM {
+        var msz = opSize(mn, "mov", ops)
+        var mw = msz == 8
+        if a.kind == OP_IMM {
+            if b.kind == OP_REG && msz == 4 {
+                if b.reg >= 8 {
+                    ib(65)
+                }
+                ib(184 + (b.reg & 7))
+                ib32(a.disp)
+            } else if msz == 1 {
+                enc(eh(0, false, 1), 198, 0, asptr(0), b, ei(a.disp, 1))
+            } else if msz == 2 {
+                enc(eh(102, false, 1), 199, 0, asptr(0), b, ei(a.disp, 2))
+            } else {
+                if !fits32(a.disp) {
+                    asFail("стала не вміщається в 32 біти (потрібен movabs)", src)
+                }
+                enc(eh(0, mw, 1), 199, 0, asptr(0), b, ei(a.disp, 4))
+            }
+            return
+        }
+        if a.kind == OP_REG {
+            var mo: int64 = 137
+            if msz == 1 {
+                mo = 136
+            }
+            enc(eh(sizePfx(msz), mw, 1), mo, a.reg, a, b, ei(0, 0))
+            return
+        }
+        var mo2: int64 = 139
+        if msz == 1 {
+            mo2 = 138
+        }
+        enc(eh(sizePfx(msz), mw, 1), mo2, b.reg, b, a, ei(0, 0))
+        return
+    }
+    if strEq(mn, "movzbq") || strEq(mn, "movzwq") || strEq(mn, "movsbq") || strEq(mn, "movswq") || strEq(mn, "movzbl") || strEq(mn, "movsbl") {
+        var xo: int64 = 4022
+        if strEq(mn, "movzwq") {
+            xo = 4023
+        } else if strEq(mn, "movsbq") || strEq(mn, "movsbl") {
+            xo = 4030
+        } else if strEq(mn, "movswq") {
+            xo = 4031
+        }
+        enc(eh(0, b.size == 8, 2), xo, b.reg, a, a, ei(0, 0))
+        return
+    }
+    if strEq(mn, "movslq") {
+        enc(eh(0, true, 1), 99, b.reg, b, a, ei(0, 0))
+        return
+    }
+    if mnIs(mn, "lea") {
+        enc(eh(0, b.size == 8, 1), 141, b.reg, b, a, ei(0, 0))
+        return
+    }
+    if mnIs(mn, "neg") || mnIs(mn, "not") || mnIs(mn, "idiv") || mnIs(mn, "div") || (mnIs(mn, "imul") && nops == 1) {
+        var ext2: int64 = 3
+        var base2: ptr<uint8> = "neg"
+        if mnIs(mn, "not") {
+            ext2 = 2
+            base2 = "not"
+        } else if mnIs(mn, "idiv") {
+            ext2 = 7
+            base2 = "idiv"
+        } else if mnIs(mn, "div") {
+            ext2 = 6
+            base2 = "div"
+        } else if mnIs(mn, "imul") {
+            ext2 = 5
+            base2 = "imul"
+        }
+        var usz = opSize(mn, base2, ops)
+        var uo: int64 = 247
+        if usz == 1 {
+            uo = 246
+        }
+        enc(eh(sizePfx(usz), usz == 8, 1), uo, ext2, asptr(0), a, ei(0, 0))
+        return
+    }
+    if mnIs(mn, "imul") && nops == 2 {
+        enc(eh(sizePfx(b.size), b.size == 8, 2), 4015, b.reg, b, a, ei(0, 0))
+        return
+    }
+    if mnIs(mn, "imul") && nops == 3 {
+        if fits8(a.disp) {
+            enc(eh(sizePfx(c.size), c.size == 8, 1), 107, c.reg, c, b, ei(a.disp, 1))
+        } else {
+            enc(eh(sizePfx(c.size), c.size == 8, 1), 105, c.reg, c, b, ei(a.disp, 4))
+        }
+        return
+    }
+    if mnIs(mn, "shl") || mnIs(mn, "sar") || mnIs(mn, "shr") || mnIs(mn, "sal") {
+        var se: int64 = 4
+        var sb2: ptr<uint8> = "shl"
+        if mnIs(mn, "sar") {
+            se = 7
+            sb2 = "sar"
+        } else if mnIs(mn, "shr") {
+            se = 5
+            sb2 = "shr"
+        } else if mnIs(mn, "sal") {
+            sb2 = "sal"
+        }
+        var target = b
+        if nops == 1 {
+            target = a
+        }
+        var ssz = target.size
+        if target.kind != OP_REG {
+            ssz = opSize(mn, sb2, ops)
+        }
+        if nops == 2 && a.kind == OP_IMM && a.disp == 1 {
+            var s1: int64 = 209
+            if ssz == 1 {
+                s1 = 208
+            }
+            enc(eh(sizePfx(ssz), ssz == 8, 1), s1, se, asptr(0), target, ei(0, 0))
+        } else if nops == 2 && a.kind == OP_IMM {
+            var so: int64 = 193
+            if ssz == 1 {
+                so = 192
+            }
+            enc(eh(sizePfx(ssz), ssz == 8, 1), so, se, asptr(0), target, ei(a.disp, 1))
+        } else {
+            var so2: int64 = 211
+            if ssz == 1 {
+                so2 = 210
+            }
+            enc(eh(sizePfx(ssz), ssz == 8, 1), so2, se, asptr(0), target, ei(0, 0))
+        }
+        return
+    }
+    if mnIs(mn, "xchg") {
+        var xsz = opSize(mn, "xchg", ops)
+        var xop: int64 = 135
+        if xsz == 1 {
+            xop = 134
+        }
+        // xchg reg, r/m: reg-поле - регістр-операнд
+        if a.kind == OP_REG {
+            enc(eh(sizePfx(xsz), xsz == 8, 1), xop, a.reg, a, b, ei(0, 0))
+        } else {
+            enc(eh(sizePfx(xsz), xsz == 8, 1), xop, b.reg, b, a, ei(0, 0))
+        }
+        return
+    }
+    if mnIs(mn, "xadd") || mnIs(mn, "cmpxchg") {
+        var isX = mnIs(mn, "xadd")
+        var base3: ptr<uint8> = "cmpxchg"
+        if isX {
+            base3 = "xadd"
+        }
+        var asz = opSize(mn, base3, ops)
+        var aop: int64 = 4017
+        if isX {
+            aop = 4033
+        }
+        if asz == 1 {
+            aop = aop - 1
+        }
+        enc(eh(sizePfx(asz), asz == 8, 2), aop, a.reg, a, b, ei(0, 0))
+        return
+    }
+    if mnIs(mn, "btc") {
+        var bsz = opSize(mn, "btc", ops)
+        enc(eh(sizePfx(bsz), bsz == 8, 2), 4026, 7, asptr(0), b, ei(a.disp, 1))
+        return
+    }
+    // ---------- SSE ----------
+    if strEq(mn, "movq") || strEq(mn, "movd") {
+        var w2 = strEq(mn, "movq")
+        if b.kind == OP_XMM && a.kind != OP_XMM {
+            sse(102, w2, 110, b.reg, a)
+        } else if a.kind == OP_XMM && b.kind != OP_XMM {
+            sse(102, w2, 126, a.reg, b)
+        } else {
+            // movq xmm, xmm: F3 0F 7E
+            sse(243, false, 126, b.reg, a)
+        }
+        return
+    }
+    if strEq(mn, "movsd") || strEq(mn, "movss") {
+        var mp: int64 = 242
+        if strEq(mn, "movss") {
+            mp = 243
+        }
+        if b.kind == OP_XMM {
+            sse(mp, false, 16, b.reg, a)
+        } else {
+            sse(mp, false, 17, a.reg, b)
+        }
+        return
+    }
+    if strEq(mn, "movapd") {
+        sse(102, false, 40, b.reg, a)
+        return
+    }
+    if strEq(mn, "pxor") {
+        sse(102, false, 239, b.reg, a)
+        return
+    }
+    var arith = 0 - 1
+    var apfx: int64 = 242
+    if strEq(mn, "addsd") || strEq(mn, "addss") {
+        arith = 88
+    } else if strEq(mn, "mulsd") || strEq(mn, "mulss") {
+        arith = 89
+    } else if strEq(mn, "subsd") || strEq(mn, "subss") {
+        arith = 92
+    } else if strEq(mn, "divsd") || strEq(mn, "divss") {
+        arith = 94
+    } else if strEq(mn, "cvtsd2ss") {
+        arith = 90
+    } else if strEq(mn, "cvtss2sd") {
+        arith = 90
+        apfx = 243
+    }
+    if arith >= 0 {
+        if endsWithS(mn, "ss") && !strEq(mn, "cvtsd2ss") {
+            apfx = 243
+        }
+        sse(apfx, false, arith, b.reg, a)
+        return
+    }
+    if strEq(mn, "ucomisd") {
+        sse(102, false, 46, b.reg, a)
+        return
+    }
+    if strEq(mn, "ucomiss") {
+        sse(0, false, 46, b.reg, a)
+        return
+    }
+    if strStarts(mn, "cvtsi2sd") || strStarts(mn, "cvtsi2ss") {
+        var cp: int64 = 242
+        if strStarts(mn, "cvtsi2ss") {
+            cp = 243
+        }
+        var cw = a.kind == OP_REG && a.size == 8
+        if endsWithS(mn, "q") {
+            cw = true
+        }
+        sse(cp, cw, 42, b.reg, a)
+        return
+    }
+    if strEq(mn, "cvttsd2si") {
+        sse(242, b.size == 8, 44, b.reg, a)
+        return
+    }
+    // ---------- x87 ----------
+    if strEq(mn, "fldl") {
+        enc(eh(0, false, 1), 221, 0, asptr(0), a, ei(0, 0))
+        return
+    }
+    if strEq(mn, "flds") {
+        enc(eh(0, false, 1), 217, 0, asptr(0), a, ei(0, 0))
+        return
+    }
+    if strEq(mn, "fstpl") {
+        enc(eh(0, false, 1), 221, 3, asptr(0), a, ei(0, 0))
+        return
+    }
+    if strEq(mn, "fstps") {
+        enc(eh(0, false, 1), 217, 3, asptr(0), a, ei(0, 0))
+        return
+    }
+    if strEq(mn, "fstp") && a.kind == OP_ST {
+        ib(221)
+        ib(216 + a.reg)
+        return
+    }
+    if strEq(mn, "fnstsw") {
+        ib(223)
+        ib(224)
+        return
+    }
+    asFail("невідома інструкція", src)
+}
+
+func endsWithS(s: ptr<uint8>, suf: ptr<uint8>) -> bool {
+    var n = strLen(s)
+    var m = strLen(suf)
+    return n >= m && strEq(s + n - m, suf)
+}
+
+// ---------- рядки ----------
+func defineLabel(name: ptr<uint8>) {
+    var sb = curSec()
+    if as_labels.has(name) {
+        asFail("мітку визначено двічі", name)
+    }
+    as_labels.put(name, as_sec * 1099511627776 + sb.len + 1)
+}
+
+func isLabelChar(c: int64) -> bool {
+    return (c >= 48 && c <= 57) || (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || c == 95 || c == 46 || c == 36
+}
+
+// значення для .byte/.short/.long/.quad: число або мітка / різниця міток
+func dataItem(s0: ptr<uint8>, n0: int64, size: int64) {
+    var s = s0
+    var n = n0
+    while n > 0 && isSp(int64(s[0])) {
+        s = s + 1
+        n = n - 1
+    }
+    while n > 0 && isSp(int64(s[n - 1])) {
+        n = n - 1
+    }
+    var ok: int64 = 0
+    var v = parseNum(s, n, addr(ok))
+    var sb = curSec()
+    if ok != 0 {
+        var i: int64 = 0
+        while i < size {
+            sb.byte((v >> (i * 8)) & 255)
+            i = i + 1
+        }
+        return
+    }
+    // "a - b" або "a"
+    var minus: int64 = 0 - 1
+    var j: int64 = 0
+    while j < n {
+        if s[j] == 45 && j > 0 && isSp(int64(s[j - 1])) {
+            minus = j
+        }
+        j = j + 1
+    }
+    if minus > 0 {
+        var ae = minus
+        while ae > 0 && isSp(int64(s[ae - 1])) {
+            ae = ae - 1
+        }
+        var bs = minus + 1
+        while bs < n && isSp(int64(s[bs])) {
+            bs = bs + 1
+        }
+        if size != 4 {
+            asFail("різниця міток - лише в .long", strNDup(s, n))
+        }
+        addFix(3, sb.len, 0, strNDup(s, ae), strNDup(s + bs, n - bs))
+        var k: int64 = 0
+        while k < 4 {
+            sb.byte(0)
+            k = k + 1
+        }
+        return
+    }
+    if size != 8 {
+        asFail("адреса мітки - лише в .quad", strNDup(s, n))
+    }
+    addFix(2, sb.len, 0, strNDup(s, n), asptr(0))
+    var q: int64 = 0
+    while q < 8 {
+        sb.byte(0)
+        q = q + 1
+    }
+}
+
+func directive(s: ptr<uint8>, n: int64) {
+    var e: int64 = 0
+    while e < n && !isSp(int64(s[e])) {
+        e = e + 1
+    }
+    var name = strNDup(s, e)
+    var args = s + e
+    var an = n - e
+    if strEq(name, ".section") {
+        var t = args
+        while t[0] == 32 {
+            t = t + 1
+        }
+        if strStarts(t, ".text") {
+            as_sec = AS_TEXT
+        } else if strStarts(t, ".rodata") {
+            as_sec = AS_RODATA
+        } else if strStarts(t, ".data") {
+            as_sec = AS_DATA
+        } else {
+            as_sec = 3   // .note та інше - відкидається
+        }
+        return
+    }
+    if strEq(name, ".text") {
+        as_sec = AS_TEXT
+        return
+    }
+    if strEq(name, ".data") {
+        as_sec = AS_DATA
+        return
+    }
+    if strEq(name, ".globl") || strEq(name, ".global") || strEq(name, ".type") || strEq(name, ".size") || strEq(name, ".file") {
+        return
+    }
+    if strEq(name, ".balign") || strEq(name, ".align") || strEq(name, ".p2align") {
+        var ok: int64 = 0
+        var a0 = args
+        var al = an
+        while al > 0 && isSp(int64(a0[0])) {
+            a0 = a0 + 1
+            al = al - 1
+        }
+        var av = parseNum(a0, al, addr(ok))
+        if strEq(name, ".p2align") {
+            av = 1 << av
+        }
+        var sb = curSec()
+        var fill: int64 = 0
+        if as_sec == AS_TEXT {
+            fill = 144
+        }
+        while sb.len % av != 0 {
+            sb.byte(fill)
+        }
+        return
+    }
+    var size: int64 = 0
+    if strEq(name, ".byte") {
+        size = 1
+    } else if strEq(name, ".short") || strEq(name, ".word") || strEq(name, ".value") {
+        size = 2
+    } else if strEq(name, ".long") || strEq(name, ".int") {
+        size = 4
+    } else if strEq(name, ".quad") {
+        size = 8
+    }
+    if size > 0 {
+        var st: int64 = 0
+        var i: int64 = 0
+        while i <= an {
+            if i == an || args[i] == 44 {
+                dataItem(args + st, i - st, size)
+                st = i + 1
+            }
+            i = i + 1
+        }
+        return
+    }
+    asFail("невідома директива", name)
+}
+
+func asmLine(line0: ptr<uint8>, n0: int64) {
+    var s = line0
+    var n = n0
+    while n > 0 && isSp(int64(s[0])) {
+        s = s + 1
+        n = n - 1
+    }
+    while n > 0 && isSp(int64(s[n - 1])) {
+        n = n - 1
+    }
+    if n == 0 || s[0] == 35 {
+        return
+    }
+    // мітка "ім'я:" на початку
+    var i: int64 = 0
+    while i < n && isLabelChar(int64(s[i])) {
+        i = i + 1
+    }
+    if i > 0 && i < n && s[i] == 58 {
+        var lname = strNDup(s, i)
+        var allDigits = true
+        var d: int64 = 0
+        while d < i {
+            if s[d] < 48 || s[d] > 57 {
+                allDigits = false
+            }
+            d = d + 1
+        }
+        if allDigits {
+            var cnt = as_localDefs.get(lname, 0)
+            var b = strBufNew()
+            b.add(lname)
+            b.byte(64)
+            b.addInt(cnt)
+            defineLabel(b.cstr())
+            as_localDefs.put(lname, cnt + 1)
+        } else {
+            defineLabel(lname)
+        }
+        asmLine(s + i + 1, n - i - 1)
+        return
+    }
+    if s[0] == 46 {
+        directive(s, n)
+        return
+    }
+    if as_sec == 3 {
+        return
+    }
+    var src = strNDup(s, n)
+    // префікси lock / rep
+    var e: int64 = 0
+    while e < n && !isSp(int64(s[e])) {
+        e = e + 1
+    }
+    var mn = strNDup(s, e)
+    if strEq(mn, "lock") || strEq(mn, "rep") {
+        if strEq(mn, "lock") {
+            ib(240)
+        } else {
+            ib(243)
+        }
+        var r = s + e
+        var rn = n - e
+        while rn > 0 && isSp(int64(r[0])) {
+            r = r + 1
+            rn = rn - 1
+        }
+        if strEq(mn, "rep") {
+            if strStarts(r, "movsb") {
+                ib(164)
+            } else if strStarts(r, "stosb") {
+                ib(170)
+            } else {
+                asFail("rep лише з movsb/stosb", src)
+            }
+            flushIns(src)
+            return
+        }
+        s = r
+        n = rn
+        e = 0
+        while e < n && !isSp(int64(s[e])) {
+            e = e + 1
+        }
+        mn = strNDup(s, e)
+    }
+    // операнди через кому (поза дужками)
+    var ops = vecNew()
+    var p = e
+    while p < n && isSp(int64(s[p])) {
+        p = p + 1
+    }
+    var depth: int64 = 0
+    var st = p
+    var q = p
+    while q <= n {
+        if q == n || (s[q] == 44 && depth == 0) {
+            if q > st {
+                ops.pushPtr(parseOperand(s + st, q - st))
+            }
+            st = q + 1
+        } else if s[q] == 40 {
+            depth = depth + 1
+        } else if s[q] == 41 {
+            depth = depth - 1
+        }
+        q = q + 1
+    }
+    encodeIns(mn, ops, src)
+    flushIns(src)
+}
+
+// ---------- ELF ----------
+func put16(sb: ptr<StrBuf>, v: int64) {
+    sb.byte(v & 255)
+    sb.byte((v >> 8) & 255)
+}
+
+func put32(sb: ptr<StrBuf>, v: int64) {
+    put16(sb, v)
+    put16(sb, v >> 16)
+}
+
+func put64(sb: ptr<StrBuf>, v: int64) {
+    put32(sb, v)
+    put32(sb, v >> 32)
+}
+
+func patch32(sb: ptr<StrBuf>, pos: int64, v: int64) {
+    var i: int64 = 0
+    while i < 4 {
+        sb.data[pos + i] = uint8((v >> (i * 8)) & 255)
+        i = i + 1
+    }
+}
+
+func patch64(sb: ptr<StrBuf>, pos: int64, v: int64) {
+    patch32(sb, pos, v)
+    patch32(sb, pos + 4, v >> 32)
+}
+
+// tf = тип | прапорці << 32; memsz = filesz
+func phdr(sb: ptr<StrBuf>, tf: int64, off: int64, vaddr: int64, filesz: int64, align: int64) {
+    var memsz = filesz
+    put32(sb, tf & 4294967295)
+    put32(sb, tf >> 32)
+    put64(sb, off)
+    put64(sb, vaddr)
+    put64(sb, vaddr)
+    put64(sb, filesz)
+    put64(sb, memsz)
+    put64(sb, align)
+}
+
+var as_base: ptr<int64> = null
+
+func labelAddr(name: ptr<uint8>, line: int64) -> int64 {
+    var v = as_labels.get(name, 0)
+    if v == 0 {
+        as_line = line
+        asFail("невідома мітка", name)
+    }
+    v = v - 1
+    var sec = v / 1099511627776
+    return as_base[sec] + v % 1099511627776
+}
+
+// асемблер-текст -> байти ELF; listing != null - ще й «рядок<TAB>hex» кожної інструкції
+func assembleElf(text: ptr<uint8>, n: int64, listing: ptr<StrBuf>) -> ptr<StrBuf> {
+    asInitRegs()
+    as_secs = vecNew()
+    var k: int64 = 0
+    while k < 4 {
+        as_secs.pushPtr(strBufNew())
+        k = k + 1
+    }
+    as_sec = AS_TEXT
+    as_labels = mapNew()
+    as_fix = vecNew()
+    as_localDefs = mapNew()
+    as_listing = listing
+    as_base = asptr(alloc(32))
+    as_ib = asptr(alloc(64))
+    as_in = 0
+    as_ripPos = 0 - 1
+    as_ripLabel = asptr(0)
+    as_line = 0
+    var st: int64 = 0
+    var i: int64 = 0
+    while i <= n {
+        if i == n || text[i] == 10 {
+            as_line = as_line + 1
+            asmLine(text + st, i - st)
+            st = i + 1
+        }
+        i = i + 1
+    }
+    var tx: ptr<StrBuf> = asptr(as_secs.get(AS_TEXT))
+    var ro: ptr<StrBuf> = asptr(as_secs.get(AS_RODATA))
+    var da: ptr<StrBuf> = asptr(as_secs.get(AS_DATA))
+    var hdr: int64 = 64 + 56 * 3
+    var textOff = hdr
+    var roOff = (textOff + tx.len + 15) / 16 * 16
+    var end1 = roOff + ro.len
+    var dataOff = (end1 + 15) / 16 * 16
+    var base: int64 = 4194304
+    var dataVaddr = 6291456 + dataOff % 4096
+    as_base[AS_TEXT] = base + textOff
+    as_base[AS_RODATA] = base + roOff
+    as_base[AS_DATA] = dataVaddr
+    // виправлення
+    var f: int64 = 0
+    while f < as_fix.len {
+        var fx: ptr<Fixup> = asptr(as_fix.get(f))
+        var sb: ptr<StrBuf> = asptr(as_secs.get(fx.sec))
+        var target = labelAddr(fx.a, fx.line)
+        if fx.kind == 1 {
+            var rel = target - (as_base[fx.sec] + fx.end)
+            var old: ptr<int32> = asptr(sb.data + fx.pos)
+            patch32(sb, fx.pos, rel + int64(old[0]))
+        } else if fx.kind == 2 {
+            patch64(sb, fx.pos, target)
+        } else {
+            patch32(sb, fx.pos, target - labelAddr(fx.b, fx.line))
+        }
+        f = f + 1
+    }
+    var entry = labelAddr("_start", 0)
+    var out = strBufNew()
+    // ELF-заголовок
+    out.byte(127)
+    out.add("ELF")
+    out.byte(2)
+    out.byte(1)
+    out.byte(1)
+    var z: int64 = 0
+    while z < 9 {
+        out.byte(0)
+        z = z + 1
+    }
+    put16(out, 2)        // ET_EXEC
+    put16(out, 62)       // x86-64
+    put32(out, 1)
+    put64(out, entry)
+    put64(out, 64)       // phoff
+    put64(out, 0)        // shoff
+    put32(out, 0)
+    put16(out, 64)
+    put16(out, 56)
+    put16(out, 3)
+    put16(out, 64)
+    put16(out, 0)
+    put16(out, 0)
+    phdr(out, 1 | (5 << 32), 0, base, end1, 4096)
+    phdr(out, 1 | (6 << 32), dataOff, dataVaddr, da.len, 4096)
+    phdr(out, 1685382481 | (6 << 32), 0, 0, 0, 16)   // PT_GNU_STACK: стек без виконання
+    out.addBuf(tx)
+    while out.len < roOff {
+        out.byte(0)
+    }
+    out.addBuf(ro)
+    while out.len < dataOff {
+        out.byte(0)
+    }
+    out.addBuf(da)
+    return out
+}

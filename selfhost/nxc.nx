@@ -1,9 +1,12 @@
 // nxc - компілятор NyxilumLang (системний режим x86-64), написаний на самій NyxilumLang (S8 крок 5).
 //   nxc файл.nx -o вихід.s [--obj] [--prelude X64Prelude.nx]
+//   nxc файл.nx -o програма --elf [--listing файл]   - одразу статичний ELF власним асемблером (asm.nx)
+//   nxc --asm файл.s -o програма --elf [--listing файл] - лише асемблювати готовий .s
 // Видає асемблер GNU as - той самий текст, що `nx compile-native файл.nx --target linux-x64`
 // кладе у вихід.s. Прелюдія: --prelude, або $NX_PRELUDE, або src/NyxilumLang/Native/X64Prelude.nx
 // відносно поточної теки.
 import "codegen_expr.nx"
+import "asm.nx"
 
 func readSource(path: ptr<uint8>, n: ptr<int64>) -> ptr<uint8> {
     var src = fileReadAll(path, n)
@@ -168,12 +171,22 @@ func main() -> int32 {
     var output: ptr<uint8> = asptr(0)
     var prel: ptr<uint8> = envGet("NX_PRELUDE")
     var objOnly = false
+    var elf = false
+    var asmIn = false
+    var listing: ptr<uint8> = asptr(0)
     var i: int64 = 1
     while i < argCount() {
         var a = arg(i)
         if strEq(a, "-o") && i + 1 < argCount() {
             i = i + 1
             output = arg(i)
+        } else if strEq(a, "--asm") {
+            asmIn = true
+        } else if strEq(a, "--elf") {
+            elf = true
+        } else if strEq(a, "--listing") && i + 1 < argCount() {
+            i = i + 1
+            listing = arg(i)
         } else if strEq(a, "--obj") {
             objOnly = true
         } else if strEq(a, "--prelude") && i + 1 < argCount() {
@@ -185,8 +198,27 @@ func main() -> int32 {
         i = i + 1
     }
     if input == null || output == null {
-        fdWriteStr(2, "використання: nxc файл.nx -o вихід.s [--obj] [--prelude X64Prelude.nx]\n")
+        fdWriteStr(2, "використання: nxc файл.nx -o вихід.s [--obj] [--prelude X64Prelude.nx] | -o програма --elf [--listing файл] | --asm файл.s -o програма --elf\n")
         return 2
+    }
+    if asmIn {
+        // готовий асемблер-текст -> ELF (nxc як асемблер)
+        var an: int64 = 0
+        var at = readSource(input, addr(an))
+        var lb: ptr<StrBuf> = asptr(0)
+        if listing != null {
+            lb = strBufNew()
+        }
+        var ab = assembleElf(at, an, lb)
+        if fileWriteAll(output, ab.data, ab.len) < 0 {
+            fdWriteStr(2, "nxc: не вдалося записати вихідний файл\n")
+            return 1
+        }
+        syscall(90, output, 493)
+        if lb != null {
+            fileWriteAll(listing, lb.data, lb.len)
+        }
+        return 0
     }
     if prel == null {
         prel = "src/NyxilumLang/Native/X64Prelude.nx"
@@ -205,6 +237,23 @@ func main() -> int32 {
     program = resolveImports(program, input)
     var prelude = parseBytes(psrc, pn)
     var out = compileProgram(prelude, program, objOnly)
+    if elf {
+        // власний асемблер + ELF: без GNU as і ld (S8 крок 6)
+        var lst: ptr<StrBuf> = asptr(0)
+        if listing != null {
+            lst = strBufNew()
+        }
+        var bin = assembleElf(out.data, out.len, lst)
+        if fileWriteAll(output, bin.data, bin.len) < 0 {
+            fdWriteStr(2, "nxc: не вдалося записати вихідний файл\n")
+            return 1
+        }
+        syscall(90, output, 493)
+        if lst != null {
+            fileWriteAll(listing, lst.data, lst.len)
+        }
+        return 0
+    }
     if fileWriteAll(output, out.data, out.len) < 0 {
         fdWriteStr(2, "nxc: не вдалося записати вихідний файл\n")
         return 1

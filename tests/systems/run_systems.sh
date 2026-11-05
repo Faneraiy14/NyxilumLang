@@ -88,6 +88,31 @@ if "$NX" compile-native ../../selfhost/nxc.nx -o "$W/nxc" --target linux-x64 >/d
     else bad "розкрутка" "стадії різняться"; fi
 else bad "компілятор на Nx" "selfhost/nxc.nx не скомпілювався"; fi
 
+# S8 крок 6: власний асемблер і ELF (selfhost/asm.nx, nxc --elf) - без GNU as і ld:
+# тести працюють так само; кодування інструкцій = GNU as; розкрутка через --elf дає однакові бінарники
+if [ -x "$W/nxc" ]; then
+    ebad=""; en=0; lsts=""
+    for f in [0-9]*.nx; do
+        n="${f%.nx}"; [ -f "c/$n.c" ] && continue
+        en=$((en + 1)); mkdir -p "$W/erun_$n"
+        if ! "$W/nxc" "$f" -o "$W/el_$n" --elf --listing "$W/el_$n.lst" --prelude "$PRE" >/dev/null 2>&1; then ebad="$ebad $n"; continue; fi
+        lsts="$lsts $W/el_$n.lst"
+        (cd "$W/erun_$n" && NX_TEST_VAR=значення "$W/el_$n" "перший аргумент" two) > "$W/el_$n.out" 2>&1; code=$?
+        want=$(grep -oP '^// expect-exit: \K[0-9]+' "$f"); want=${want:-0}
+        { cmp -s "$n.expected" "$W/el_$n.out" && [ "$code" = "$want" ]; } || ebad="$ebad $n"
+    done
+    if [ -z "$ebad" ]; then ok "власний асемблер: $en тестів без as/ld працюють так само"; else bad "власний асемблер" "$ebad"; fi
+    printf '.section .text\n_start:\n' > "$W/cases.s"; cat asm_cases.s >> "$W/cases.s"
+    "$W/nxc" --asm "$W/cases.s" -o "$W/cases" --elf --listing "$W/cases.lst" >/dev/null 2>&1
+    if r=$(python3 asm_vs_gnu.py "$W/cases.lst" $lsts "$W" 2>&1); then ok "власний асемблер: кодування = GNU as ($r різних інструкцій)"; else bad "кодування != GNU as" "$r"; fi
+    mkdir -p "$W/e2" "$W/e3"
+    if "$W/nxc" ../../selfhost/nxc.nx -o "$W/e2/nxc" --elf --prelude "$PRE" && "$W/e2/nxc" ../../selfhost/nxc.nx -o "$W/e3/nxc" --elf --prelude "$PRE" &&
+       "$W/e3/nxc" ../../selfhost/nxc.nx -o "$W/e3/nxc2" --elf --prelude "$PRE" && cmp -s "$W/e2/nxc" "$W/e3/nxc" && cmp -s "$W/e3/nxc" "$W/e3/nxc2" &&
+       "$W/e3/nxc" ../../selfhost/nxc.nx -o "$W/e3/nxc.s" --prelude "$PRE" && cmp -s "$W/e3/nxc.s" "$W/nxc.s"; then
+        ok "розкрутка без as/ld: стадії 2, 3, 4 однакові ($(wc -c < "$W/e2/nxc") байт), .s = C#"
+    else bad "розкрутка без as/ld" "стадії різняться"; fi
+fi
+
 python3 gen_arith.py "$W/a.nx" "$W/a.c"
 if gcc -O0 -w "$W/a.c" -o "$W/a_c" && "$W/a_c" > "$W/a_c.out" && "$NX" compile-native "$W/a.nx" -o "$W/a_nx" --target linux-x64 >/dev/null 2>&1 && "$W/a_nx" > "$W/a_nx.out" && cmp -s "$W/a_c.out" "$W/a_nx.out"; then
     ok "арифметика проти C ($(wc -l < "$W/a_c.out") результатів)"
