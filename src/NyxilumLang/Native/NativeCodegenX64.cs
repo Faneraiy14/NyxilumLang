@@ -25,7 +25,7 @@ namespace NyxilumLang.Native;
 // alloc(n) -> ptr<void> (нулі), free(p), realloc(p, n), memcpy/memmove/memset, addr(x), offsetof(S, поле), new(S) -> ptr<S> (нулі), S { поле: ... },
 // sizeof(T), stackbuf(N) -> ptr<uint8> (N байтів у кадрі функції),
 // asptr(ціле чи вказівник) -> ptr<void>, funcaddr(f) -> ptr<void>, callptr(f, ...) -> int64,
-// float64Bits(x) -> int64, bitsToFloat64(n) -> float64, asm("...") -> int64 (rax).
+// float64Bits(x) -> int64, bitsToFloat64(n) -> float64, sqrt(x) (float64/float32), asm("...") -> int64 (rax).
 // Ще немає (наступні етапи): винятки, замикання, рядки як значення, масиви,
 // int64 MIN / -1 і насичення float->int як у Java (S2), free (S3).
 public sealed class NativeCodegenX64
@@ -1270,6 +1270,15 @@ public sealed class NativeCodegenX64
                 if (a.Count != 1 || a[0] is not VariableExpression fv || !_funcs.TryGetValue(fv.Name, out var ff)) throw Err("funcaddr(ім'я функції)");
                 E($"lea {ff.Label}(%rip), %rax");
                 return T.VoidPtr;
+            }
+            case "sqrt":
+            {
+                // корінь апаратно (sqrtsd/sqrtss) - точно заокруглений, як Math.sqrt у Java
+                if (a.Count != 1) throw Err("sqrt(x)");
+                var t = Gen(a[0], T.F64);
+                if (!t.IsFloat) throw Err($"sqrt: потрібен float64 або float32, а тут {t}");
+                E(t.Size == 8 ? "sqrtsd %xmm0, %xmm0" : "sqrtss %xmm0, %xmm0");
+                return t;
             }
             case "float64Bits":
             {

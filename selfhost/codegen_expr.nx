@@ -793,6 +793,22 @@ func call(c: ptr<Node>, want: ptr<Ty>) -> ptr<Ty> {
         E(cat3("lea ", funcGet(argAt(c, 0).s1).label, "(%rip), %rax"))
         return T_VOIDPTR
     }
+    if strEq(n, "sqrt") {
+        // корінь апаратно (sqrtsd/sqrtss) - точно заокруглений, як Math.sqrt у Java
+        if cnt != 1 {
+            cgErr("sqrt(x)")
+        }
+        var tq = gen(argAt(c, 0), T_F64)
+        if !isFloat(tq) {
+            cgErr(cat("sqrt: потрібен float64 або float32, а тут ", tyStr(tq)))
+        }
+        if tq.size == 8 {
+            E("sqrtsd %xmm0, %xmm0")
+        } else {
+            E("sqrtss %xmm0, %xmm0")
+        }
+        return tq
+    }
     if strEq(n, "float64Bits") {
         if cnt != 1 {
             cgErr("float64Bits(x)")

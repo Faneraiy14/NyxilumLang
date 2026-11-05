@@ -1,0 +1,13 @@
+// V1: sqrt - апаратний корінь (sqrtsd/sqrtss), точно заокруглений, як Math.sqrt у Java
+func main() {
+    print(sqrt(2.0))
+    print(sqrt(16.0))
+    print(sqrt(0.0))
+    print(float64Bits(sqrt(-0.0)))
+    print(sqrt(10000000000.0 * 10000000000.0))
+    var f: float32 = 2.0
+    print(sqrt(f))
+    var x = 12345.678
+    print(sqrt(x * x) == x)
+    print(sqrt(-1.0) != sqrt(-1.0))
+}

@@ -1086,6 +1086,8 @@ func encodeIns(mn: ptr<uint8>, ops: ptr<Vec>, src: ptr<uint8>) {
         arith = 92
     } else if strEq(mn, "divsd") || strEq(mn, "divss") {
         arith = 94
+    } else if strEq(mn, "sqrtsd") || strEq(mn, "sqrtss") {
+        arith = 81
     } else if strEq(mn, "cvtsd2ss") {
         arith = 90
     } else if strEq(mn, "cvtss2sd") {

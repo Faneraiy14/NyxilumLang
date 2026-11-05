@@ -90,3 +90,5 @@ syscall
 cqo
 leave
 ret
+sqrtsd %xmm3, %xmm9
+sqrtss (%rax), %xmm0
