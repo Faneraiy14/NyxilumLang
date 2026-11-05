@@ -1,0 +1,122 @@
+// S6: потоки, атомарні операції, м'ютекс, умовна змінна, tls
+struct Shared {
+    counter: int64
+    plain: int64
+    lock: Mutex
+    cond: Cond
+    ready: int64
+    done: int64
+}
+
+var g: ptr<Shared> = null
+
+func atomicWorker(arg: ptr<void>) -> int64 {
+    var p: ptr<int64> = asptr(arg)
+    for i in 0..1000000 {
+        atomicAdd(p, 1)
+    }
+    return 7
+}
+
+func mutexWorker(arg: ptr<void>) -> int64 {
+    for i in 0..200000 {
+        g.lock.lock()
+        g.plain = g.plain + 1
+        g.lock.unlock()
+    }
+    return 0
+}
+
+func tlsWorker(arg: ptr<void>) -> int64 {
+    var mine: ptr<int64> = asptr(tls())
+    mine[0] = int64(arg)
+    for i in 0..1000 {
+        mine[0] = mine[0] + 1
+    }
+    return mine[0]
+}
+
+// споживач чекає на cond, поки виробник не скаже ready
+func waiter(arg: ptr<void>) -> int64 {
+    g.lock.lock()
+    while g.ready == 0 {
+        g.cond.wait(addr(g.lock))
+    }
+    g.done = g.done + 1
+    g.lock.unlock()
+    return 0
+}
+
+func allocWorker(arg: ptr<void>) -> int64 {
+    var sum: int64 = 0
+    for i in 0..20000 {
+        var p: ptr<int64> = asptr(alloc(8 + (i % 300) * 8))
+        p[0] = i
+        sum = sum + p[0]
+        free(p)
+    }
+    return sum
+}
+
+func main() {
+    g = new(Shared)
+    var ts: [ptr<Thread>; 8]
+    for i in 0..8 {
+        ts[i] = spawn(funcaddr(atomicWorker), addr(g.counter))
+    }
+    var rs: int64 = 0
+    for i in 0..8 {
+        rs = rs + join(ts[i])
+    }
+    print(g.counter)
+    print(rs)
+
+    for i in 0..8 {
+        ts[i] = spawn(funcaddr(mutexWorker), asptr(0))
+    }
+    for i in 0..8 {
+        join(ts[i])
+    }
+    print(g.plain)
+
+    // tls: у кожного потоку свій лічильник; у головного - теж свій
+    var mine: ptr<int64> = asptr(tls())
+    mine[0] = 5
+    for i in 0..4 {
+        ts[i] = spawn(funcaddr(tlsWorker), asptr(i * 100))
+    }
+    for i in 0..4 {
+        print(join(ts[i]))
+    }
+    print(mine[0])
+
+    for i in 0..4 {
+        ts[i] = spawn(funcaddr(waiter), asptr(0))
+    }
+    g.lock.lock()
+    g.ready = 1
+    g.cond.broadcast()
+    g.lock.unlock()
+    for i in 0..4 {
+        join(ts[i])
+    }
+    print(g.done)
+
+    var x: int32 = 10
+    print(atomicCas(addr(x), 10, 20))
+    print(atomicCas(addr(x), 10, 30))
+    print(x)
+    print(atomicSwap(addr(x), 1))
+    atomicStore(addr(x), 9)
+    print(atomicLoad(addr(x)))
+    fence()
+
+    for i in 0..8 {
+        ts[i] = spawn(funcaddr(allocWorker), asptr(0))
+    }
+    var as: int64 = 0
+    for i in 0..8 {
+        as = as + join(ts[i])
+    }
+    print(as)
+}

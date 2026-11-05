@@ -437,7 +437,7 @@ var __nx_freelists: ptr<ptr<int64>> = null
 var __nx_mapped: int64 = 0
 
 func __nx_mmap(n: int64) -> ptr<uint8> {
-    __nx_mapped = __nx_mapped + n
+    atomicAdd(addr(__nx_mapped), n)
     return asptr(syscall(9, 0, n, 3, 34, -1, 0))
 }
 
@@ -452,7 +452,7 @@ func __nx_bump(n: int64) -> ptr<uint8> {
     return p
 }
 
-func __nx_alloc(n: int64) -> ptr<void> {
+func __nx_alloc_u(n: int64) -> ptr<void> {
     if n < 0 {
         n = 0
     }
@@ -484,7 +484,7 @@ func __nx_alloc(n: int64) -> ptr<void> {
     return b + 2
 }
 
-func __nx_release(p: ptr<void>) {
+func __nx_release_u(p: ptr<void>) {
     if p == null {
         return
     }
@@ -492,12 +492,33 @@ func __nx_release(p: ptr<void>) {
     b = b - 2
     var c = b[0]
     if c < 0 {
-        __nx_mapped = __nx_mapped + c
+        atomicAdd(addr(__nx_mapped), c)
         syscall(11, b, 0 - c)
         return
     }
     b[1] = int64(__nx_freelists[c])
     __nx_freelists[c] = b
+}
+
+// поки є лише головний потік - без замка (жодної ціни); після першого spawn - замок на futex
+func __nx_alloc(n: int64) -> ptr<void> {
+    if !__nx_threaded {
+        return __nx_alloc_u(n)
+    }
+    __nx_lock(addr(__nx_heaplock))
+    var p = __nx_alloc_u(n)
+    __nx_unlock(addr(__nx_heaplock))
+    return p
+}
+
+func __nx_release(p: ptr<void>) {
+    if !__nx_threaded {
+        __nx_release_u(p)
+        return
+    }
+    __nx_lock(addr(__nx_heaplock))
+    __nx_release_u(p)
+    __nx_unlock(addr(__nx_heaplock))
 }
 
 func __nx_realloc(p: ptr<void>, n: int64) -> ptr<void> {
@@ -519,4 +540,144 @@ func __nx_realloc(p: ptr<void>, n: int64) -> ptr<void> {
     memcpy(q, p, cap)
     __nx_release(p)
     return q
+}
+
+// ---------- потоки ----------
+// Потік = clone зі спільною пам'яттю і своїм стеком (1 МБ, mmap). Кожен потік має блок TLS
+// (4 КБ, на нього вказує fs): [0] - сам блок, [1] - ptr<Thread> (у головного - null), з 64-го
+// байта - пам'ять для tls(). Очікування - futex (202): поки значення не змінилось, потік спить
+// у ядрі, а не крутиться.
+
+var __nx_threaded: bool = false
+var __nx_heaplock: int32 = 0
+
+// м'ютекс за Дреппером: 0 - вільний, 1 - зайнятий, 2 - зайнятий і хтось чекає
+func __nx_lock(s: ptr<int32>) {
+    var c = atomicCas(s, 0, 1)
+    if c == 0 {
+        return
+    }
+    if c != 2 {
+        c = atomicSwap(s, 2)
+    }
+    while c != 0 {
+        syscall(202, s, 128, 2, 0, 0, 0)
+        c = atomicSwap(s, 2)
+    }
+}
+
+func __nx_unlock(s: ptr<int32>) {
+    if atomicAdd(s, -1) != 1 {
+        atomicStore(s, 0)
+        syscall(202, s, 129, 1, 0, 0, 0)
+    }
+}
+
+struct Mutex {
+    state: int32
+
+    func Mutex.lock() {
+        __nx_lock(addr(self.state))
+    }
+
+    func Mutex.unlock() {
+        __nx_unlock(addr(self.state))
+    }
+
+    func Mutex.tryLock() -> bool {
+        return atomicCas(addr(self.state), 0, 1) == 0
+    }
+}
+
+// умовна змінна: лічильник подій; wait засинає, поки лічильник той самий
+struct Cond {
+    seq: int32
+
+    func Cond.wait(m: ptr<Mutex>) {
+        var q = addr(self.seq)
+        var v = atomicLoad(q)
+        m.unlock()
+        syscall(202, q, 128, v, 0, 0, 0)
+        var s = addr(m.state)
+        while atomicSwap(s, 2) != 0 {
+            syscall(202, s, 128, 2, 0, 0, 0)
+        }
+    }
+
+    func Cond.signal() {
+        atomicAdd(addr(self.seq), 1)
+        syscall(202, addr(self.seq), 129, 1, 0, 0, 0)
+    }
+
+    func Cond.broadcast() {
+        atomicAdd(addr(self.seq), 1)
+        syscall(202, addr(self.seq), 129, 2147483647, 0, 0, 0)
+    }
+}
+
+struct Thread {
+    tid: int32
+    fn: ptr<void>
+    arg: ptr<void>
+    result: int64
+    stack: ptr<uint8>
+    tlsBlock: ptr<int64>
+}
+
+func __nx_tls_new(t: ptr<Thread>) -> ptr<int64> {
+    var b: ptr<int64> = asptr(__nx_mmap(4096))
+    b[0] = int64(b)
+    b[1] = int64(t)
+    return b
+}
+
+func __nx_tls_init() {
+    syscall(158, 4098, __nx_tls_new(asptr(0)))
+}
+
+func __nx_thread_entry(t: ptr<Thread>) {
+    t.result = callptr(t.fn, t.arg)
+}
+
+// spawn(funcaddr(f), arg): f(arg) -> int64 у новому потоці; null - не вдалось
+func spawn(f: ptr<void>, arg: ptr<void>) -> ptr<Thread> {
+    __nx_threaded = true
+    var t = new(Thread)
+    t.fn = f
+    t.arg = arg
+    var size: int64 = 1048576
+    t.stack = __nx_mmap(size)
+    t.tlsBlock = __nx_tls_new(t)
+    var top: ptr<int64> = asptr(t.stack + size - 16)
+    top[0] = int64(t)
+    // VM|FS|FILES|SIGHAND|THREAD|SYSVSEM|SETTLS|PARENT_SETTID|CHILD_CLEARTID
+    var r = __nx_clone(4001536, top, addr(t.tid), addr(t.tid), t.tlsBlock)
+    if r < 0 {
+        syscall(11, t.stack, size)
+        syscall(11, t.tlsBlock, 4096)
+        free(t)
+        return asptr(0)
+    }
+    return t
+}
+
+// дочекатися кінця потоку, звільнити його стек і повернути результат f
+func join(t: ptr<Thread>) -> int64 {
+    var q = addr(t.tid)
+    var v = atomicLoad(q)
+    while v != 0 {
+        syscall(202, q, 0, v, 0, 0, 0)
+        v = atomicLoad(q)
+    }
+    var r = t.result
+    syscall(11, t.stack, 1048576)
+    syscall(11, t.tlsBlock, 4096)
+    atomicAdd(addr(__nx_mapped), 0 - 1048576 - 4096)
+    free(t)
+    return r
+}
+
+// номер потоку в ядрі (gettid)
+func threadId() -> int64 {
+    return syscall(186)
 }

@@ -124,11 +124,29 @@ public sealed class NativeCodegenX64
             _text.AppendLine("_start:");
             _text.AppendLine("    xor %ebp, %ebp");
             _text.AppendLine("    and $-16, %rsp");
+            _text.AppendLine($"    call {_funcs["__nx_tls_init"].Label}");
             _text.AppendLine($"    call {main.Label}");
             _text.AppendLine(main.Ret.InReg ? "    mov %rax, %rdi" : "    xor %edi, %edi");
-            _text.AppendLine("    mov $60, %eax");
+            _text.AppendLine("    mov $231, %eax"); // exit_group: завершити всі потоки, не лише головний
             _text.AppendLine("    syscall");
         }
+        // запуск потоку: clone(флаги rdi, стек rsi, &tid батька rdx, &tid дитини rcx, tls r8).
+        // На верхівці нового стеку лежить ptr<Thread>; дитина бере його й викликає __nx_thread_entry,
+        // потім exit (лише цей потік). Ядро обнуляє tid і будить futex - на цьому стоїть join.
+        _text.AppendLine("__nx_clone_asm:");
+        _text.AppendLine("    mov %rcx, %r10");
+        _text.AppendLine("    mov $56, %eax");
+        _text.AppendLine("    syscall");
+        _text.AppendLine("    test %rax, %rax");
+        _text.AppendLine("    jnz 1f");
+        _text.AppendLine("    xor %ebp, %ebp");
+        _text.AppendLine("    pop %rdi");
+        _text.AppendLine("    and $-16, %rsp");
+        _text.AppendLine($"    call {_funcs["__nx_thread_entry"].Label}");
+        _text.AppendLine("    xor %edi, %edi");
+        _text.AppendLine("    mov $60, %eax");
+        _text.AppendLine("    syscall");
+        _text.AppendLine("1:  ret");
         foreach (var f in _funcs.Values) CompileFunc(f);
 
         var o = new StringBuilder(_text.ToString());
@@ -1382,6 +1400,64 @@ public sealed class NativeCodegenX64
                 if (a.Count != 2) throw Err("realloc(вказівник, байтів)");
                 return EmitCall(a, new List<T> { T.VoidPtr, T.I64 }, _funcs["__nx_realloc"].Label, T.VoidPtr);
             }
+            case "atomicAdd" or "atomicSwap" or "atomicStore":
+            {
+                // atomicAdd(p, v) -> старе значення (lock xadd); atomicSwap(p, v) -> старе (xchg); atomicStore(p, v) (xchg = повний бар'єр)
+                if (a.Count != 2) throw Err($"{n}(вказівник, значення)");
+                var el = AtomicElem(a[0], n, n == "atomicAdd");
+                Push(T.VoidPtr);
+                var vt = Gen(a[1], el);
+                Convert(vt, el, $"{n}: значення");
+                E("mov %rax, %rcx");
+                PopTo("%rdx");
+                string r = SizedReg("c", el.Size), sfx = Sfx(el.Size);
+                E(n == "atomicAdd" ? $"lock xadd{sfx} {r}, (%rdx)" : $"xchg{sfx} {r}, (%rdx)");
+                if (n == "atomicStore") return T.Void;
+                E("mov %rcx, %rax");
+                return Canon(el);
+            }
+            case "atomicCas":
+            {
+                // atomicCas(p, очікуване, нове) -> значення, що було (успіх, якщо воно == очікуване); lock cmpxchg
+                if (a.Count != 3) throw Err("atomicCas(вказівник, очікуване, нове)");
+                var el = AtomicElem(a[0], n, false);
+                Push(T.VoidPtr);
+                Convert(Gen(a[1], el), el, "atomicCas: очікуване");
+                Push(el);
+                Convert(Gen(a[2], el), el, "atomicCas: нове");
+                E("mov %rax, %rcx");
+                PopTo("%rax");
+                PopTo("%rdx");
+                E($"lock cmpxchg{Sfx(el.Size)} {SizedReg("c", el.Size)}, (%rdx)");
+                return Canon(el);
+            }
+            case "atomicLoad":
+            {
+                // на x86 вирівняне читання атомарне й не переставляється з іншими читаннями
+                if (a.Count != 1) throw Err("atomicLoad(вказівник)");
+                var el = AtomicElem(a[0], n, false);
+                LoadMem("(%rax)", el);
+                return el;
+            }
+            case "fence":
+                if (a.Count != 0) throw Err("fence() без аргументів");
+                E("mfence");
+                return T.Void;
+            case "cpuPause":
+                if (a.Count != 0) throw Err("cpuPause() без аргументів");
+                E("pause");
+                return T.Void;
+            case "tls":
+            {
+                // пам'ять цього потоку: fs вказує на блок, де [0] - сам блок; користувачу - байти з 64-го
+                if (a.Count != 0) throw Err("tls() без аргументів");
+                E("mov %fs:0, %rax");
+                E("add $64, %rax");
+                return T.Ptr(T.U8);
+            }
+            case "__nx_clone":
+                if (a.Count != 5) throw Err("__nx_clone(флаги, стек, ptid, ctid, tls)");
+                return EmitCall(a, new List<T> { T.I64, T.VoidPtr, T.VoidPtr, T.VoidPtr, T.VoidPtr }, "__nx_clone_asm", T.I64);
             case "asm":
                 // вставка асемблера (AT&T) як є; значення - rax після вставки
                 if (a.Count != 1 || a[0] is not LiteralExpression { Value: string code }) throw Err("asm(\"інструкції\") - лише рядковий літерал");
@@ -1414,6 +1490,21 @@ public sealed class NativeCodegenX64
     }
 
     // обчислити аргументи (зліва направо, на стек), розкласти по регістрах System V і викликати
+    // атомарні: перший аргумент - ptr на ціле (для atomicAdd) або ціле/bool/вказівник; адреса лишається в rax
+    T AtomicElem(ExpressionNode p, string n, bool intOnly)
+    {
+        var pt = Gen(p, null);
+        if (!pt.IsPtr || pt.Elem!.Kind == K.Void) throw Err($"{n}: першим має бути типізований вказівник (ptr<int64>, ptr<int32>...), а тут {pt}");
+        var el = pt.Elem;
+        bool ok = el.IsInt || (!intOnly && (el.Kind == K.Bool || el.IsPtr));
+        if (!ok) throw Err($"{n}: {el} не підходить - лише {(intOnly ? "цілі" : "цілі, bool і вказівники")}");
+        return el;
+    }
+
+    static string SizedReg(string r, int size) => size switch { 1 => $"%{r}l", 2 => $"%{r}x", 4 => $"%e{r}x", _ => $"%r{r}x" };
+    static string Sfx(int size) => size switch { 1 => "b", 2 => "w", 4 => "l", _ => "q" };
+    T Canon(T t) { if (t.IsInt) CanonReg(t); else if (t.Kind == K.Bool) E("movzbq %al, %rax"); return t; }
+
     T EmitCall(List<ExpressionNode> args, List<T>? types, string target, T ret, bool popCalleeToR11 = false)
     {
         var got = new List<T>();
