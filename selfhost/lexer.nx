@@ -1,0 +1,409 @@
+// Лексер NyxilumLang на самій NyxilumLang (S8 крок 3) - порт src/NyxilumLang/Core/Lexer.cs.
+// Вихід той самий, що в C#: типи, значення й рядки токенів (перевірка: nx dump-tokens).
+// Байти UTF-8 >= 0x80 вважаються літерами (кирилиця в іменах); апостроф - лише між літерами.
+// Свідомо як у C#: рядки всередині ${...} рахуються з 1 (окремий лексер), /* */ не рахує
+// переносів, //-коментар не рухає стовпець. Стовпець - у символах (C# - у UTF-16, для
+// звичайного тексту те саме).
+import "std.nx"
+
+var TK_KEYWORD: int64 = 0
+var TK_IDENT: int64 = 1
+var TK_NUMBER: int64 = 2
+var TK_STRING: int64 = 3
+var TK_BOOL: int64 = 4
+var TK_OP: int64 = 5
+var TK_PUNCT: int64 = 6
+var TK_EOF: int64 = 7
+
+struct Token {
+    kind: int64
+    val: ptr<uint8>   // з нулем у кінці; рядок може мати й \0 усередині - тоді дивитись len
+    len: int64
+    line: int64
+    col: int64
+}
+
+func tokenKindName(k: int64) -> ptr<uint8> {
+    if k == 0 {
+        return "Keyword"
+    } else if k == 1 {
+        return "Identifier"
+    } else if k == 2 {
+        return "Number"
+    } else if k == 3 {
+        return "String"
+    } else if k == 4 {
+        return "Boolean"
+    } else if k == 5 {
+        return "Operator"
+    } else if k == 6 {
+        return "Punctuation"
+    }
+    return "EOF"
+}
+
+var __lex_keywords: ptr<Map> = null
+
+func lexKeywords() -> ptr<Map> {
+    if __lex_keywords != null {
+        return __lex_keywords
+    }
+    var m = mapNew()
+    var words = "func var if else while for return break continue true false null print in struct self import extends super try catch throw readLine readInt readDouble readFile writeFile appendFile fileExists sqrt abs pow sin cos tan round floor ceil max min "
+    var i: int64 = 0
+    var start: int64 = 0
+    while words[i] != 0 {
+        if words[i] == 32 {
+            m.putN(words + start, i - start, 1)
+            start = i + 1
+        }
+        i = i + 1
+    }
+    __lex_keywords = m
+    return m
+}
+
+// повідомлення як у C# (Lexer Error: ...) у stderr і вихід з кодом 1
+func lexFail(b: ptr<StrBuf>) {
+    var e = strBufNew()
+    e.add("Lexer Error: ")
+    e.addBuf(b)
+    e.byte(10)
+    fdWrite(2, e.data, e.len)
+    exit(1)
+}
+
+func isAsciiLetter(c: int64) -> bool {
+    return (c >= 65 && c <= 90) || (c >= 97 && c <= 122)
+}
+
+func isDigitB(c: int64) -> bool {
+    return c >= 48 && c <= 57
+}
+
+// літера в сенсі лексера: латиниця або будь-який байт UTF-8 >= 0x80
+func isLetterB(c: int64) -> bool {
+    return isAsciiLetter(c) || c >= 128
+}
+
+func isHexB(c: int64) -> bool {
+    return isDigitB(c) || (c >= 65 && c <= 70) || (c >= 97 && c <= 102)
+}
+
+func hexVal(c: int64) -> int64 {
+    if c <= 57 {
+        return c - 48
+    }
+    if c <= 70 {
+        return c - 55
+    }
+    return c - 87
+}
+
+func isSpaceB(c: int64) -> bool {
+    return c == 32 || (c >= 9 && c <= 13)
+}
+
+// символів (не байтів) у n байтах UTF-8
+func utf8Chars(p: ptr<uint8>, n: int64) -> int64 {
+    var k: int64 = 0
+    var i: int64 = 0
+    while i < n {
+        if (int64(p[i]) & 192) != 128 {
+            k = k + 1
+        }
+        i = i + 1
+    }
+    return k
+}
+
+struct Lexer {
+    src: ptr<uint8>
+    n: int64
+    pos: int64
+    line: int64
+    col: int64
+    out: ptr<Vec>
+
+    // байт на позиції i або -1 за межами
+    func Lexer.at(i: int64) -> int64 {
+        if i < 0 || i >= self.n {
+            return 0 - 1
+        }
+        return int64(self.src[i])
+    }
+
+    func Lexer.emit(kind: int64, p: ptr<uint8>, n: int64) {
+        var t = new(Token)
+        t.kind = kind
+        t.val = strNDup(p, n)
+        t.len = n
+        t.line = self.line
+        t.col = self.col
+        self.out.pushPtr(t)
+    }
+
+    func Lexer.emitS(kind: int64, s: ptr<uint8>) {
+        self.emit(kind, s, strLen(s))
+    }
+
+    func Lexer.run() {
+        var kw = lexKeywords()
+        while self.pos < self.n {
+            var c = self.at(self.pos)
+            var d = self.at(self.pos + 1)
+
+            if isSpaceB(c) {
+                if c == 10 {
+                    self.line = self.line + 1
+                    self.col = 1
+                } else {
+                    self.col = self.col + 1
+                }
+                self.pos = self.pos + 1
+                continue
+            }
+
+            if c == 47 && d == 47 {
+                while self.pos < self.n && self.at(self.pos) != 10 {
+                    self.pos = self.pos + 1
+                }
+                continue
+            }
+
+            if c == 47 && d == 42 {
+                self.pos = self.pos + 2
+                while self.pos + 1 < self.n && !(self.at(self.pos) == 42 && self.at(self.pos + 1) == 47) {
+                    self.pos = self.pos + 1
+                }
+                self.pos = self.pos + 2
+                continue
+            }
+
+            // 0x1F -> десяткове значення
+            if c == 48 && (d == 120 || d == 88) && self.pos + 2 < self.n && isHexB(self.at(self.pos + 2)) {
+                var hs = self.pos
+                self.pos = self.pos + 2
+                var v: int64 = 0
+                while self.pos < self.n && isHexB(self.at(self.pos)) {
+                    v = v * 16 + hexVal(self.at(self.pos))
+                    self.pos = self.pos + 1
+                }
+                var buf = stackbuf(32)
+                var bn = fmtInt(buf, v)
+                self.emit(TK_NUMBER, buf, bn)
+                self.col = self.col + (self.pos - hs)
+                continue
+            }
+
+            if isDigitB(c) {
+                var ns = self.pos
+                while self.pos < self.n && isDigitB(self.at(self.pos)) {
+                    self.pos = self.pos + 1
+                }
+                if self.at(self.pos) == 46 && self.at(self.pos + 1) != 46 {
+                    self.pos = self.pos + 1
+                    while self.pos < self.n && isDigitB(self.at(self.pos)) {
+                        self.pos = self.pos + 1
+                    }
+                }
+                self.emit(TK_NUMBER, self.src + ns, self.pos - ns)
+                self.col = self.col + (self.pos - ns)
+                continue
+            }
+
+            if c == 46 {
+                if d == 46 {
+                    self.emitS(TK_OP, "..")
+                    self.pos = self.pos + 2
+                    self.col = self.col + 2
+                    continue
+                }
+                self.emitS(TK_PUNCT, ".")
+                self.pos = self.pos + 1
+                self.col = self.col + 1
+                continue
+            }
+
+            if c == 34 {
+                self.str()
+                continue
+            }
+
+            if isLetterB(c) || c == 95 {
+                var ws = self.pos
+                while self.pos < self.n {
+                    var e = self.at(self.pos)
+                    if isLetterB(e) || isDigitB(e) || e == 95 || (e == 39 && isLetterB(self.at(self.pos + 1))) {
+                        self.pos = self.pos + 1
+                    } else {
+                        break
+                    }
+                }
+                var wn = self.pos - ws
+                var kind = TK_IDENT
+                if kw.hasN(self.src + ws, wn) {
+                    kind = TK_KEYWORD
+                    if wn == 4 && memEq(self.src + ws, "true", 4) {
+                        kind = TK_BOOL
+                    }
+                    if wn == 5 && memEq(self.src + ws, "false", 5) {
+                        kind = TK_BOOL
+                    }
+                }
+                self.emit(kind, self.src + ws, wn)
+                self.col = self.col + utf8Chars(self.src + ws, wn)
+                continue
+            }
+
+            // двосимвольні оператори (як у C#)
+            var two = false
+            if (c == 45 && d == 62) || (c == 61 && d == 61) || (c == 33 && d == 61) || (c == 62 && d == 61) || (c == 60 && d == 61) {
+                two = true
+            } else if (c == 38 && d == 38) || (c == 124 && d == 124) || (c == 43 && d == 43) || (c == 45 && d == 45) {
+                two = true
+            } else if (c == 43 && d == 61) || (c == 45 && d == 61) || (c == 42 && d == 61) || (c == 47 && d == 61) {
+                two = true
+            } else if (c == 60 && d == 60) || (c == 62 && d == 62) {
+                two = true
+            }
+            if two {
+                self.emit(TK_OP, self.src + self.pos, 2)
+                self.pos = self.pos + 2
+                self.col = self.col + 2
+                continue
+            }
+            if c == 43 || c == 45 || c == 42 || c == 47 || c == 37 || c == 61 || c == 33 || c == 60 || c == 62 || c == 124 || c == 38 || c == 94 || c == 126 {
+                self.emit(TK_OP, self.src + self.pos, 1)
+                self.pos = self.pos + 1
+                self.col = self.col + 1
+                continue
+            }
+            if c == 40 || c == 41 || c == 123 || c == 125 || c == 91 || c == 93 || c == 44 || c == 59 || c == 58 {
+                self.emit(TK_PUNCT, self.src + self.pos, 1)
+                self.pos = self.pos + 1
+                self.col = self.col + 1
+                continue
+            }
+            var eb = strBufNew()
+            eb.add("Невідомий символ '")
+            eb.byte(c)
+            eb.add("' на рядку ")
+            eb.addInt(self.line)
+            eb.add(", стовпець ")
+            eb.addInt(self.col)
+            lexFail(eb)
+        }
+        self.emitS(TK_EOF, "")
+    }
+
+    // рядок "...", з \-екрануванням і ${вираз}
+    func Lexer.str() {
+        self.pos = self.pos + 1
+        var s = strBufNew()
+        var parts = vecNew()   // StrBuf* - шматки тексту між ${}
+        var exprs = vecNew()   // Vec* токенів кожного ${}
+        while self.pos < self.n && self.at(self.pos) != 34 {
+            var c = self.at(self.pos)
+            if c == 92 && self.pos + 1 < self.n {
+                var e = self.at(self.pos + 1)
+                if e == 110 {
+                    e = 10
+                } else if e == 116 {
+                    e = 9
+                } else if e == 114 {
+                    e = 13
+                } else if e == 48 {
+                    e = 0
+                }
+                s.byte(e)
+                self.pos = self.pos + 2
+                continue
+            }
+            if c == 36 && self.at(self.pos + 1) == 123 {
+                parts.pushPtr(s)
+                s = strBufNew()
+                self.pos = self.pos + 2
+                var es = self.pos
+                var depth: int64 = 1
+                while self.pos < self.n && depth > 0 {
+                    var x = self.at(self.pos)
+                    if x == 123 {
+                        depth = depth + 1
+                    } else if x == 125 {
+                        depth = depth - 1
+                        if depth == 0 {
+                            break
+                        }
+                    }
+                    self.pos = self.pos + 1
+                }
+                if depth != 0 {
+                    var eb = strBufNew()
+                    eb.add("Незакрита інтерполяція \"\${...\" у рядку ")
+                    eb.addInt(self.line)
+                    lexFail(eb)
+                }
+                var sub = lexBytes(self.src + es, self.pos - es)
+                sub.pop()   // EOF
+                exprs.pushPtr(sub)
+                self.pos = self.pos + 1
+                continue
+            }
+            s.byte(c)
+            self.pos = self.pos + 1
+        }
+        self.pos = self.pos + 1
+
+        if parts.len == 0 {
+            self.emit(TK_STRING, s.data, s.len)
+            self.col = self.col + utf8Chars(s.data, s.len) + 2
+            s.release()
+            parts.release()
+            exprs.release()
+            return
+        }
+        parts.pushPtr(s)
+        // "a${b}c" -> ( "" + "a" + ( b ) + "c" )
+        self.emitS(TK_PUNCT, "(")
+        self.emitS(TK_STRING, "")
+        var i: int64 = 0
+        while i < parts.len {
+            var p: ptr<StrBuf> = asptr(parts.get(i))
+            self.emitS(TK_OP, "+")
+            self.emit(TK_STRING, p.data, p.len)
+            p.release()
+            if i < exprs.len {
+                self.emitS(TK_OP, "+")
+                self.emitS(TK_PUNCT, "(")
+                var ts: ptr<Vec> = asptr(exprs.get(i))
+                var j: int64 = 0
+                while j < ts.len {
+                    self.out.push(ts.get(j))
+                    j = j + 1
+                }
+                ts.release()
+                self.emitS(TK_PUNCT, ")")
+            }
+            i = i + 1
+        }
+        self.emitS(TK_PUNCT, ")")
+        parts.release()
+        exprs.release()
+    }
+}
+
+// токени (Vec з ptr<Token>, останній - EOF) з n байтів src
+func lexBytes(src: ptr<uint8>, n: int64) -> ptr<Vec> {
+    var lx = new(Lexer)
+    lx.src = src
+    lx.n = n
+    lx.pos = 0
+    lx.line = 1
+    lx.col = 1
+    lx.out = vecNew()
+    lx.run()
+    var out = lx.out
+    free(lx)
+    return out
+}

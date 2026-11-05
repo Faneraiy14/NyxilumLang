@@ -86,6 +86,12 @@ public class Nx
             return;
         }
 
+        if (command == "dump-tokens" && args.Length > 1)
+        {
+            RunDumpTokens(args[1]);
+            return;
+        }
+
         if (command == "compile-native" && args.Length > 1)
         {
             string? outPath = null;
@@ -298,6 +304,43 @@ public class Nx
             Console.WriteLine($"Parse Error: {ex.Message}");
             Environment.Exit(1);
         }
+    }
+
+    // "nx dump-tokens файл.nx" - токени лексера рядками «Тип<TAB>значення<TAB>рядок»
+    // (\\ \n \t \r \0 у значенні екрановані). Еталон для selfhost/lexer.nx (S8).
+    private static void RunDumpTokens(string path)
+    {
+        if (!File.Exists(path))
+        {
+            Console.Error.WriteLine($"Error: Cannot find file '{path}'");
+            Environment.Exit(1);
+            return;
+        }
+        List<Token> tokens;
+        try { tokens = new Lexer(File.ReadAllText(path, Encoding.UTF8)).Tokenize(); }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"Lexer Error: {ex.Message}");
+            Environment.Exit(1);
+            return;
+        }
+        var sb = new StringBuilder();
+        foreach (var t in tokens)
+        {
+            sb.Append(t.Type).Append('\t');
+            foreach (char ch in t.Value)
+            {
+                sb.Append(ch switch
+                {
+                    '\\' => "\\\\", '\n' => "\\n", '\t' => "\\t", '\r' => "\\r", '\0' => "\\0",
+                    _ => ch.ToString()
+                });
+            }
+            sb.Append('\t').Append(t.Line).Append('\n');
+        }
+        using var stdout = Console.OpenStandardOutput();
+        var bytes = new UTF8Encoding(false).GetBytes(sb.ToString());
+        stdout.Write(bytes, 0, bytes.Length);
     }
 
     // "nx compile-native <file.nx> [-o output] [--target linux|nyxos|nyxos-kernel]" —

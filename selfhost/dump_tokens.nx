@@ -1,0 +1,58 @@
+// dump_tokens файл.nx - те саме, що `nx dump-tokens файл.nx`, але лексером на Nx (S8 крок 3)
+import "lexer.nx"
+
+func main() -> int32 {
+    if argCount() < 2 {
+        fdWriteStr(2, "використання: dump_tokens файл.nx\n")
+        return 2
+    }
+    var n: int64 = 0
+    var src = fileReadAll(arg(1), addr(n))
+    if src == null {
+        fdWriteStr(2, "Error: Cannot find file '")
+        fdWriteStr(2, arg(1))
+        fdWriteStr(2, "'\n")
+        return 1
+    }
+    // BOM UTF-8, як File.ReadAllText
+    var start: int64 = 0
+    if n >= 3 && src[0] == 239 && src[1] == 187 && src[2] == 191 {
+        start = 3
+    }
+    var toks = lexBytes(src + start, n - start)
+    var b = strBufNew()
+    var i: int64 = 0
+    while i < toks.len {
+        var t: ptr<Token> = asptr(toks.get(i))
+        b.add(tokenKindName(t.kind))
+        b.byte(9)
+        var j: int64 = 0
+        while j < t.len {
+            var c = int64(t.val[j])
+            if c == 92 {
+                b.add("\\\\")
+            } else if c == 10 {
+                b.add("\\n")
+            } else if c == 9 {
+                b.add("\\t")
+            } else if c == 13 {
+                b.add("\\r")
+            } else if c == 0 {
+                b.add("\\0")
+            } else {
+                b.byte(c)
+            }
+            j = j + 1
+        }
+        b.byte(9)
+        b.addInt(t.line)
+        b.byte(10)
+        if b.len > 65536 {
+            fdWrite(1, b.data, b.len)
+            b.clear()
+        }
+        i = i + 1
+    }
+    fdWrite(1, b.data, b.len)
+    return 0
+}
