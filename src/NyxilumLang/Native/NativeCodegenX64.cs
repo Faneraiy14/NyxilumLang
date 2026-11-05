@@ -40,7 +40,7 @@ public sealed class NativeCodegenX64
             I16 = new() { Kind = K.Int, Size = 2, Signed = true }, U16 = new() { Kind = K.Int, Size = 2 },
             I32 = new() { Kind = K.Int, Size = 4, Signed = true }, U32 = new() { Kind = K.Int, Size = 4 },
             I64 = new() { Kind = K.Int, Size = 8, Signed = true }, U64 = new() { Kind = K.Int, Size = 8 },
-            F64 = new() { Kind = K.Float, Size = 8 }, Bool = new() { Kind = K.Bool, Size = 1 }, Void = new() { Kind = K.Void, Size = 0 };
+            F64 = new() { Kind = K.Float, Size = 8 }, F32 = new() { Kind = K.Float, Size = 4 }, Bool = new() { Kind = K.Bool, Size = 1 }, Void = new() { Kind = K.Void, Size = 0 };
         public static readonly T VoidPtr = Ptr(Void);
         public static T Ptr(T e) => new() { Kind = K.Ptr, Size = 8, Elem = e };
         public bool IsInt => Kind == K.Int;
@@ -50,7 +50,7 @@ public sealed class NativeCodegenX64
         public override string ToString() => Kind switch
         {
             K.Int => (Signed ? "int" : "uint") + Size * 8,
-            K.Float => "float64", K.Bool => "bool", K.Void => "void",
+            K.Float => "float" + Size * 8, K.Bool => "bool", K.Void => "void",
             K.Ptr => $"ptr<{Elem}>", _ => Struct!,
         };
         public bool Same(T o) => Kind == K.Struct ? o.Kind == K.Struct && Struct == o.Struct : Kind == o.Kind && Size == o.Size && Signed == o.Signed && Struct == o.Struct
@@ -69,7 +69,14 @@ public sealed class NativeCodegenX64
 
     // стан поточної функції
     StringBuilder _b = new();
-    Dictionary<string, (T Type, int Off)> _locals = new();
+    // області видимості як у C/Java: змінна живе до кінця свого блоку { } (слоти не перевикористовуються)
+    List<Dictionary<string, (T Type, int Off)>> _scopes = new();
+    bool TryLocal(string name, out (T Type, int Off) v)
+    {
+        for (int i = _scopes.Count - 1; i >= 0; i--) if (_scopes[i].TryGetValue(name, out v)) return true;
+        v = default;
+        return false;
+    }
     int _frame;           // байтів під локальні (від rbp вниз)
     int _depth;           // байтів, покладених push-ами поверх кадру (для вирівнювання на 16 перед call)
     Func _cur = null!;
@@ -146,11 +153,12 @@ public sealed class NativeCodegenX64
             case "int8": return T.I8; case "uint8": return T.U8; case "int16": return T.I16; case "uint16": return T.U16;
             case "int32": return T.I32; case "uint32": return T.U32; case "int64": return T.I64; case "uint64": return T.U64;
             case "float64" or "number": return T.F64;
+            case "float32": return T.F32;
             case "bool": return T.Bool; case "void": return T.Void;
         }
         if (s != null && s.StartsWith("ptr<") && s.EndsWith(">")) return T.Ptr(ParseType(s[4..^1]));
         if (s != null && _structs.ContainsKey(s)) return new T { Kind = K.Struct, Size = _structs[s].Size, Struct = s };
-        throw Err($"невідомий тип «{s ?? "(не вказано)"}» (є int8..int64, uint8..uint64, float64, bool, ptr<T>, структури)");
+        throw Err($"невідомий тип «{s ?? "(не вказано)"}» (є int8..int64, uint8..uint64, float32, float64, bool, ptr<T>, структури)");
     }
 
     void Layout(StructDeclaration s)
@@ -197,7 +205,7 @@ public sealed class NativeCodegenX64
         string dir = t.Size switch { 1 => ".byte", 2 => ".short", 4 => ".long", _ => ".quad" };
         string val;
         if (vd.Initializer == null) val = "0";
-        else if (t.IsFloat) val = BitConverter.DoubleToInt64Bits(ConstFloat(vd.Initializer)).ToString(CultureInfo.InvariantCulture);
+        else if (t.IsFloat) val = t.Size == 4 ? BitConverter.SingleToInt32Bits((float)ConstFloat(vd.Initializer)).ToString(CultureInfo.InvariantCulture) : BitConverter.DoubleToInt64Bits(ConstFloat(vd.Initializer)).ToString(CultureInfo.InvariantCulture);
         else if (t.Kind == K.Bool) val = vd.Initializer is LiteralExpression { Value: true } ? "1" : vd.Initializer is LiteralExpression { Value: false } ? "0" : throw Err("глобальна bool: лише true/false");
         else if (t.IsPtr && vd.Initializer is LiteralExpression { Value: string str }) val = StringLabel(str);
         else if (t.IsPtr && vd.Initializer is LiteralExpression { Value: null }) val = "0";
@@ -254,7 +262,8 @@ public sealed class NativeCodegenX64
     {
         bool neg = false;
         while (e is UnaryExpression { Operator: "-" } u) { neg = !neg; e = u.Operand; }
-        if (e is not LiteralExpression { Value: double d }) throw Err("очікується дробова стала");
+        if (e is not LiteralExpression { Value: double d } lit) throw Err("очікується дробова стала");
+        if (lit.Raw != null) d = double.Parse(lit.Raw, CultureInfo.InvariantCulture);
         return neg ? -d : d;
     }
 
@@ -290,7 +299,7 @@ public sealed class NativeCodegenX64
     {
         _cur = f;
         _b = new StringBuilder();
-        _locals = new();
+        _scopes = new() { new() };
         _frame = 0;
         _depth = 0;
         _loops.Clear();
@@ -334,13 +343,13 @@ public sealed class NativeCodegenX64
 
     int Slot(string name, T type)
     {
-        if (_locals.TryGetValue(name, out var ex))
+        if (_scopes[^1].TryGetValue(name, out var ex))
         {
             if (!ex.Type.Same(type)) throw Err($"змінна «{name}» уже є з типом {ex.Type}, а тут {type}");
             return ex.Off;
         }
         _frame += 8;
-        _locals[name] = (type, -_frame);
+        _scopes[^1][name] = (type, -_frame);
         return -_frame;
     }
 
@@ -397,6 +406,7 @@ public sealed class NativeCodegenX64
                 T t = IsIntLit(fs.Start) ? (IsIntLit(fs.End) ? T.I64 : TypeOf(fs.End)) : TypeOf(fs.Start);
                 if (!t.IsInt) throw Err("for: межі мають бути цілими");
                 Convert(Gen(fs.Start, t), t, "for");
+                _scopes.Add(new()); // змінна циклу - лише всередині for
                 int iv = Slot(fs.VariableName, t);
                 StoreLocal(iv, t);
                 int endSlot = Slot($"$for_end{_label++}", t);
@@ -417,6 +427,7 @@ public sealed class NativeCodegenX64
                 E($"mov %rax, {iv}(%rbp)");
                 E($"jmp {top}");
                 L(end);
+                _scopes.RemoveAt(_scopes.Count - 1);
                 break;
             }
             case BlockStatement bs: Block(bs); break;
@@ -441,7 +452,12 @@ public sealed class NativeCodegenX64
         }
     }
 
-    void Block(BlockStatement b) { foreach (var s in b.Statements) Stmt(s); }
+    void Block(BlockStatement b)
+    {
+        _scopes.Add(new());
+        foreach (var s in b.Statements) Stmt(s);
+        _scopes.RemoveAt(_scopes.Count - 1);
+    }
 
     void Cond(ExpressionNode c, string falseLabel)
     {
@@ -458,7 +474,7 @@ public sealed class NativeCodegenX64
         {
             K.Int => t.Signed ? "__nx_print_i64" : "__nx_print_u64",
             K.Bool => "__nx_print_bool",
-            K.Float => "__nx_print_f64",
+            K.Float => t.Size == 4 ? "__nx_print_f32" : "__nx_print_f64",
             K.Ptr when t.Elem!.Kind == K.Int && t.Elem.Size == 1 => "__nx_print_str",
             K.Ptr => "__nx_print_u64",
             _ => throw Err($"print не вміє друкувати {t}"),
@@ -504,7 +520,7 @@ public sealed class NativeCodegenX64
     {
         switch (t.Kind)
         {
-            case K.Float: E($"movsd {addr}, %xmm0"); return;
+            case K.Float: E(t.Size == 4 ? $"movss {addr}, %xmm0" : $"movsd {addr}, %xmm0"); return;
             case K.Bool: E($"movzbq {addr}, %rax"); return;
             case K.Ptr: E($"mov {addr}, %rax"); return;
             case K.Int:
@@ -523,7 +539,7 @@ public sealed class NativeCodegenX64
     {
         switch (t.Kind)
         {
-            case K.Float: E($"movsd %xmm0, {addr}"); return;
+            case K.Float: E(t.Size == 4 ? $"movss %xmm0, {addr}" : $"movsd %xmm0, {addr}"); return;
             case K.Bool: E($"movb %al, {addr}"); return;
             case K.Ptr: E($"mov %rax, {addr}"); return;
             case K.Int:
@@ -571,11 +587,11 @@ public sealed class NativeCodegenX64
     T TypeOf(ExpressionNode e)
     {
         var saved = _b; int sd = _depth, sl = _label; var sf = _frame;
-        var savedLocals = new Dictionary<string, (T, int)>(_locals);
+        var savedScopes = _scopes.Select(d => new Dictionary<string, (T Type, int Off)>(d)).ToList();
         var savedRo = _rodata.Length; var savedStr = new Dictionary<string, string>(_strings);
         _b = new StringBuilder();
         try { return Gen(e, null); }
-        finally { _b = saved; _depth = sd; _label = sl; _frame = sf; _locals = savedLocals; _rodata.Length = savedRo; _strings.Clear(); foreach (var kv in savedStr) _strings[kv.Key] = kv.Value; }
+        finally { _b = saved; _depth = sd; _label = sl; _frame = sf; _scopes = savedScopes; _rodata.Length = savedRo; _strings.Clear(); foreach (var kv in savedStr) _strings[kv.Key] = kv.Value; }
     }
 
     // ---------- вирази: результат у rax (цілі, bool, ptr) або xmm0 (float64) ----------
@@ -593,7 +609,13 @@ public sealed class NativeCodegenX64
                     return t;
                 }
                 double d = (double)lit.Value;
-                if (IsIntText(lit) && lit.Raw != null) d = double.Parse(lit.Raw, CultureInfo.InvariantCulture);
+                if (lit.Raw != null) d = double.Parse(lit.Raw, CultureInfo.InvariantCulture);
+                if (want != null && want.IsFloat && want.Size == 4)
+                {
+                    E($"mov ${BitConverter.SingleToInt32Bits((float)d)}, %eax");
+                    E("movd %eax, %xmm0");
+                    return T.F32;
+                }
                 E($"movabs ${BitConverter.DoubleToInt64Bits(d)}, %rax");
                 E("movq %rax, %xmm0");
                 return T.F64;
@@ -603,7 +625,7 @@ public sealed class NativeCodegenX64
             case LiteralExpression { Value: null }: E("xor %eax, %eax"); return T.VoidPtr;
             case VariableExpression v:
             {
-                if (_locals.TryGetValue(v.Name, out var loc)) { LoadLocal(loc.Off, loc.Type); return loc.Type; }
+                if (TryLocal(v.Name, out var loc)) { LoadLocal(loc.Off, loc.Type); return loc.Type; }
                 if (_globals.TryGetValue(v.Name, out var g)) { LoadMem($"{g.Label}(%rip)", g.Type); return g.Type; }
                 if (_funcs.ContainsKey(v.Name)) throw Err($"«{v.Name}» - функція; адресу дає funcaddr({v.Name})");
                 throw Err($"невідома змінна «{v.Name}»");
@@ -704,7 +726,7 @@ public sealed class NativeCodegenX64
     {
         if (asg.Left is VariableExpression v)
         {
-            if (_locals.TryGetValue(v.Name, out var loc))
+            if (TryLocal(v.Name, out var loc))
             {
                 Convert(Gen(asg.Right, loc.Type), loc.Type, $"присвоєння {v.Name}");
                 StoreLocal(loc.Off, loc.Type);
@@ -741,6 +763,7 @@ public sealed class NativeCodegenX64
             {
                 if (IsIntLit(u) && (want == null || want.IsInt)) { var lt = want ?? T.I64; E($"movabs ${ConstInt(u, lt)}, %rax"); return lt; }
                 var t = Gen(u.Operand, want);
+                if (t.IsFloat && t.Size == 4) { E("movd %xmm0, %eax"); E("btc $31, %eax"); E("movd %eax, %xmm0"); return t; }
                 if (t.IsFloat) { E("movq %xmm0, %rax"); E("btc $63, %rax"); E("movq %rax, %xmm0"); return t; }
                 if (!t.IsInt) throw Err($"унарний мінус для {t} не має сенсу");
                 E("neg %rax");
@@ -767,7 +790,7 @@ public sealed class NativeCodegenX64
         T? lh = null, rh = null;
         bool ll = IsIntLit(bin.Left) || IsFloatLit(bin.Left), rl = IsIntLit(bin.Right) || IsFloatLit(bin.Right);
         if (want != null && !want.IsInt && !want.IsFloat) want = null;
-        if (ll && rl) { lh = rh = cmp ? null : want; if (IsFloatLit(bin.Left) || IsFloatLit(bin.Right)) lh = rh = T.F64; }
+        if (ll && rl) { lh = rh = cmp ? null : want; if (IsFloatLit(bin.Left) || IsFloatLit(bin.Right)) lh = rh = want != null && want.IsFloat ? want : T.F64; }
         else if (ll) { var rt0 = TypeOf(bin.Right); lh = rt0.IsPtr && op is "+" or "-" ? T.I64 : rt0.IsPtr ? T.VoidPtr : rt0; }
         else if (rl) { var lt0 = TypeOf(bin.Left); rh = lt0.IsPtr && op is "+" or "-" ? T.I64 : lt0; }
         if (op is "<<" or ">>") rh = IsIntLit(bin.Right) ? (lh ?? TypeOf(bin.Left)) : null;
@@ -781,22 +804,43 @@ public sealed class NativeCodegenX64
         // float64
         if (lt.IsFloat || rt.IsFloat)
         {
-            if (!(lt.IsFloat && rt.IsFloat)) throw Err($"{op}: {lt} і {rt} - перетвори явно float64(...)");
+            if (!(lt.IsFloat && rt.IsFloat) || lt.Size != rt.Size) throw Err($"{op}: {lt} і {rt} - перетвори явно {(lt.IsFloat ? lt : rt)}(...)");
             E("movapd %xmm0, %xmm1");
             PopXmm(0);
+            string x = lt.Size == 4 ? "ss" : "sd";
             switch (op)
             {
-                case "+": E("addsd %xmm1, %xmm0"); return T.F64;
-                case "-": E("subsd %xmm1, %xmm0"); return T.F64;
-                case "*": E("mulsd %xmm1, %xmm0"); return T.F64;
-                case "/": E("divsd %xmm1, %xmm0"); return T.F64;
-                case "<": E("ucomisd %xmm0, %xmm1"); E("seta %al"); break;
-                case "<=": E("ucomisd %xmm0, %xmm1"); E("setae %al"); break;
-                case ">": E("ucomisd %xmm1, %xmm0"); E("seta %al"); break;
-                case ">=": E("ucomisd %xmm1, %xmm0"); E("setae %al"); break;
-                case "==": E("ucomisd %xmm1, %xmm0"); E("sete %al"); E("setnp %cl"); E("and %cl, %al"); break;
-                case "!=": E("ucomisd %xmm1, %xmm0"); E("setne %al"); E("setp %cl"); E("or %cl, %al"); break;
-                default: throw Err($"оператор {op} для float64 ще немає");
+                case "+": E($"add{x} %xmm1, %xmm0"); return lt;
+                case "-": E($"sub{x} %xmm1, %xmm0"); return lt;
+                case "*": E($"mul{x} %xmm1, %xmm0"); return lt;
+                case "/": E($"div{x} %xmm1, %xmm0"); return lt;
+                case "%":
+                {
+                    // залишок як у Java/C fmod: знак діленого, через x87 fprem (точний)
+                    string ld = lt.Size == 4 ? "flds" : "fldl", st = lt.Size == 4 ? "fstps" : "fstpl", again = NewLabel("fprem");
+                    E("sub $16, %rsp");
+                    E($"movs{x[1]} %xmm1, 8(%rsp)");
+                    E($"movs{x[1]} %xmm0, (%rsp)");
+                    E($"{ld} 8(%rsp)");
+                    E($"{ld} (%rsp)");
+                    L(again);
+                    E("fprem");
+                    E("fnstsw %ax");
+                    E("test $0x400, %ax");
+                    E($"jnz {again}");
+                    E("fstp %st(1)");
+                    E($"{st} (%rsp)");
+                    E($"movs{x[1]} (%rsp), %xmm0");
+                    E("add $16, %rsp");
+                    return lt;
+                }
+                case "<": E($"ucomi{x} %xmm0, %xmm1"); E("seta %al"); break;
+                case "<=": E($"ucomi{x} %xmm0, %xmm1"); E("setae %al"); break;
+                case ">": E($"ucomi{x} %xmm1, %xmm0"); E("seta %al"); break;
+                case ">=": E($"ucomi{x} %xmm1, %xmm0"); E("setae %al"); break;
+                case "==": E($"ucomi{x} %xmm1, %xmm0"); E("sete %al"); E("setnp %cl"); E("and %cl, %al"); break;
+                case "!=": E($"ucomi{x} %xmm1, %xmm0"); E("setne %al"); E("setp %cl"); E("or %cl, %al"); break;
+                default: throw Err($"оператор {op} для {lt} немає");
             }
             E("movzbq %al, %rax");
             return T.Bool;
@@ -846,6 +890,20 @@ public sealed class NativeCodegenX64
             case "-": E("sub %rcx, %rax"); break;
             case "*": E("imul %rcx, %rax"); break;
             case "/" or "%":
+                if (lt.Signed && lt.Size == 8)
+                {
+                    // як у Java: MIN / -1 = MIN, MIN % -1 = 0 (idiv на цьому падає); x / -1 = -x
+                    string norm = NewLabel("div"), done = NewLabel("divd");
+                    E("cmp $-1, %rcx");
+                    E($"jne {norm}");
+                    E(op == "/" ? "neg %rax" : "xor %eax, %eax");
+                    E($"jmp {done}");
+                    L(norm);
+                    E("cqo"); E("idiv %rcx");
+                    if (op == "%") E("mov %rdx, %rax");
+                    L(done);
+                    break;
+                }
                 if (lt.Signed) { E("cqo"); E("idiv %rcx"); } else { E("xor %edx, %edx"); E("div %rcx"); }
                 if (op == "%") E("mov %rdx, %rax");
                 break;
@@ -893,7 +951,7 @@ public sealed class NativeCodegenX64
         var a = call.Arguments;
         switch (n)
         {
-            case "int8" or "uint8" or "int16" or "uint16" or "int32" or "uint32" or "int64" or "uint64" or "float64" when a.Count == 1:
+            case "int8" or "uint8" or "int16" or "uint16" or "int32" or "uint32" or "int64" or "uint64" or "float64" or "float32" when a.Count == 1:
                 return Cast(a[0], ParseType(n));
             case "sizeof":
                 if (a.Count != 1 || a[0] is not VariableExpression tv) throw Err("sizeof(тип)");
@@ -934,9 +992,26 @@ public sealed class NativeCodegenX64
             {
                 if (a.Count != 1) throw Err("float64Bits(x)");
                 var t = Gen(a[0], T.F64);
-                if (!t.IsFloat) throw Err($"float64Bits: потрібен float64, а тут {t}");
+                if (!t.IsFloat || t.Size != 8) throw Err($"float64Bits: потрібен float64, а тут {t}");
                 E("movq %xmm0, %rax");
                 return T.I64;
+            }
+            case "float32Bits":
+            {
+                if (a.Count != 1) throw Err("float32Bits(x)");
+                var t = Gen(a[0], T.F32);
+                if (!t.IsFloat || t.Size != 4) throw Err($"float32Bits: потрібен float32, а тут {t}");
+                E("movd %xmm0, %eax");
+                E("movslq %eax, %rax");
+                return T.I32;
+            }
+            case "bitsToFloat32":
+            {
+                if (a.Count != 1) throw Err("bitsToFloat32(n)");
+                var t = Gen(a[0], T.I32);
+                if (!t.IsInt || t.Size != 4) throw Err($"bitsToFloat32: потрібне int32/uint32, а тут {t}");
+                E("movd %eax, %xmm0");
+                return T.F32;
             }
             case "bitsToFloat64":
             {
@@ -1040,7 +1115,7 @@ public sealed class NativeCodegenX64
 
     T Cast(ExpressionNode arg, T to)
     {
-        var from = Gen(arg, IsIntLit(arg) ? T.I64 : IsFloatLit(arg) ? T.F64 : null);
+        var from = Gen(arg, IsIntLit(arg) ? T.I64 : IsFloatLit(arg) ? (to.IsFloat ? to : T.F64) : null);
         if (to.IsInt)
         {
             if (from.IsInt) { CanonReg(to); return to; }
@@ -1048,54 +1123,110 @@ public sealed class NativeCodegenX64
             if (from.Kind == K.Bool) return to;
             if (from.IsFloat)
             {
-                if (to.Size == 8 && !to.Signed)
-                {
-                    // float64 -> uint64: значення >= 2^63 переводимо через віднімання 2^63
-                    string big = NewLabel("u64big"), done = NewLabel("u64done");
-                    E("movabs $0x43e0000000000000, %rax"); // 2^63
-                    E("movq %rax, %xmm1");
-                    E("ucomisd %xmm1, %xmm0");
-                    E($"jae {big}");
-                    E("cvttsd2si %xmm0, %rax");
-                    E($"jmp {done}");
-                    L(big);
-                    E("subsd %xmm1, %xmm0");
-                    E("cvttsd2si %xmm0, %rax");
-                    E("btc $63, %rax");
-                    L(done);
-                    return to;
-                }
-                E("cvttsd2si %xmm0, %rax");
-                CanonReg(to);
+                if (from.Size == 4) E("cvtss2sd %xmm0, %xmm0"); // float32 -> float64 точно
+                FloatToInt(to);
                 return to;
             }
         }
         if (to.IsFloat)
         {
-            if (from.IsFloat) return to;
+            string x = to.Size == 4 ? "ss" : "sd";
+            if (from.IsFloat)
+            {
+                if (from.Size == 8 && to.Size == 4) E("cvtsd2ss %xmm0, %xmm0");
+                else if (from.Size == 4 && to.Size == 8) E("cvtss2sd %xmm0, %xmm0");
+                return to;
+            }
             if (from.IsInt)
             {
                 if (from.Size == 8 && !from.Signed)
                 {
+                    // uint64 -> дробове: старший біт - через ділення навпіл зі збереженням молодшого (правильне округлення)
                     string neg = NewLabel("u2f"), done = NewLabel("u2fdone");
                     E("test %rax, %rax");
                     E($"js {neg}");
-                    E("cvtsi2sd %rax, %xmm0");
+                    E($"cvtsi2{x} %rax, %xmm0");
                     E($"jmp {done}");
                     L(neg);
                     E("mov %rax, %rcx");
                     E("shr $1, %rcx");
                     E("and $1, %eax");
                     E("or %rax, %rcx");
-                    E("cvtsi2sd %rcx, %xmm0");
-                    E("addsd %xmm0, %xmm0");
+                    E($"cvtsi2{x} %rcx, %xmm0");
+                    E($"add{x} %xmm0, %xmm0");
                     L(done);
                     return to;
                 }
-                E("cvtsi2sd %rax, %xmm0");
+                E($"cvtsi2{x}q %rax, %xmm0");
                 return to;
             }
         }
         throw Err($"перетворення {from} -> {to} не підтримується");
+    }
+
+    // float64 у xmm0 -> ціле типу to у rax, як у Java (d2i/d2l): NaN -> 0, за межами - найближча межа типу
+    void FloatToInt(T to)
+    {
+        string zero = NewLabel("f2i0"), max = NewLabel("f2imax"), clamp = NewLabel("f2iclamp"), done = NewLabel("f2idone");
+        E("ucomisd %xmm0, %xmm0");
+        E($"jp {zero}");                                   // NaN
+        if (to.Size == 8 && !to.Signed)
+        {
+            string big = NewLabel("f2ubig");
+            E("pxor %xmm1, %xmm1");
+            E("ucomisd %xmm1, %xmm0");
+            E($"jbe {zero}");                              // <= 0 (і -0.0)
+            E("movabs $0x43f0000000000000, %rax");         // 2^64
+            E("movq %rax, %xmm1");
+            E("ucomisd %xmm1, %xmm0");
+            E($"jae {max}");
+            E("movabs $0x43e0000000000000, %rax");         // 2^63
+            E("movq %rax, %xmm1");
+            E("ucomisd %xmm1, %xmm0");
+            E($"jae {big}");
+            E("cvttsd2si %xmm0, %rax");
+            E($"jmp {done}");
+            L(big);
+            E("subsd %xmm1, %xmm0");
+            E("cvttsd2si %xmm0, %rax");
+            E("btc $63, %rax");
+            E($"jmp {done}");
+            L(max);
+            E("mov $-1, %rax");
+            E($"jmp {done}");
+            L(zero);
+            E("xor %eax, %eax");
+            L(done);
+            return;
+        }
+        E("movabs $0x43e0000000000000, %rax");             // 2^63
+        E("movq %rax, %xmm1");
+        E("ucomisd %xmm1, %xmm0");
+        E($"jae {max}");
+        E("cvttsd2si %xmm0, %rax");                        // < -2^63 дає MIN - це й є насичення
+        E($"jmp {clamp}");
+        L(max);
+        E("movabs $0x7fffffffffffffff, %rax");
+        E($"jmp {clamp}");
+        L(zero);
+        E("xor %eax, %eax");
+        E($"jmp {done}");
+        L(clamp);
+        if (to.Size < 8)
+        {
+            long lo = to.Signed ? -(1L << (to.Size * 8 - 1)) : 0, hi = to.Signed ? (1L << (to.Size * 8 - 1)) - 1 : (1L << (to.Size * 8)) - 1;
+            string okLo = NewLabel("f2ilo"), okHi = NewLabel("f2ihi");
+            E($"movabs ${lo}, %rcx");
+            E("cmp %rcx, %rax");
+            E($"jge {okLo}");
+            E("mov %rcx, %rax");
+            L(okLo);
+            E($"movabs ${hi}, %rcx");
+            E("cmp %rcx, %rax");
+            E($"jle {okHi}");
+            E("mov %rcx, %rax");
+            L(okHi);
+        }
+        L(done);
     }
 }

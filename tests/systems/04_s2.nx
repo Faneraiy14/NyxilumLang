@@ -1,0 +1,27 @@
+// S2: області видимості блоків, float32, числа як у Java
+func main() {
+    for i in 0..2 {
+        var a: int32 = 5
+        print(a)
+    }
+    for i in 0..2 {
+        var a: float32 = 0.1
+        print(a)
+    }
+    var big: int64 = -9223372036854775807 - 1
+    print(big / -1)
+    print(big % -1)
+    print(int32(0.0 / 0.0))
+    print(int32(1.0 / 0.0))
+    print(int64(-1.0 / 0.0))
+    print(uint8(300.7))
+    print(5.5 % 2.0)
+    print(-5.5 % 2.0)
+    var f: float32 = 16777217.0
+    print(f)
+    print(float32(1) / float32(3))
+    print(0.1 + 0.2)
+    print(1.0 / 3.0)
+    print(100000000000000000000.0)
+    print(0.00001)
+}

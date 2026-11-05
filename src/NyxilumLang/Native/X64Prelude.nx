@@ -61,54 +61,370 @@ func __nx_print_bool(b: bool) {
     }
 }
 
-// Дробові: до 6 знаків після коми (точний найкоротший запис - етап S2).
-func __nx_print_f64(x: float64) {
-    if x != x {
-        __nx_print_str("NaN")
+// ---------- дробові: найкоротший запис, що читається назад у те саме число ----------
+// Алгоритм Burger & Dybvig (1996), як і в ARM64-прелюдії й C#/VM: 0.1, 1/3 -> 0.3333333333333333,
+// 0.1 + 0.2 -> 0.30000000000000004. Великі числа - у масивах цифр по основі 10^7 на стеку
+// (без купи): довжина в [0], цифри [1..64].
+
+func __big_set(a: ptr<int64>, v: int64) {
+    var n: int64 = 0
+    while v > 0 {
+        n = n + 1
+        a[n] = v % 10000000
+        v = v / 10000000
+    }
+    a[0] = n
+}
+
+func __big_copy(d: ptr<int64>, s: ptr<int64>) {
+    for i in 0..s[0] + 1 {
+        d[i] = s[i]
+    }
+}
+
+func __big_mul(a: ptr<int64>, m: int64) {
+    var carry: int64 = 0
+    var n = a[0]
+    for i in 1..n + 1 {
+        var t = a[i] * m + carry
+        a[i] = t % 10000000
+        carry = t / 10000000
+    }
+    while carry > 0 {
+        n = n + 1
+        a[n] = carry % 10000000
+        carry = carry / 10000000
+    }
+    a[0] = n
+}
+
+func __big_mulpow2(a: ptr<int64>, e: int64) {
+    while e >= 20 {
+        __big_mul(a, 1048576)
+        e = e - 20
+    }
+    __big_mul(a, 1 << e)
+}
+
+func __big_mulpow10(a: ptr<int64>, e: int64) {
+    while e >= 7 {
+        __big_mul(a, 10000000)
+        e = e - 7
+    }
+    var p: int64 = 1
+    while e > 0 {
+        p = p * 10
+        e = e - 1
+    }
+    __big_mul(a, p)
+}
+
+// d = a + b (d може бути тим самим, що a)
+func __big_add(d: ptr<int64>, a: ptr<int64>, b: ptr<int64>) {
+    var n = a[0]
+    if b[0] > n {
+        n = b[0]
+    }
+    var carry: int64 = 0
+    for i in 1..n + 1 {
+        var t = carry
+        if i <= a[0] {
+            t = t + a[i]
+        }
+        if i <= b[0] {
+            t = t + b[i]
+        }
+        if t >= 10000000 {
+            d[i] = t - 10000000
+            carry = 1
+        } else {
+            d[i] = t
+            carry = 0
+        }
+    }
+    if carry > 0 {
+        n = n + 1
+        d[n] = carry
+    }
+    d[0] = n
+}
+
+// a = a - b, де a >= b
+func __big_sub(a: ptr<int64>, b: ptr<int64>) {
+    var borrow: int64 = 0
+    for i in 1..a[0] + 1 {
+        var t = a[i] - borrow
+        if i <= b[0] {
+            t = t - b[i]
+        }
+        if t < 0 {
+            a[i] = t + 10000000
+            borrow = 1
+        } else {
+            a[i] = t
+            borrow = 0
+        }
+    }
+    while a[0] > 0 && a[a[0]] == 0 {
+        a[0] = a[0] - 1
+    }
+}
+
+func __big_cmp(a: ptr<int64>, b: ptr<int64>) -> int64 {
+    if a[0] != b[0] {
+        return a[0] - b[0]
+    }
+    var i = a[0]
+    while i >= 1 {
+        if a[i] != b[i] {
+            return a[i] - b[i]
+        }
+        i = i - 1
+    }
+    return 0
+}
+
+func __bd_reach(x: ptr<int64>, s: ptr<int64>, inclusive: bool) -> bool {
+    var c = __big_cmp(x, s)
+    if inclusive {
+        return c >= 0
+    }
+    return c > 0
+}
+
+// цифри 0.d1d2... * 10^k -> текст за правилами C#/VM: звичайний запис для -3 <= k <= 17, інакше 1E+18, 5E-05
+func __nx_fmt_digits(dg: ptr<uint8>, n: int64, k: int64) {
+    var o = stackbuf(64)
+    var p: int64 = 0
+    if k > 17 || k < -3 {
+        o[p] = dg[0] + 48
+        p = p + 1
+        if n > 1 {
+            o[p] = 46
+            p = p + 1
+            for i in 1..n {
+                o[p] = dg[i] + 48
+                p = p + 1
+            }
+        }
+        o[p] = 69
+        p = p + 1
+        var ee = k - 1
+        if ee < 0 {
+            o[p] = 45
+            ee = 0 - ee
+        } else {
+            o[p] = 43
+        }
+        p = p + 1
+        if ee >= 100 {
+            o[p] = uint8(ee / 100 + 48)
+            p = p + 1
+        }
+        o[p] = uint8(ee / 10 % 10 + 48)
+        o[p + 1] = uint8(ee % 10 + 48)
+        p = p + 2
+    } else if k <= 0 {
+        o[0] = 48
+        o[1] = 46
+        p = 2
+        for i in 0..0 - k {
+            o[p] = 48
+            p = p + 1
+        }
+        for i in 0..n {
+            o[p] = dg[i] + 48
+            p = p + 1
+        }
+    } else if k < n {
+        for i in 0..n {
+            if i == k {
+                o[p] = 46
+                p = p + 1
+            }
+            o[p] = dg[i] + 48
+            p = p + 1
+        }
+    } else {
+        for i in 0..n {
+            o[p] = dg[i] + 48
+            p = p + 1
+        }
+        for i in n..k {
+            o[p] = 48
+            p = p + 1
+        }
+    }
+    __nx_write(o, p)
+}
+
+// bits - біти числа (float64: mb=52, eb=11; float32: mb=23, eb=8)
+func __nx_print_fp(bits: int64, mb: int64, eb: int64) {
+    var exmask = (1 << eb) - 1
+    var ex = (bits >> mb) & exmask
+    var f = bits & ((1 << mb) - 1)
+    var neg = ((bits >> (mb + eb)) & 1) == 1
+    if ex == exmask {
+        if f != 0 {
+            __nx_print_str("NaN")
+            return
+        }
+        if neg {
+            __nx_print_str("-")
+        }
+        __nx_print_str("Infinity")
         return
     }
-    if float64Bits(x) < 0 {
+    if neg {
         __nx_print_str("-")
-        x = 0.0 - x
     }
-    if x - x != x - x {
-        __nx_print_str("∞")
+    if ex == 0 && f == 0 {
+        __nx_print_str("0")
         return
     }
-    if x >= 1000000000000000000.0 {
-        var e: int64 = 0
-        while x >= 10.0 {
-            x = x / 10.0
-            e = e + 1
-        }
-        __nx_print_f64(x)
-        __nx_print_str("E+")
-        __nx_print_i64(e)
-        return
+    var bias = (1 << (eb - 1)) - 1
+    var hidden = 1 << mb
+    var e = 1 - bias - mb
+    if ex > 0 {
+        f = f + hidden
+        e = ex - bias - mb
     }
-    var ip = uint64(x)
-    var frac = x - float64(ip)
-    var f = uint64(frac * 1000000.0 + 0.5)
-    if f >= 1000000 {
-        ip = ip + 1
-        f = f - 1000000
-    }
-    __nx_print_u64(ip)
-    if f != 0 {
-        var buf = stackbuf(16)
-        buf[0] = 46
-        var k: int64 = 6
-        while k >= 1 {
-            buf[k] = uint8(f % 10 + 48)
-            f = f / 10
-            k = k - 1
+    // цілі до 10^15 - швидко (лише float64: у float32 точність ~7 цифр, ціле там - не найкоротший запис)
+    if mb == 52 && e >= 0 && e <= 10 {
+        var v = f << e
+        if v < 1000000000000000 {
+            __nx_print_u64(uint64(v))
+            return
         }
-        var len: int64 = 7
-        while buf[len - 1] == 48 {
-            len = len - 1
-        }
-        __nx_write(buf, len)
     }
+    if mb == 52 && e < 0 && e > -60 {
+        if (f & ((1 << (0 - e)) - 1)) == 0 {
+            __nx_print_u64(uint64(f >> (0 - e)))
+            return
+        }
+    }
+    var st: ptr<int64> = asptr(stackbuf(3200))
+    var r = st
+    var s = st + 65
+    var mp = st + 130
+    var mm = st + 195
+    var t1 = st + 260
+    var t2 = st + 325
+    var even = f % 2 == 0
+    if e >= 0 {
+        __big_set(mp, 1)
+        __big_mulpow2(mp, e)
+        __big_copy(mm, mp)
+        if f != hidden {
+            __big_set(r, f)
+            __big_mulpow2(r, e)
+            __big_mul(r, 2)
+            __big_set(s, 2)
+        } else {
+            __big_set(r, f)
+            __big_mulpow2(r, e + 1)
+            __big_mul(r, 2)
+            __big_set(s, 4)
+            __big_mul(mp, 2)
+        }
+    } else {
+        if ex <= 1 || f != hidden {
+            __big_set(r, f)
+            __big_mul(r, 2)
+            __big_set(s, 1)
+            __big_mulpow2(s, 1 - e)
+            __big_set(mp, 1)
+            __big_set(mm, 1)
+        } else {
+            __big_set(r, f)
+            __big_mul(r, 4)
+            __big_set(s, 1)
+            __big_mulpow2(s, 2 - e)
+            __big_set(mp, 2)
+            __big_set(mm, 1)
+        }
+    }
+    var kf = float64(e + mb) * 0.30102999566398114
+    var k = int64(kf)
+    if float64(k) > kf {
+        k = k - 1
+    }
+    if k >= 0 {
+        __big_mulpow10(s, k)
+    } else {
+        __big_mulpow10(r, 0 - k)
+        __big_mulpow10(mp, 0 - k)
+        __big_mulpow10(mm, 0 - k)
+    }
+    while true {
+        __big_add(t1, r, mp)
+        if !__bd_reach(t1, s, even) {
+            break
+        }
+        __big_mul(s, 10)
+        k = k + 1
+    }
+    while true {
+        __big_add(t1, r, mp)
+        __big_mul(t1, 10)
+        if __bd_reach(t1, s, even) {
+            break
+        }
+        __big_mul(r, 10)
+        __big_mul(mp, 10)
+        __big_mul(mm, 10)
+        k = k - 1
+    }
+    var dg = stackbuf(32)
+    var nd: int64 = 0
+    while true {
+        __big_mul(r, 10)
+        __big_mul(mp, 10)
+        __big_mul(mm, 10)
+        var d: int64 = 0
+        while __big_cmp(r, s) >= 0 {
+            __big_sub(r, s)
+            d = d + 1
+        }
+        var c1 = __big_cmp(r, mm)
+        var low = c1 < 0
+        if even {
+            low = c1 <= 0
+        }
+        __big_add(t1, r, mp)
+        var high = __bd_reach(t1, s, even)
+        if !low && !high {
+            dg[nd] = uint8(d)
+            nd = nd + 1
+        } else {
+            if low && !high {
+                dg[nd] = uint8(d)
+            } else if !low && high {
+                dg[nd] = uint8(d + 1)
+            } else {
+                // обидві цифри підходять: ближча до точного значення, при рівності - парна (як Python/C)
+                __big_copy(t2, r)
+                __big_mul(t2, 2)
+                var c2 = __big_cmp(t2, s)
+                if c2 < 0 || (c2 == 0 && d % 2 == 0) {
+                    dg[nd] = uint8(d)
+                } else {
+                    dg[nd] = uint8(d + 1)
+                }
+            }
+            nd = nd + 1
+            break
+        }
+    }
+    __nx_fmt_digits(dg, nd, k)
+}
+
+func __nx_print_f64(x: float64) {
+    __nx_print_fp(float64Bits(x), 52, 11)
+}
+
+func __nx_print_f32(x: float32) {
+    __nx_print_fp(int64(uint32(float32Bits(x))), 23, 8)
 }
 
 // Пам'ять: шматки по 4 МБ з mmap, великі запити - окремим mmap. Без free (етап S3).
