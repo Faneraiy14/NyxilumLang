@@ -1,0 +1,158 @@
+// S7: файли, теки, час, аргументи, TCP між потоками
+func writeText(path: ptr<uint8>, text: ptr<uint8>) {
+    fileWriteAll(path, text, strLen(text))
+}
+
+// перевірити, що файл має такий вміст
+func checkFile(path: ptr<uint8>, want: ptr<uint8>) {
+    var n: int64 = 0
+    var data = fileReadAll(path, addr(n))
+    if data == null {
+        put("нема ")
+        print(path)
+        return
+    }
+    put(path)
+    put(" ")
+    print(strEq(data, want) && n == strLen(want))
+    free(data)
+}
+
+// сервер: прийняти одне з'єднання, прочитати рядок, відповісти ним же з "echo: "
+func echoServer(arg: ptr<void>) -> int64 {
+    var lfd = int64(arg)
+    var c = tcpAccept(lfd)
+    var buf = stackbuf(256)
+    var n = fdRead(c, buf, 255)
+    fdWriteStr(c, "echo: ")
+    fdWrite(c, buf, n)
+    fdClose(c)
+    return n
+}
+
+func main() {
+    makeDir("src")
+    makeDir("src/sub")
+    makeDir("src/sub/deep")
+    writeText("src/a.txt", "перший файл")
+    writeText("src/sub/b.txt", "другий")
+    writeText("src/sub/deep/c.txt", "")
+    // великий файл - більше за блок копіювання (64 КБ)
+    var big: ptr<uint8> = asptr(alloc(200001))
+    for i in 0..200000 {
+        big[i] = uint8(97 + i % 26)
+    }
+    fileWriteAll("src/big.bin", big, 200000)
+
+    print(copyTree("src", "dst"))
+    checkFile("dst/a.txt", "перший файл")
+    checkFile("dst/sub/b.txt", "другий")
+    checkFile("dst/sub/deep/c.txt", "")
+    var n: int64 = 0
+    var big2 = fileReadAll("dst/big.bin", addr(n))
+    print(n)
+    var same = true
+    for i in 0..200000 {
+        if big[i] != big2[i] {
+            same = false
+        }
+    }
+    print(same)
+
+    // скільки записів у теці dst (порядок getdents не гарантований - рахуємо)
+    var d = dirOpen("dst")
+    var files: int64 = 0
+    var dirs: int64 = 0
+    var name = d.next()
+    while name != null {
+        if d.lastIsDir() {
+            dirs = dirs + 1
+        } else {
+            files = files + 1
+        }
+        name = d.next()
+    }
+    d.close()
+    print(files)
+    print(dirs)
+
+    var fi: FileInfo
+    print(fileInfo("dst/sub", fi))
+    print(fi.isDir)
+    print(fileInfo("dst/a.txt", fi))
+    print(fi.size)
+    print(fi.isFile)
+    print(fileInfo("нема/такого", fi))
+    print(fileSize("dst/big.bin"))
+    print(pathExists("dst/sub/deep/c.txt"))
+    print(isDir("dst/a.txt"))
+    print(fileReadAll("нема", asptr(0)) == null)
+
+    // дописування і seek
+    var fd = fileAppend("dst/a.txt")
+    fdWriteStr(fd, "!")
+    fdClose(fd)
+    checkFile("dst/a.txt", "перший файл!")
+    fd = fileOpen("dst/sub/b.txt")
+    print(fdSeek(fd, 0, 2))
+    fdClose(fd)
+
+    print(renamePath("dst/a.txt", "dst/a2.txt"))
+    print(pathExists("dst/a.txt"))
+    print(removeFile("dst/a2.txt"))
+    print(removeDir("dst/sub"))
+    print(removeFile("dst/sub/deep/c.txt"))
+    print(removeDir("dst/sub/deep"))
+
+    // рядки
+    var buf = stackbuf(32)
+    print(fmtInt(buf, -9223372036854775807 - 1))
+    print(buf)
+    fmtInt(buf, 0)
+    print(buf)
+    print(parseInt("-1234x"))
+    var j = pathJoin("a/b", "c.txt")
+    print(j)
+    var cat = strCat(j, ".bak")
+    print(cat)
+    print(strStarts(cat, "a/b/"))
+
+    // аргументи й оточення
+    print(argCount())
+    print(strEq(arg(1), "перший аргумент"))
+    print(arg(5) == null)
+    print(envGet("NX_TEST_VAR"))
+    print(envGet("NX_НЕМА") == null)
+
+    // час
+    var t0 = monoNanos()
+    sleepMs(30)
+    var dt = monoNanos() - t0
+    print(dt >= 30000000 && dt < 2000000000)
+    print(nowNanos() > 1700000000000000000)
+    print(pid() > 0)
+
+    // TCP: сервер у потоці, клієнт - тут
+    var lfd = tcpListen(ipv4(127, 0, 0, 1), 0)
+    var port = sockPort(lfd)
+    print(port > 0)
+    var t = spawn(funcaddr(echoServer), asptr(lfd))
+    var c = tcpConnect(ipv4(127, 0, 0, 1), port)
+    fdWriteStr(c, "привіт")
+    print(pollIn(c, 5000))
+    var rb = stackbuf(256)
+    var got: int64 = 0
+    while true {
+        var r = fdRead(c, rb + got, 200)
+        if r <= 0 {
+            break
+        }
+        got = got + r
+    }
+    rb[got] = 0
+    print(rb)
+    print(join(t))
+    fdClose(c)
+    fdClose(lfd)
+    print(tcpConnect(ipv4(127, 0, 0, 1), port) < 0)
+}

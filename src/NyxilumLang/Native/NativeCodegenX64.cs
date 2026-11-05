@@ -123,6 +123,7 @@ public sealed class NativeCodegenX64
             _text.AppendLine(".globl _start");
             _text.AppendLine("_start:");
             _text.AppendLine("    xor %ebp, %ebp");
+            _text.AppendLine($"    mov %rsp, {_globals["__nx_args"].Label}(%rip)"); // [rsp] = argc, далі argv[], 0, envp[], 0
             _text.AppendLine("    and $-16, %rsp");
             _text.AppendLine($"    call {_funcs["__nx_tls_init"].Label}");
             _text.AppendLine($"    call {main.Label}");

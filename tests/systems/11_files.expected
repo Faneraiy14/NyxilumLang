@@ -1,0 +1,46 @@
+0
+dst/a.txt True
+dst/sub/b.txt True
+dst/sub/deep/c.txt True
+200000
+True
+2
+1
+0
+True
+0
+21
+True
+-2
+200000
+True
+False
+True
+dst/a.txt True
+12
+0
+False
+0
+-39
+0
+0
+20
+-9223372036854775808
+0
+-1234
+a/b/c.txt
+a/b/c.txt.bak
+True
+3
+True
+True
+значення
+True
+True
+True
+True
+True
+True
+echo: привіт
+12
+True

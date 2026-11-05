@@ -210,10 +210,25 @@ NyxilumLang (extern - разом із S10).
 - Обмеження: print з кількох потоків може перемішуватись (write без буфера); потоки й tls() - лише
   в самостійних програмах (не в --obj для C).
 
-### S7. Системні двері: файли, час, мережа — 2 тижні
-- Обгортки системних викликів: open/read/write/stat/getdents/mmap, clock_gettime, сокети
-  (socket/bind/listen/accept/connect, poll/epoll).
-- **Перевірка:** нативна програма копіює теку, віддає файл по HTTP і читає його curl-ом.
+### S7. Системні двері: файли, час, мережа — ✅ ЗРОБЛЕНО 05.11.2026
+
+Усе - функції в прелюдії, написані на самій мові поверх `syscall` (без libc). Помилка - від'ємне
+число (-errno: -2 нема, -13 нема доступу, -17 вже є).
+- **Файли:** fileOpen/fileCreate/fileAppend, fdRead/fdWrite (пише все)/fdWriteStr/fdSeek/fdClose,
+  fileReadAll (увесь файл у пам'ять)/fileWriteAll, copyFile, fileInfo (розмір, тип, час) / fileSize /
+  pathExists / isDir, makeDir, removeFile, removeDir, renamePath.
+- **Теки:** dirOpen → `d.next()` (getdents64, без "." і "..") / `d.lastIsDir()` / `d.close()`; copyTree.
+- **Рядки:** strLen, strEq, strStarts, strCat, pathJoin, fmtInt, parseInt.
+- **Програма:** argCount/arg(i), envGet, pid, exit (з усіма потоками).
+- **Час:** nowNanos (реальний), monoNanos (для вимірювань), sleepMs.
+- **Мережа (TCP IPv4):** tcpListen (порт 0 - вільний, sockPort - який), tcpAccept, tcpConnect,
+  ipv4(a,b,c,d), pollIn(fd, ms).
+- Назви readFile/writeFile/fileExists зайняті старою VM (ключові слова лексера) - тому fileReadAll/
+  fileWriteAll/pathExists.
+- **Перевірка:** 11_files (дерево тек з файлом 200 КБ копіюється й звіряється, getdents, stat,
+  seek, аргументи, оточення, час, TCP сервер-у-потоці ↔ клієнт); tests/systems/http_server.nx -
+  HTTP-сервер на Nx, curl забирає 300 КБ побайтово, 404, 403 на "..", зупинка по /quit.
+- Ще нема (коли знадобиться): epoll для тисяч з'єднань, UDP, IPv6, DNS.
 
 ### S8. Самохостинг компілятора — 2–3 місяці (найбільший етап)
 - Компілятор NyxilumLang, переписаний на NyxilumLang (статичний режим), що видає x86-64.

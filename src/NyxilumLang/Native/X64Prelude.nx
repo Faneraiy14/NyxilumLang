@@ -681,3 +681,528 @@ func join(t: ptr<Thread>) -> int64 {
 func threadId() -> int64 {
     return syscall(186)
 }
+
+// ---------- рядки (нуль у кінці) ----------
+func strLen(s: ptr<uint8>) -> int64 {
+    var n: int64 = 0
+    while s[n] != 0 {
+        n = n + 1
+    }
+    return n
+}
+
+func strEq(a: ptr<uint8>, b: ptr<uint8>) -> bool {
+    var i: int64 = 0
+    while a[i] == b[i] {
+        if a[i] == 0 {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+func strStarts(s: ptr<uint8>, prefix: ptr<uint8>) -> bool {
+    var i: int64 = 0
+    while prefix[i] != 0 {
+        if s[i] != prefix[i] {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+// новий рядок a + b (alloc; звільняти free)
+func strCat(a: ptr<uint8>, b: ptr<uint8>) -> ptr<uint8> {
+    var na = strLen(a)
+    var nb = strLen(b)
+    var r: ptr<uint8> = asptr(alloc(na + nb + 1))
+    memcpy(r, a, na)
+    memcpy(r + na, b, nb + 1)
+    return r
+}
+
+// шлях a/b (alloc)
+func pathJoin(a: ptr<uint8>, b: ptr<uint8>) -> ptr<uint8> {
+    var na = strLen(a)
+    var nb = strLen(b)
+    var r: ptr<uint8> = asptr(alloc(na + nb + 2))
+    memcpy(r, a, na)
+    r[na] = 47
+    memcpy(r + na + 1, b, nb + 1)
+    return r
+}
+
+// ціле десятково в buf (від 21 байта), повертає довжину; нуль у кінці
+func fmtInt(buf: ptr<uint8>, v: int64) -> int64 {
+    var tmp = stackbuf(32)
+    var i: int64 = 0
+    var neg = v < 0
+    var u = uint64(v)
+    if neg {
+        u = uint64(0) - u
+    }
+    while true {
+        tmp[i] = uint8(48 + int64(u % 10))
+        i = i + 1
+        u = u / 10
+        if u == 0 {
+            break
+        }
+    }
+    var n: int64 = 0
+    if neg {
+        buf[0] = 45
+        n = 1
+    }
+    while i > 0 {
+        i = i - 1
+        buf[n] = tmp[i]
+        n = n + 1
+    }
+    buf[n] = 0
+    return n
+}
+
+// десяткове ціле з рядка (без перевірок; зупиняється на першому не-цифровому)
+func parseInt(s: ptr<uint8>) -> int64 {
+    var i: int64 = 0
+    var neg = false
+    if s[0] == 45 {
+        neg = true
+        i = 1
+    }
+    var v: int64 = 0
+    while s[i] >= 48 && s[i] <= 57 {
+        v = v * 10 + int64(s[i]) - 48
+        i = i + 1
+    }
+    if neg {
+        return 0 - v
+    }
+    return v
+}
+
+// ---------- аргументи й оточення ----------
+var __nx_args: ptr<int64> = null
+
+func argCount() -> int64 {
+    return __nx_args[0]
+}
+
+// аргумент i (0 - сама програма); null, якщо нема
+func arg(i: int64) -> ptr<uint8> {
+    if i < 0 || i >= __nx_args[0] {
+        return asptr(0)
+    }
+    return asptr(__nx_args[1 + i])
+}
+
+// значення змінної оточення або null
+func envGet(name: ptr<uint8>) -> ptr<uint8> {
+    var e = __nx_args + 2 + __nx_args[0]
+    var n = strLen(name)
+    while e[0] != 0 {
+        var s: ptr<uint8> = asptr(e[0])
+        if strStarts(s, name) && s[n] == 61 {
+            return s + n + 1
+        }
+        e = e + 1
+    }
+    return asptr(0)
+}
+
+// ---------- файли ----------
+// Усі функції повертають від'ємне число (-errno) при помилці: -2 нема файлу, -13 нема доступу, -17 вже є.
+
+func fileOpen(path: ptr<uint8>) -> int64 {
+    return syscall(2, path, 524288, 0)
+}
+
+// створити/перезаписати файл для запису (права 644)
+func fileCreate(path: ptr<uint8>) -> int64 {
+    return syscall(2, path, 524288 | 1 | 64 | 512, 420)
+}
+
+// дописувати в кінець (створить, якщо нема)
+func fileAppend(path: ptr<uint8>) -> int64 {
+    return syscall(2, path, 524288 | 1 | 64 | 1024, 420)
+}
+
+func fdRead(fd: int64, buf: ptr<void>, n: int64) -> int64 {
+    return syscall(0, fd, buf, n)
+}
+
+// записати все (повторює, поки не запише n байтів); повертає n або -errno
+func fdWrite(fd: int64, buf: ptr<void>, n: int64) -> int64 {
+    var p: ptr<uint8> = asptr(buf)
+    var done: int64 = 0
+    while done < n {
+        var r = syscall(1, fd, p + done, n - done)
+        if r == -4 {
+            continue
+        }
+        if r < 0 {
+            return r
+        }
+        done = done + r
+    }
+    return n
+}
+
+func fdWriteStr(fd: int64, s: ptr<uint8>) -> int64 {
+    return fdWrite(fd, s, strLen(s))
+}
+
+func fdClose(fd: int64) -> int64 {
+    return syscall(3, fd)
+}
+
+// перейти на позицію (whence: 0 від початку, 1 від поточної, 2 від кінця)
+func fdSeek(fd: int64, off: int64, whence: int64) -> int64 {
+    return syscall(8, fd, off, whence)
+}
+
+// stat: розмір і тип; -errno, якщо нема
+struct FileInfo {
+    size: int64
+    mode: uint32
+    mtime: int64
+    isDir: bool
+    isFile: bool
+}
+
+func fileInfo(path: ptr<uint8>, out: ptr<FileInfo>) -> int64 {
+    var st: ptr<uint8> = stackbuf(144)
+    var r = syscall(4, path, st)
+    if r < 0 {
+        return r
+    }
+    var m: ptr<uint32> = asptr(st + 24)
+    var sz: ptr<int64> = asptr(st + 48)
+    var mt: ptr<int64> = asptr(st + 88)
+    out.size = sz[0]
+    out.mode = m[0]
+    out.mtime = mt[0]
+    out.isDir = (m[0] & 61440) == 16384
+    out.isFile = (m[0] & 61440) == 32768
+    return 0
+}
+
+// розмір файлу або -errno
+func fileSize(path: ptr<uint8>) -> int64 {
+    var fi: FileInfo
+    var r = fileInfo(path, fi)
+    if r < 0 {
+        return r
+    }
+    return fi.size
+}
+
+func pathExists(path: ptr<uint8>) -> bool {
+    var fi: FileInfo
+    return fileInfo(path, fi) == 0
+}
+
+func isDir(path: ptr<uint8>) -> bool {
+    var fi: FileInfo
+    return fileInfo(path, fi) == 0 && fi.isDir
+}
+
+func makeDir(path: ptr<uint8>) -> int64 {
+    return syscall(83, path, 493)
+}
+
+func removeFile(path: ptr<uint8>) -> int64 {
+    return syscall(87, path)
+}
+
+func removeDir(path: ptr<uint8>) -> int64 {
+    return syscall(84, path)
+}
+
+func renamePath(from: ptr<uint8>, to: ptr<uint8>) -> int64 {
+    return syscall(82, from, to)
+}
+
+// увесь файл у пам'ять (alloc, нуль у кінці); довжина - у *len; null при помилці
+func fileReadAll(path: ptr<uint8>, len: ptr<int64>) -> ptr<uint8> {
+    var fd = fileOpen(path)
+    if fd < 0 {
+        return asptr(0)
+    }
+    var cap: int64 = 4096
+    var n: int64 = 0
+    var buf: ptr<uint8> = asptr(alloc(cap + 1))
+    while true {
+        if n == cap {
+            cap = cap * 2
+            buf = asptr(realloc(buf, cap + 1))
+        }
+        var r = fdRead(fd, buf + n, cap - n)
+        if r == -4 {
+            continue
+        }
+        if r < 0 {
+            fdClose(fd)
+            free(buf)
+            return asptr(0)
+        }
+        if r == 0 {
+            break
+        }
+        n = n + r
+    }
+    fdClose(fd)
+    buf[n] = 0
+    if len != null {
+        len[0] = n
+    }
+    return buf
+}
+
+func fileWriteAll(path: ptr<uint8>, data: ptr<void>, n: int64) -> int64 {
+    var fd = fileCreate(path)
+    if fd < 0 {
+        return fd
+    }
+    var r = fdWrite(fd, data, n)
+    fdClose(fd)
+    return r
+}
+
+// копіювати файл блоками по 64 КБ; 0 або -errno
+func copyFile(from: ptr<uint8>, to: ptr<uint8>) -> int64 {
+    var src = fileOpen(from)
+    if src < 0 {
+        return src
+    }
+    var dst = fileCreate(to)
+    if dst < 0 {
+        fdClose(src)
+        return dst
+    }
+    var buf = alloc(65536)
+    var res: int64 = 0
+    while true {
+        var r = fdRead(src, buf, 65536)
+        if r == -4 {
+            continue
+        }
+        if r <= 0 {
+            res = r
+            break
+        }
+        var w = fdWrite(dst, buf, r)
+        if w < 0 {
+            res = w
+            break
+        }
+    }
+    free(buf)
+    fdClose(src)
+    fdClose(dst)
+    return res
+}
+
+// ---------- теки ----------
+// var d = dirOpen("шлях"); while (name = d.next()) != null {...}; d.close()
+// next() пропускає "." і ".."; ім'я дійсне до наступного next().
+struct Dir {
+    fd: int64
+    buf: ptr<uint8>
+    pos: int64
+    len: int64
+    lastType: uint8
+
+    func Dir.next() -> ptr<uint8> {
+        while true {
+            if self.pos >= self.len {
+                var r = syscall(217, self.fd, self.buf, 32768)
+                if r <= 0 {
+                    return asptr(0)
+                }
+                self.len = r
+                self.pos = 0
+            }
+            var e = self.buf + self.pos
+            var reclen: ptr<uint16> = asptr(e + 16)
+            self.pos = self.pos + int64(reclen[0])
+            self.lastType = e[18]
+            var name = e + 19
+            if !(name[0] == 46 && (name[1] == 0 || (name[1] == 46 && name[2] == 0))) {
+                return name
+            }
+        }
+        return asptr(0)
+    }
+
+    // тип останнього запису з next(): тека?
+    func Dir.lastIsDir() -> bool {
+        return self.lastType == 4
+    }
+
+    func Dir.close() {
+        fdClose(self.fd)
+        free(self.buf)
+        free(self)
+    }
+}
+
+// null, якщо теки нема
+func dirOpen(path: ptr<uint8>) -> ptr<Dir> {
+    var fd = syscall(2, path, 524288 | 65536, 0)
+    if fd < 0 {
+        return asptr(0)
+    }
+    var d = new(Dir)
+    d.fd = fd
+    d.buf = asptr(alloc(32768))
+    return d
+}
+
+// скопіювати теку з усім вмістом; 0 або -errno
+func copyTree(from: ptr<uint8>, to: ptr<uint8>) -> int64 {
+    var d = dirOpen(from)
+    if d == null {
+        return -2
+    }
+    var mk = makeDir(to)
+    if mk < 0 && mk != -17 {
+        d.close()
+        return mk
+    }
+    var res: int64 = 0
+    var name = d.next()
+    while name != null && res == 0 {
+        var s = pathJoin(from, name)
+        var t = pathJoin(to, name)
+        if d.lastIsDir() {
+            res = copyTree(s, t)
+        } else {
+            res = copyFile(s, t)
+        }
+        free(s)
+        free(t)
+        name = d.next()
+    }
+    d.close()
+    return res
+}
+
+// ---------- час ----------
+// наносекунди з 1970 (реальний годинник)
+func nowNanos() -> int64 {
+    var ts: ptr<int64> = asptr(stackbuf(16))
+    syscall(228, 0, ts)
+    return ts[0] * 1000000000 + ts[1]
+}
+
+// наносекунди монотонного годинника (для вимірювань; не стрибає при зміні часу)
+func monoNanos() -> int64 {
+    var ts: ptr<int64> = asptr(stackbuf(16))
+    syscall(228, 1, ts)
+    return ts[0] * 1000000000 + ts[1]
+}
+
+func sleepMs(ms: int64) {
+    var ts: ptr<int64> = asptr(stackbuf(16))
+    ts[0] = ms / 1000
+    ts[1] = (ms % 1000) * 1000000
+    while syscall(35, ts, ts) == -4 {
+    }
+}
+
+func pid() -> int64 {
+    return syscall(39)
+}
+
+func exit(code: int64) {
+    syscall(231, code)
+}
+
+// ---------- мережа (TCP, IPv4) ----------
+func __nx_sockaddr(b: ptr<uint8>, ip: uint32, port: int64) {
+    memset(b, 0, 16)
+    b[0] = 2
+    b[2] = uint8(port >> 8)
+    b[3] = uint8(port & 255)
+    b[4] = uint8(ip >> 24)
+    b[5] = uint8((ip >> 16) & 255)
+    b[6] = uint8((ip >> 8) & 255)
+    b[7] = uint8(ip & 255)
+}
+
+// адреса a.b.c.d як число: ipv4(127, 0, 0, 1)
+func ipv4(a: int64, b: int64, c: int64, d: int64) -> uint32 {
+    return uint32((a << 24) | (b << 16) | (c << 8) | d)
+}
+
+// слухати порт (0 - будь-який вільний, дізнатись - sockPort); fd або -errno
+func tcpListen(ip: uint32, port: int64) -> int64 {
+    var fd = syscall(41, 2, 1 | 524288, 0)
+    if fd < 0 {
+        return fd
+    }
+    var one: int32 = 1
+    syscall(54, fd, 1, 2, addr(one), 4)
+    var sa = stackbuf(16)
+    __nx_sockaddr(sa, ip, port)
+    var r = syscall(49, fd, sa, 16)
+    if r == 0 {
+        r = syscall(50, fd, 128)
+    }
+    if r < 0 {
+        fdClose(fd)
+        return r
+    }
+    return fd
+}
+
+// порт, на якому сокет (після tcpListen з портом 0)
+func sockPort(fd: int64) -> int64 {
+    var sa = stackbuf(16)
+    var len: int32 = 16
+    if syscall(51, fd, sa, addr(len)) < 0 {
+        return -1
+    }
+    return (int64(sa[2]) << 8) | int64(sa[3])
+}
+
+func tcpAccept(fd: int64) -> int64 {
+    while true {
+        var c = syscall(288, fd, 0, 0, 524288)
+        if c != -4 {
+            return c
+        }
+    }
+    return -1
+}
+
+func tcpConnect(ip: uint32, port: int64) -> int64 {
+    var fd = syscall(41, 2, 1 | 524288, 0)
+    if fd < 0 {
+        return fd
+    }
+    var sa = stackbuf(16)
+    __nx_sockaddr(sa, ip, port)
+    var r = syscall(42, fd, sa, 16)
+    if r < 0 {
+        fdClose(fd)
+        return r
+    }
+    return fd
+}
+
+// чекати, поки в fd з'являться дані (або з'єднання для слухача); false - минув час (ms; -1 - без кінця)
+func pollIn(fd: int64, ms: int64) -> bool {
+    var p = stackbuf(8)
+    var pfd: ptr<int32> = asptr(p)
+    pfd[0] = int32(fd)
+    var ev: ptr<int16> = asptr(p + 4)
+    ev[0] = 1
+    ev[1] = 0
+    var r = syscall(7, p, 1, ms)
+    return r > 0
+}

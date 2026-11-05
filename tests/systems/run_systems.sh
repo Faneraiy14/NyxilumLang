@@ -21,12 +21,30 @@ for f in [0-9]*.nx; do
         continue
     fi
     if ! out=$("$NX" compile-native "$f" -o "$W/$n" --target linux-x64 2>&1); then bad "$n" "$out"; continue; fi
-    "$W/$n" > "$W/$n.out" 2>&1; code=$?
+    # кожен тест - у своїй порожній теці, з аргументами й змінною оточення (для 11_files)
+    mkdir -p "$W/run_$n"
+    (cd "$W/run_$n" && NX_TEST_VAR=значення "$W/$n" "перший аргумент" two) > "$W/$n.out" 2>&1; code=$?
     want=$(grep -oP '^// expect-exit: \K[0-9]+' "$f"); want=${want:-0}
     if ! cmp -s "$n.expected" "$W/$n.out"; then bad "$n" "$(diff "$n.expected" "$W/$n.out")"
     elif [ "$code" != "$want" ]; then bad "$n" "код виходу $code, очікувався $want"
     else ok "$n"; fi
 done
+
+# HTTP: нативний сервер віддає файли, curl їх забирає (S7)
+if "$NX" compile-native http_server.nx -o "$W/hs" --target linux-x64 >/dev/null 2>&1; then
+    H="$W/www"; mkdir -p "$H/sub"; head -c 300000 /dev/urandom > "$H/big.bin"; echo "привіт" > "$H/sub/a.txt"
+    "$W/hs" "$H" "$W/port" & hp=$!
+    for _ in $(seq 50); do [ -s "$W/port" ] && break; sleep 0.1; done
+    P=$(cat "$W/port" 2>/dev/null)
+    r1=$(curl -s "http://127.0.0.1:$P/big.bin" | cmp - "$H/big.bin" && echo ok)
+    r2=$(curl -s "http://127.0.0.1:$P/sub/a.txt")
+    r3=$(curl -s -o /dev/null -w "%{http_code}" "http://127.0.0.1:$P/нема")
+    r4=$(curl -s -o /dev/null -w "%{http_code}" --path-as-is "http://127.0.0.1:$P/../etc/passwd")
+    curl -s "http://127.0.0.1:$P/quit" >/dev/null
+    for _ in $(seq 30); do kill -0 $hp 2>/dev/null || break; sleep 0.1; done
+    if [ "$r1$r2$r3$r4" = "okпривіт404403" ] && ! kill -0 $hp 2>/dev/null; then ok "HTTP-сервер на Nx: curl забрав 300 КБ, 404, 403, зупинка"
+    else kill $hp 2>/dev/null; bad "HTTP-сервер" "файл:$r1 текст:$r2 нема:$r3 вихід:$r4"; fi
+else bad "HTTP-сервер" "не скомпілювався"; fi
 
 python3 gen_arith.py "$W/a.nx" "$W/a.c"
 if gcc -O0 -w "$W/a.c" -o "$W/a_c" && "$W/a_c" > "$W/a_c.out" && "$NX" compile-native "$W/a.nx" -o "$W/a_nx" --target linux-x64 >/dev/null 2>&1 && "$W/a_nx" > "$W/a_nx.out" && cmp -s "$W/a_c.out" "$W/a_nx.out"; then

@@ -1,0 +1,99 @@
+// S7: найпростіший HTTP-сервер - віддає файли з теки, назва якої - перший аргумент.
+// Порт обирає сам (вільний) і записує в файл - другий аргумент. GET /quit - зупинитись.
+func respond(c: int64, code: ptr<uint8>, body: ptr<uint8>, n: int64) {
+    var num = stackbuf(32)
+    fmtInt(num, n)
+    fdWriteStr(c, "HTTP/1.1 ")
+    fdWriteStr(c, code)
+    fdWriteStr(c, "\r\nContent-Length: ")
+    fdWriteStr(c, num)
+    fdWriteStr(c, "\r\nConnection: close\r\n\r\n")
+    fdWrite(c, body, n)
+}
+
+func handle(c: int64, root: ptr<uint8>) -> bool {
+    var req: ptr<uint8> = asptr(alloc(8192))
+    var got: int64 = 0
+    // читати, поки не прийде кінець заголовків
+    while got < 8191 {
+        if !pollIn(c, 5000) {
+            break
+        }
+        var r = fdRead(c, req + got, 8191 - got)
+        if r <= 0 {
+            break
+        }
+        got = got + r
+        req[got] = 0
+        var done = false
+        for i in 3..got {
+            if req[i - 3] == 13 && req[i - 2] == 10 && req[i - 1] == 13 && req[i] == 10 {
+                done = true
+            }
+        }
+        if done {
+            break
+        }
+    }
+    req[got] = 0
+    var keep = true
+    if !strStarts(req, "GET /") {
+        respond(c, "400 Bad Request", "bad request\n", 12)
+    } else {
+        // шлях - до пробілу; ".." заборонено
+        var p = req + 4
+        var e: int64 = 0
+        var bad = false
+        while p[e] != 32 && p[e] != 0 {
+            if p[e] == 46 && p[e + 1] == 46 {
+                bad = true
+            }
+            e = e + 1
+        }
+        p[e] = 0
+        if strEq(p, "/quit") {
+            respond(c, "200 OK", "bye\n", 4)
+            keep = false
+        } else if bad {
+            respond(c, "403 Forbidden", "forbidden\n", 10)
+        } else {
+            var full = strCat(root, p)
+            var n: int64 = 0
+            var data = fileReadAll(full, addr(n))
+            if data == null || isDir(full) {
+                respond(c, "404 Not Found", "not found\n", 10)
+            } else {
+                respond(c, "200 OK", data, n)
+                free(data)
+            }
+            free(full)
+        }
+    }
+    free(req)
+    fdClose(c)
+    return keep
+}
+
+func main() -> int64 {
+    if argCount() < 3 {
+        print("http_server <тека> <файл-для-порту>")
+        return 2
+    }
+    var lfd = tcpListen(ipv4(127, 0, 0, 1), 0)
+    if lfd < 0 {
+        print(lfd)
+        return 1
+    }
+    var num = stackbuf(32)
+    var len = fmtInt(num, sockPort(lfd))
+    fileWriteAll(arg(2), num, len)
+    var keep = true
+    while keep {
+        var c = tcpAccept(lfd)
+        if c >= 0 {
+            keep = handle(c, arg(1))
+        }
+    }
+    fdClose(lfd)
+    return 0
+}
