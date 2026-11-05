@@ -1,0 +1,15 @@
+// Допоміжний модуль для 12_import.nx (не тест сам по собі - назва не з цифри)
+import "util.nx"
+
+struct Point {
+    x: int64
+    y: int64
+}
+
+func manhattan(a: ptr<Point>, b: ptr<Point>) -> int64 {
+    return absI(a.x - b.x) + absI(a.y - b.y)
+}
+
+func unused() -> int64 {
+    return 13
+}

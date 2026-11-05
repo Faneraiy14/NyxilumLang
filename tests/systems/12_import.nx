@@ -1,0 +1,14 @@
+// S8 крок 1: import у системному режимі - повний файл, вибіркові імена, спільний модуль двічі
+import "lib/geom.nx" { Point, manhattan }
+import "lib/util.nx"
+
+func main() {
+    var a = new(Point)
+    var b = new(Point)
+    a.x = 3
+    a.y = 0 - 4
+    b.x = 0 - 2
+    b.y = 6
+    print(manhattan(a, b))
+    print(absI(0 - 7))
+}

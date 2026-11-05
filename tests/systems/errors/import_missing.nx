@@ -1,0 +1,6 @@
+// expect-error: unused
+import "../lib/geom.nx" { Point }
+
+func main() {
+    print(unused())
+}

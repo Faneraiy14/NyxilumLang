@@ -102,7 +102,13 @@ public static class ModuleResolver
 
         ctx.InProgress.Add(fullPath);
         string code = File.ReadAllText(fullPath, Encoding.UTF8);
-        var parsed = new Parser(new Lexer(code).Tokenize()).ParseProgram();
+        ProgramNode parsed;
+        try { parsed = new Parser(new Lexer(code).Tokenize()).ParseProgram(); }
+        catch (Exception ex) when (ex is not IOException)
+        {
+            // без назви файлу «рядок 16» вказував би на файл, що імпортує
+            throw new Exception($"{Path.GetFileName(fullPath)}: {ex.Message}", ex);
+        }
         var expanded = Expand(parsed, Path.GetDirectoryName(fullPath) ?? ".", ctx);
         ctx.InProgress.Remove(fullPath);
         ctx.Cache[fullPath] = expanded;

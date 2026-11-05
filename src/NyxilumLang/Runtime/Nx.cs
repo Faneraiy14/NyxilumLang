@@ -349,6 +349,9 @@ public class Nx
             {
                 // Системний режим x86-64 (SYSTEMS_ROADMAP.md, S1): статичні типи «як C»,
                 // System V ABI; --obj - лише .o без _start (щоб зшити з C чи іншим кодом).
+                // import "файл.nx" [{ імена }] - той самий ModuleResolver, що й VM/ARM64
+                // (S8: компілятор на Nx складається з кількох файлів).
+                program = ModuleResolver.ResolveImports(program, path);
                 string x64Asm = new NyxilumLang.Native.NativeCodegenX64().Compile(program, objOnly);
                 File.WriteAllText(asmPath, x64Asm);
                 RunShell("as", $"--64 {asmPath} -o {objPath}");

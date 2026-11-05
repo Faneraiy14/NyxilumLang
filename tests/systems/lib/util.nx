@@ -1,0 +1,7 @@
+// Імпортується і з geom.nx, і з 12_import.nx напряму - має влитись один раз
+func absI(v: int64) -> int64 {
+    if v < 0 {
+        return 0 - v
+    }
+    return v
+}
