@@ -329,10 +329,68 @@ public sealed class NativeCodegenX64
     // ---------- функції ----------
     static readonly string[] IntArgRegs = { "%rdi", "%rsi", "%rdx", "%rcx", "%r8", "%r9" };
 
+    // ---------- S5: змінні в регістрах ----------
+    // Найчастіші (з вагою циклів) цілі/bool/ptr змінні функції - у збережуваних регістрах System V
+    // (rbx, r12-r15: їх не псують виклики, тож значення живе в регістрі весь час). Слот такої змінної
+    // кодується як 1000 + номер регістра. Змінні, чию адресу беруть addr(x), лишаються в пам'яті.
+    static readonly string[] SavedRegs = { "%rbx", "%r12", "%r13", "%r14", "%r15" };
+    Dictionary<string, int> _regPlan = new();
+    HashSet<int> _usedRegs = new();
+    static bool IsReg(int off) => off >= 1000;
+    static string Loc(int off) => IsReg(off) ? SavedRegs[off - 1000] : $"{off}(%rbp)";
+
+    void PlanRegisters(Func f)
+    {
+        var weight = new Dictionary<string, long>();
+        var noReg = new HashSet<string>();
+        void Use(string n, int depth) { weight[n] = weight.GetValueOrDefault(n) + (1L << Math.Min(3 * depth, 30)); }
+        void Ex(ExpressionNode? e, int d)
+        {
+            switch (e)
+            {
+                case null: return;
+                case VariableExpression v: Use(v.Name, d); return;
+                case BinaryExpression b: Ex(b.Left, d); Ex(b.Right, d); return;
+                case UnaryExpression u: Ex(u.Operand, d); return;
+                case CallExpression c:
+                    if (c.FunctionName == "addr" && c.Arguments.Count == 1 && c.Arguments[0] is VariableExpression av) noReg.Add(av.Name);
+                    foreach (var a in c.Arguments) Ex(a, d);
+                    return;
+                case MethodCallExpression m: Ex(m.Object, d); foreach (var a in m.Arguments) Ex(a, d); return;
+                case IndexExpression i: Ex(i.Array, d); Ex(i.Index, d); return;
+                case MemberAccessExpression ma: Ex(ma.Object, d); return;
+                case StructInitExpression si: foreach (var fi in si.Fields) Ex(fi.Value, d); return;
+                case CallValueExpression cv: Ex(cv.Callee, d); foreach (var a in cv.Arguments) Ex(a, d); return;
+            }
+        }
+        void St(StatementNode s, int d)
+        {
+            switch (s)
+            {
+                case ExpressionStatement es: Ex(es.Expression, d); break;
+                case VariableDeclaration vd: Use(vd.Name, d); Ex(vd.Initializer, d); break;
+                case IfStatement i: Ex(i.Condition, d); Bl(i.ThenBlock, d); if (i.ElseBlock != null) Bl(i.ElseBlock, d); break;
+                case WhileStatement w: Ex(w.Condition, d + 1); Bl(w.Body, d + 1); break;
+                case ForStatement fs: Ex(fs.Start, d); Ex(fs.End, d); Use(fs.VariableName, d + 1); Use(fs.VariableName, d + 1); Bl(fs.Body, d + 1); break;
+                case BlockStatement b: Bl(b, d); break;
+                case ReturnStatement r: Ex(r.Value, d); break;
+                case PrintStatement p: Ex(p.Expression, d); break;
+            }
+        }
+        void Bl(BlockStatement b, int d) { foreach (var s in b.Statements) St(s, d); }
+        foreach (var (n, _) in f.Params) Use(n, 0);
+        Bl(f.Decl.Body, 0);
+        _regPlan = weight.Where(kv => !noReg.Contains(kv.Key) && kv.Value >= 2 && !_globals.ContainsKey(kv.Key))
+            .OrderByDescending(kv => kv.Value).Take(SavedRegs.Length)
+            .Select((kv, i) => (kv.Key, i)).ToDictionary(x => x.Key, x => x.i);
+        _usedRegs = new();
+    }
+
     void CompileFunc(Func f)
     {
         _cur = f;
         _b = new StringBuilder();
+        PlanRegisters(f);
         _scopes = new() { new() };
         _frame = 0;
         _depth = 0;
@@ -346,7 +404,7 @@ public sealed class NativeCodegenX64
             if (type.IsFloat)
             {
                 if (nf >= 8) throw Err("більше 8 дробових параметрів ще не підтримується");
-                E($"movsd %xmm{nf++}, {off}(%rbp)");
+                E($"movsd %xmm{nf++}, {Loc(off)}");
             }
             else
             {
@@ -354,7 +412,7 @@ public sealed class NativeCodegenX64
                 // за System V старші біти вузьких цілих (і bool) у регістрі не визначені - канонізуємо
                 E($"mov {IntArgRegs[ni++]}, %rax");
                 if (type.Kind == K.Bool) E("movzbq %al, %rax"); else CanonReg(type);
-                E($"mov %rax, {off}(%rbp)");
+                E($"mov %rax, {Loc(off)}");
             }
         }
         foreach (var st in f.Decl.Body.Statements) Stmt(st);
@@ -362,6 +420,10 @@ public sealed class NativeCodegenX64
         E("xor %eax, %eax");
         E("pxor %xmm0, %xmm0");
         L($".Lret_{f.Label}");
+        // збережувані регістри, які зайняли змінні, - у кадрі (зберегти на вході, повернути на виході)
+        var saves = new List<(string Reg, int Off)>();
+        foreach (int r in _usedRegs.OrderBy(x => x)) { _frame += 8; saves.Add((SavedRegs[r], -_frame)); }
+        foreach (var (reg, off) in saves) E($"mov {off}(%rbp), {reg}");
         E("leave");
         E("ret");
 
@@ -372,6 +434,7 @@ public sealed class NativeCodegenX64
         _text.AppendLine("    push %rbp");
         _text.AppendLine("    mov %rsp, %rbp");
         if (frame > 0) _text.AppendLine($"    sub ${frame}, %rsp");
+        foreach (var (reg, off) in saves) _text.AppendLine($"    mov {reg}, {off}(%rbp)");
         _text.Append(_b);
     }
 
@@ -381,6 +444,13 @@ public sealed class NativeCodegenX64
         {
             if (!ex.Type.Same(type)) throw Err($"змінна «{name}» уже є з типом {ex.Type}, а тут {type}");
             return ex.Off;
+        }
+        // у регістр - якщо запланований, тип уміщається в регістр і ім'я не затуляє змінну зовнішнього блоку
+        if (_regPlan.TryGetValue(name, out int reg) && type.InReg && !TryLocal(name, out _))
+        {
+            _usedRegs.Add(reg);
+            _scopes[^1][name] = (type, 1000 + reg);
+            return 1000 + reg;
         }
         _frame += 8;
         _scopes[^1][name] = (type, -_frame);
@@ -465,17 +535,17 @@ public sealed class NativeCodegenX64
                 StoreLocal(endSlot, t);
                 string top = NewLabel("for"), next = NewLabel("fnext"), end = NewLabel("fend");
                 L(top);
-                E($"mov {iv}(%rbp), %rax");
-                E($"cmp {endSlot}(%rbp), %rax");
+                E($"mov {Loc(iv)}, %rax");
+                E($"cmp {Loc(endSlot)}, %rax");
                 E($"{(t.Signed ? "jge" : "jae")} {end}");
                 _loops.Push((next, end));
                 Block(fs.Body);
                 _loops.Pop();
                 L(next);
-                E($"mov {iv}(%rbp), %rax");
+                E($"mov {Loc(iv)}, %rax");
                 E("add $1, %rax");
                 CanonReg(t);
-                E($"mov %rax, {iv}(%rbp)");
+                E($"mov %rax, {Loc(iv)}");
                 E($"jmp {top}");
                 L(end);
                 _scopes.RemoveAt(_scopes.Count - 1);
@@ -574,8 +644,51 @@ public sealed class NativeCodegenX64
         _scopes.RemoveAt(_scopes.Count - 1);
     }
 
+    string? _condJump;
+    bool _condFused;
+
+    // простий операнд для rcx: ціла стала (вміщається в 32 біти) або змінна цілого/bool/ptr типу
+    string? SimpleOperand(ExpressionNode e, T? hint, out T? t)
+    {
+        t = null;
+        if (e is LiteralExpression { Value: double } or UnaryExpression { Operator: "-", Operand: LiteralExpression } && IsIntLit(e))
+        {
+            var lt = hint != null && hint.IsInt ? hint : T.I64;
+            long v;
+            try { v = ConstInt(e, lt); } catch (Exception) { return null; }
+            if (v < int.MinValue || v > int.MaxValue) return null;
+            t = lt;
+            return $"${v}";
+        }
+        if (e is VariableExpression ve)
+        {
+            if (TryLocal(ve.Name, out var lv) && lv.Type.InReg) { t = lv.Type; return Loc(lv.Off); }
+        }
+        return null;
+    }
+
     void Cond(ExpressionNode c, string falseLabel)
     {
+        if (c is LiteralExpression { Value: true }) return;                       // while true - без перевірки
+        if (c is LiteralExpression { Value: false }) { E($"jmp {falseLabel}"); return; }
+        if (c is BinaryExpression { Operator: "&&" } and2)
+        {
+            Cond(and2.Left, falseLabel);
+            Cond(and2.Right, falseLabel);
+            return;
+        }
+        if (c is BinaryExpression { Operator: "==" or "!=" or "<" or "<=" or ">" or ">=" } cmpe)
+        {
+            _condJump = falseLabel;
+            _condFused = false;
+            var ct = Binary(cmpe, null);
+            _condJump = null;
+            if (_condFused) { _condFused = false; return; }
+            if (ct.Kind != K.Bool) throw Err($"умова має бути bool, а тут {ct}");
+            E("test %al, %al");
+            E($"jz {falseLabel}");
+            return;
+        }
         var t = Gen(c, null);
         if (t.Kind != K.Bool) throw Err($"умова має бути bool, а тут {t} (порівняй явно: x != 0)");
         E("test %al, %al");
@@ -620,14 +733,14 @@ public sealed class NativeCodegenX64
 
     void StoreLocal(int off, T t)
     {
-        if (t.IsFloat) E($"movsd %xmm0, {off}(%rbp)");
-        else E($"mov %rax, {off}(%rbp)");
+        if (t.IsFloat) E($"movsd %xmm0, {Loc(off)}");
+        else E($"mov %rax, {Loc(off)}");
     }
 
     void LoadLocal(int off, T t)
     {
-        if (t.IsFloat) E($"movsd {off}(%rbp), %xmm0");
-        else E($"mov {off}(%rbp), %rax");
+        if (t.IsFloat) E($"movsd {Loc(off)}, %xmm0");
+        else E($"mov {Loc(off)}, %rax");
     }
 
     // завантажити значення типу t з пам'яті addr (рядок адресації) у rax/xmm0
@@ -801,6 +914,13 @@ public sealed class NativeCodegenX64
                 var pt = Gen(ix.Array, null);
                 if (!pt.IsPtr) throw Err($"індексувати можна лише ptr<T>, а тут {pt}");
                 if (pt.Elem!.Kind is K.Void) throw Err("ptr<void> не можна індексувати - спершу присвой у ptr<T>");
+                int esz = ElemSize(pt);
+                if (esz is 1 or 2 or 4 or 8 && SimpleOperand(ix.Index, T.I64, out var sit) is { } sidx && sit!.IsInt)
+                {
+                    E($"mov {sidx}, %rcx");
+                    E($"lea (%rax,%rcx,{esz}), %rax");
+                    return pt.Elem;
+                }
                 Push(pt);
                 var it = Gen(ix.Index, IsIntLit(ix.Index) ? T.I64 : null);
                 if (!it.IsInt) throw Err($"індекс має бути цілим, а тут {it}");
@@ -852,6 +972,17 @@ public sealed class NativeCodegenX64
         }
         var t = Address(asg.Left);
         if (t.IsAggregate) throw Err($"присвоїти {t} цілком не можна - копіюй memcpy(куди, звідки, sizeof(...)) або по полях");
+        // S5: просте значення (стала, змінна) - одразу з rcx, без push/pop адреси
+        if (t.InReg && SimpleOperand(asg.Right, t, out var svt) is { } sval)
+        {
+            Convert(svt!, t, "присвоєння");
+            E($"mov {sval}, %rcx");
+            string r = t.Kind == K.Bool ? "%cl" : t.Size switch { 1 => "%cl", 2 => "%cx", 4 => "%ecx", _ => "%rcx" };
+            string mv = t.Kind == K.Bool ? "movb" : t.Size switch { 1 => "movb", 2 => "movw", 4 => "movl", _ => "mov" };
+            E($"{mv} {r}, (%rax)");
+            E("mov %rcx, %rax");
+            return t;
+        }
         Push(T.VoidPtr);
         Convert(Gen(asg.Right, t), t, "присвоєння");
         PopTo("%rcx");
@@ -908,9 +1039,15 @@ public sealed class NativeCodegenX64
         if (lh != null && lh.IsPtr) lh = null;
         if (rh != null && rh.IsPtr) rh = null;
 
+        string? jumpFalse = _condJump; // лише для цього (верхнього) порівняння, не для вкладених
+        _condJump = null;
         var lt = Gen(bin.Left, lh);
-        Push(lt);
-        var rt = Gen(bin.Right, rh);
+        // S5: простий правий операнд (стала, змінна) - одразу в rcx, без push/pop
+        T? srt = null;
+        string? simple = lt.IsFloat ? null : SimpleOperand(bin.Right, rh, out srt);
+        T rt;
+        if (simple != null) { E($"mov {simple}, %rcx"); rt = srt!; }
+        else { Push(lt); rt = Gen(bin.Right, rh); }
 
         // float64
         if (lt.IsFloat || rt.IsFloat)
@@ -957,8 +1094,11 @@ public sealed class NativeCodegenX64
             return T.Bool;
         }
 
-        E("mov %rax, %rcx");
-        PopTo("%rax");
+        if (simple == null)
+        {
+            E("mov %rax, %rcx");
+            PopTo("%rax");
+        }
         // тепер: ліве в rax, праве в rcx
 
         if (lt.Kind == K.Bool || rt.Kind == K.Bool)
@@ -985,7 +1125,7 @@ public sealed class NativeCodegenX64
             if (cmp && lt.IsPtr && rt.IsPtr)
             {
                 if (!(lt.Same(rt) || lt.Elem!.Kind == K.Void || rt.Elem!.Kind == K.Void)) throw Err($"порівняння вказівників різних типів: {lt} і {rt}");
-                return Compare(op, signed: false);
+                return Compare(op, signed: false, jumpFalse);
             }
             throw Err($"{op}: {lt} і {rt} не поєднуються");
         }
@@ -993,7 +1133,7 @@ public sealed class NativeCodegenX64
         if (!lt.IsInt || !rt.IsInt) throw Err($"{op}: {lt} і {rt} не поєднуються");
         bool shift = op is "<<" or ">>";
         if (!shift && !lt.Same(rt)) throw Err($"{op}: різні типи {lt} і {rt} - перетвори один явно, напр. {lt}(...)");
-        if (cmp) return Compare(op, lt.Signed);
+        if (cmp) return Compare(op, lt.Signed, jumpFalse);
         bool w32 = lt.Size <= 4;
         switch (op)
         {
@@ -1041,7 +1181,7 @@ public sealed class NativeCodegenX64
         else { E($"imul ${sz}, {idxReg}, {idxReg}"); E($"add {idxReg}, %rax"); }
     }
 
-    T Compare(string op, bool signed)
+    T Compare(string op, bool signed, string? jumpFalse = null)
     {
         E("cmp %rcx, %rax");
         string cc = op switch
@@ -1050,6 +1190,19 @@ public sealed class NativeCodegenX64
             "<" => signed ? "l" : "b", "<=" => signed ? "le" : "be",
             ">" => signed ? "g" : "a", _ => signed ? "ge" : "ae",
         };
+        if (jumpFalse != null)
+        {
+            // умова if/while: одразу перехід за протилежною умовою, без 0/1 у регістрі
+            string inv = op switch
+            {
+                "==" => "ne", "!=" => "e",
+                "<" => signed ? "ge" : "ae", "<=" => signed ? "g" : "a",
+                ">" => signed ? "le" : "be", _ => signed ? "l" : "b",
+            };
+            E($"j{inv} {jumpFalse}");
+            _condFused = true;
+            return T.Bool;
+        }
         E($"set{cc} %al");
         E("movzbq %al, %rax");
         return T.Bool;
@@ -1165,7 +1318,12 @@ public sealed class NativeCodegenX64
                 if (a.Count != 1) throw Err("addr(змінна, p[i] або p.поле)");
                 if (a[0] is VariableExpression av)
                 {
-                    if (TryLocal(av.Name, out var lv)) { E($"lea {lv.Off}(%rbp), %rax"); return T.Ptr(lv.Type); }
+                    if (TryLocal(av.Name, out var lv))
+                    {
+                        if (IsReg(lv.Off)) throw Err($"внутрішня помилка: addr({av.Name}) для змінної в регістрі");
+                        E($"lea {lv.Off}(%rbp), %rax");
+                        return T.Ptr(lv.Type);
+                    }
                     if (_globals.TryGetValue(av.Name, out var gv)) { E($"lea {gv.Label}(%rip), %rax"); return T.Ptr(gv.Type); }
                     throw Err($"невідома змінна «{av.Name}»");
                 }
