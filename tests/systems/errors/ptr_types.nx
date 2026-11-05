@@ -1,0 +1,5 @@
+func main() {
+    var p: ptr<int32> = null
+    var q: ptr<int64> = p
+}
+// expect-error: очікується ptr<int64>, а тут ptr<int32>

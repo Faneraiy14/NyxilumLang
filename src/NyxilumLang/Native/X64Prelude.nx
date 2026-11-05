@@ -1,0 +1,128 @@
+// Прелюдія системного бекенда x86-64 (NativeCodegenX64) - написана на самій
+// NyxilumLang у системному режимі: друк значень і alloc. Компілюється разом
+// із кожною програмою. Без libc: лише syscall (write 1, mmap 9).
+
+var __nx_heap: ptr<uint8> = null
+var __nx_heap_end: ptr<uint8> = null
+
+func __nx_write(p: ptr<uint8>, n: int64) {
+    var done: int64 = 0
+    while done < n {
+        var r = syscall(1, 1, p + done, n - done)
+        if r <= 0 {
+            return
+        }
+        done = done + r
+    }
+}
+
+func __nx_print_nl() {
+    var b = stackbuf(16)
+    b[0] = 10
+    __nx_write(b, 1)
+}
+
+func __nx_print_str(s: ptr<uint8>) {
+    var n: int64 = 0
+    while s[n] != 0 {
+        n = n + 1
+    }
+    __nx_write(s, n)
+}
+
+func __nx_print_u64(v: uint64) {
+    var buf = stackbuf(32)
+    var i: int64 = 32
+    while true {
+        i = i - 1
+        buf[i] = uint8(v % 10 + 48)
+        v = v / 10
+        if v == 0 {
+            break
+        }
+    }
+    __nx_write(buf + i, 32 - i)
+}
+
+func __nx_print_i64(v: int64) {
+    if v < 0 {
+        __nx_print_str("-")
+        __nx_print_u64(uint64(0 - v))
+        return
+    }
+    __nx_print_u64(uint64(v))
+}
+
+func __nx_print_bool(b: bool) {
+    if b {
+        __nx_print_str("True")
+    } else {
+        __nx_print_str("False")
+    }
+}
+
+// Дробові: до 6 знаків після коми (точний найкоротший запис - етап S2).
+func __nx_print_f64(x: float64) {
+    if x != x {
+        __nx_print_str("NaN")
+        return
+    }
+    if float64Bits(x) < 0 {
+        __nx_print_str("-")
+        x = 0.0 - x
+    }
+    if x - x != x - x {
+        __nx_print_str("∞")
+        return
+    }
+    if x >= 1000000000000000000.0 {
+        var e: int64 = 0
+        while x >= 10.0 {
+            x = x / 10.0
+            e = e + 1
+        }
+        __nx_print_f64(x)
+        __nx_print_str("E+")
+        __nx_print_i64(e)
+        return
+    }
+    var ip = uint64(x)
+    var frac = x - float64(ip)
+    var f = uint64(frac * 1000000.0 + 0.5)
+    if f >= 1000000 {
+        ip = ip + 1
+        f = f - 1000000
+    }
+    __nx_print_u64(ip)
+    if f != 0 {
+        var buf = stackbuf(16)
+        buf[0] = 46
+        var k: int64 = 6
+        while k >= 1 {
+            buf[k] = uint8(f % 10 + 48)
+            f = f / 10
+            k = k - 1
+        }
+        var len: int64 = 7
+        while buf[len - 1] == 48 {
+            len = len - 1
+        }
+        __nx_write(buf, len)
+    }
+}
+
+// Пам'ять: шматки по 4 МБ з mmap, великі запити - окремим mmap. Без free (етап S3).
+func __nx_alloc(n: int64) -> ptr<void> {
+    n = (n + 15) & ~15
+    if n >= 1048576 {
+        return asptr(syscall(9, 0, n, 3, 34, -1, 0))
+    }
+    if __nx_heap == null || __nx_heap + n > __nx_heap_end {
+        var size: int64 = 4194304
+        __nx_heap = asptr(syscall(9, 0, size, 3, 34, -1, 0))
+        __nx_heap_end = __nx_heap + size
+    }
+    var p = __nx_heap
+    __nx_heap = __nx_heap + n
+    return p
+}

@@ -1,0 +1,88 @@
+// S1: вказівники, структури з розміткою як у C, методи, alloc, stackbuf, глобальні, адреси функцій
+struct Node {
+    tag: uint8
+    value: int64
+    next: ptr<Node>
+
+    func Node.sum() -> int64 {
+        var total: int64 = 0
+        var n = self
+        while n != null {
+            total = total + n.value
+            n = n.next
+        }
+        return total
+    }
+}
+
+struct Pixel {
+    r: uint8
+    g: uint8
+    b: uint8
+    a: uint16
+}
+
+var counter: int32 = 100
+var greeting: ptr<uint8> = "глобальний рядок"
+
+func twice(x: int64) -> int64 {
+    return x * 2
+}
+
+func fill(p: ptr<int32>, n: int64) {
+    for i in 0..n {
+        p[i] = int32(i * i)
+    }
+}
+
+func main() {
+    print(sizeof(Node))
+    print(sizeof(Pixel))
+    var head: ptr<Node> = null
+    for i in 1..6 {
+        var n = new(Node)
+        n.value = i * 10
+        n.tag = uint8(i)
+        n.next = head
+        head = n
+    }
+    print(head.sum())
+    print(head.next.tag)
+
+    var arr: ptr<int32> = alloc(10 * sizeof(int32))
+    fill(arr, 10)
+    print(arr[9])
+    var q = arr + 3
+    print(q[0])
+    print(q - arr)
+
+    var px = Pixel { r: 255, g: 128, b: 1, a: 65535 }
+    print(px.a)
+    var bytes: ptr<uint8> = asptr(px)
+    print(bytes[0] + bytes[1])
+
+    var buf = stackbuf(8)
+    buf[0] = 72
+    buf[1] = 105
+    buf[2] = 0
+    print(buf)
+
+    counter = counter + 1
+    print(counter)
+    print(greeting)
+
+    var f = funcaddr(twice)
+    print(callptr(f, 21))
+
+    var bits = float64Bits(1.0)
+    print(bits)
+    print(bitsToFloat64(bits) + 0.25)
+    var big: uint64 = 18446744073709551615
+    print(float64(big))
+    print(uint64(12345678901234567890.0))
+    var r = asm("mov $1234, %rax")
+    print(r)
+    put("без нового рядка ")
+    put(42)
+    print("")
+}

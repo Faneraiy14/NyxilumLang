@@ -89,10 +89,12 @@ public class Nx
         if (command == "compile-native" && args.Length > 1)
         {
             string? outPath = null;
+            bool objOnly = false;
             var target = NyxilumLang.Native.NativeTarget.Linux;
             for (int i = 2; i < args.Length; i++)
             {
                 if (args[i] == "-o" && i + 1 < args.Length) outPath = args[++i];
+                else if (args[i] == "--obj") objOnly = true;
                 else if (args[i] == "--target" && i + 1 < args.Length)
                 {
                     target = args[++i] switch
@@ -101,11 +103,12 @@ public class Nx
                         "nyxos-kernel" => NyxilumLang.Native.NativeTarget.NyxOSKernel,
                         "linux" => NyxilumLang.Native.NativeTarget.Linux,
                         "linux-arm64" or "android-arm64" => NyxilumLang.Native.NativeTarget.LinuxArm64,
+                        "linux-x64" => NyxilumLang.Native.NativeTarget.LinuxX64,
                         var unknown => UnknownNativeTarget(unknown),
                     };
                 }
             }
-            RunCompileNative(args[1], outPath, target);
+            RunCompileNative(args[1], outPath, target, objOnly);
             return;
         }
 
@@ -317,12 +320,12 @@ public class Nx
     // файлів (build.sh у репозиторії NyxOS), НЕ лінкується тут узагалі.
     private static NyxilumLang.Native.NativeTarget UnknownNativeTarget(string name)
     {
-        Console.WriteLine($"Error: невідома ціль '{name}'. Доступні: linux, linux-arm64 (= android-arm64), nyxos, nyxos-kernel");
+        Console.WriteLine($"Error: невідома ціль '{name}'. Доступні: linux, linux-x64 (системний режим), linux-arm64 (= android-arm64), nyxos, nyxos-kernel");
         Environment.Exit(1);
         return NyxilumLang.Native.NativeTarget.Linux;
     }
 
-    private static void RunCompileNative(string path, string? outPath, NyxilumLang.Native.NativeTarget target)
+    private static void RunCompileNative(string path, string? outPath, NyxilumLang.Native.NativeTarget target, bool objOnly = false)
     {
         if (!File.Exists(path))
         {
@@ -341,6 +344,23 @@ public class Nx
             var tokens = lexer.Tokenize();
             var parser = new Parser(tokens);
             var program = parser.ParseProgram();
+
+            if (target == NyxilumLang.Native.NativeTarget.LinuxX64)
+            {
+                // Системний режим x86-64 (SYSTEMS_ROADMAP.md, S1): статичні типи «як C»,
+                // System V ABI; --obj - лише .o без _start (щоб зшити з C чи іншим кодом).
+                string x64Asm = new NyxilumLang.Native.NativeCodegenX64().Compile(program, objOnly);
+                File.WriteAllText(asmPath, x64Asm);
+                RunShell("as", $"--64 {asmPath} -o {objPath}");
+                if (objOnly)
+                {
+                    Console.WriteLine($"✅ Об'єкт x86-64 (System V ABI): {objPath}");
+                    return;
+                }
+                RunShell("ld", $"-m elf_x86_64 {objPath} -o {outPath}");
+                Console.WriteLine($"✅ Скомпільовано в ELF x86-64: {outPath}");
+                return;
+            }
 
             if (target == NyxilumLang.Native.NativeTarget.LinuxArm64)
             {

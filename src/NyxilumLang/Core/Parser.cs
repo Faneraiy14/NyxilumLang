@@ -651,7 +651,7 @@ public class Parser
     {
         var token = Peek();
         
-        if (token.Type == TokenType.Number) { Advance(); return new LiteralExpression(double.Parse(token.Value, CultureInfo.InvariantCulture)); }
+        if (token.Type == TokenType.Number) { Advance(); return new LiteralExpression(double.Parse(token.Value, CultureInfo.InvariantCulture)) { Raw = token.Value }; }
         if (token.Type == TokenType.String) { Advance(); return new LiteralExpression(token.Value); }
         if (token.Type == TokenType.Boolean) { Advance(); return new LiteralExpression(bool.Parse(token.Value)); }
         if (token.Type == TokenType.Keyword && token.Value == "null") { Advance(); return new LiteralExpression(null!); }

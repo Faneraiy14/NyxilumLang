@@ -1,0 +1,7 @@
+func main() {
+    var x: int64 = 5
+    if x {
+        print(1)
+    }
+}
+// expect-error: умова має бути bool

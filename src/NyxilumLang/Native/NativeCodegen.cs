@@ -18,7 +18,7 @@ namespace NyxilumLang.Native;
 // - кожна функція верхнього рівня стає незалежним, викликаним ІЗ C
 // символом, готовим додати до `ld`-виклику збірки ядра поряд з рештою
 // `.o`.
-public enum NativeTarget { Linux, NyxOS, NyxOSKernel, LinuxArm64 }
+public enum NativeTarget { Linux, NyxOS, NyxOSKernel, LinuxArm64, LinuxX64 }
 
 // Статичний тип виразу, визначений НА ЕТАПІ КОМПІЛЯЦІЇ (без цього
 // компілятор не знав би, у якому регістрі шукати результат виразу -

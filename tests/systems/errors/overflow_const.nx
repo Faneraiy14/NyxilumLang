@@ -1,0 +1,4 @@
+func main() {
+    var a: uint8 = 300
+}
+// expect-error: не вміщається в uint8

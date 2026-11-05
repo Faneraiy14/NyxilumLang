@@ -90,6 +90,12 @@ jobs:
         working-directory: NyxilumLang
         run: NX="$(pwd)/src/NyxilumLang/bin/Release/net10.0/Nx" bash tests/native/run_native.sh
 
+      # Системний бекенд x86-64 (SYSTEMS_ROADMAP.md, S1): вивід програм, зшивка з C
+      # через System V ABI і вся ціла арифметика побайтово проти gcc.
+      - name: Run systems backend tests (x86-64 vs C)
+        working-directory: NyxilumLang
+        run: NX="$(pwd)/src/NyxilumLang/bin/Release/net10.0/Nx" bash tests/systems/run_systems.sh
+
   build-windows:
     # Окрема перевірка, що WinForms-гілка (#if WINDOWS: guiWindow,
     # createCanvas тощо) досі компілюється — run_all.sh її не зачіпає,

@@ -1,0 +1,47 @@
+// S1: цілі типи, дробові, bool, рекурсія, цикли
+// expect-exit: 3
+func fact(n: int64) -> int64 {
+    if n <= 1 {
+        return 1
+    }
+    return n * fact(n - 1)
+}
+
+func main() -> int32 {
+    print("Привіт із x86-64")
+    print(fact(20))
+    var big: int64 = 9223372036854775807
+    print(big)
+    print(big + 1)
+    var u: uint64 = 18446744073709551615
+    print(u)
+    var b: uint8 = 250
+    b = b + 10
+    print(b)
+    var s: int8 = 127
+    s = s + 1
+    print(s)
+    var x: int32 = -7
+    print(x / 2)
+    print(x % 2)
+    print(x >> 1)
+    var ux = uint32(x)
+    print(ux)
+    print(ux >> 1)
+    var sum: int64 = 0
+    for i in 0..10 {
+        if i == 5 {
+            continue
+        }
+        sum = sum + i
+    }
+    print(sum)
+    var f = 1.5
+    print(f * 3.0)
+    print(float64(fact(10)) / 7.0)
+    print(int64(-2.9))
+    print(3 < 4 && !(2 > 3))
+    print(0x10 | 0x01)
+    print(1 << 40)
+    return 3
+}

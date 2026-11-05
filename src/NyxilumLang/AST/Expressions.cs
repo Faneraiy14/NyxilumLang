@@ -3,6 +3,8 @@ namespace NyxilumLang.AST;
 public class LiteralExpression : ExpressionNode
 {
     public object Value { get; }
+    // Текст числа з коду, як є (системний бекенд x86-64 читає int64/uint64 без втрати точності double)
+    public string? Raw { get; set; }
     public LiteralExpression(object value) => Value = value;
     public override string ToString(int indent = 0) => new string(' ', indent) + $"Literal: {Value}";
 }

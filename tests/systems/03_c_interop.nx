@@ -1,0 +1,41 @@
+// S1: зшивка з C (System V ABI). Компілюється з --obj і лінкується з c/03_c_interop.c,
+// яка викликає ці функції й сама надає c_add/c_scale, що їх викликає NyxilumLang.
+struct Rec {
+    a: int8
+    b: int32
+    c: float64
+    d: uint16
+    p: ptr<uint8>
+}
+
+func nx_mix(a: int32, b: float64, c: uint8, d: float64, e: int64, f: ptr<Rec>) -> float64 {
+    return float64(a) + b + float64(c) + d + float64(e) + f.c
+}
+
+func nx_fill(r: ptr<Rec>) {
+    r.a = -5
+    r.b = 1000000
+    r.c = 2.5
+    r.d = 65000
+    r.p = "з NyxilumLang"
+}
+
+func nx_sum(p: ptr<int64>, n: int64) -> int64 {
+    var s: int64 = 0
+    for i in 0..n {
+        s = s + p[i]
+    }
+    return s
+}
+
+func nx_udiv(a: uint64, b: uint64) -> uint64 {
+    return a / b
+}
+
+func nx_sdiv(a: int32, b: int32) -> int32 {
+    return a / b
+}
+
+func nx_rec_size() -> int64 {
+    return sizeof(Rec)
+}
