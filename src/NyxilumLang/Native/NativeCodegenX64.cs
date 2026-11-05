@@ -431,6 +431,7 @@ public sealed class NativeCodegenX64
             }
             case IfStatement ifs:
             {
+                if (TryJumpTable(ifs)) break;
                 string elseL = NewLabel("else"), endL = NewLabel("endif");
                 Cond(ifs.Condition, elseL);
                 Block(ifs.ThenBlock);
@@ -500,6 +501,70 @@ public sealed class NativeCodegenX64
             case FunctionDeclaration: throw Err("вкладені функції в системному режимі ще не підтримуються");
             default: throw Err($"інструкція {st.GetType().Name} ще не підтримується в системному режимі");
         }
+    }
+
+    // S4: ланцюжок «if x == 1 {..} else if x == 2 {..} ... else {..}» по одній цілій змінній і сталих -
+    // таблиця переходів (один непрямий стрибок замість N порівнянь), як switch у C. Синтаксис мови той самий.
+    bool TryJumpTable(IfStatement first)
+    {
+        string? var = null;
+        T? vt = null;
+        var cases = new List<(long Val, BlockStatement Body)>();
+        BlockStatement? dflt = null;
+        IfStatement? cur = first;
+        while (cur != null)
+        {
+            if (cur.Condition is not BinaryExpression { Operator: "==" } eq) return false;
+            ExpressionNode? lhs = null, rhs = null;
+            if (eq.Left is VariableExpression && IsIntLit(eq.Right)) { lhs = eq.Left; rhs = eq.Right; }
+            else if (eq.Right is VariableExpression && IsIntLit(eq.Left)) { lhs = eq.Right; rhs = eq.Left; }
+            else return false;
+            string name = ((VariableExpression)lhs).Name;
+            if (var == null)
+            {
+                var = name;
+                if (TryLocal(name, out var lv)) vt = lv.Type;
+                else if (_globals.TryGetValue(name, out var gv)) vt = gv.Type;
+                else return false;
+                if (!vt.IsInt) return false;
+            }
+            else if (name != var) return false;
+            long c;
+            try { c = ConstInt(rhs, vt!); } catch (Exception) { return false; }
+            if (cases.Any(x => x.Val == c)) return false;
+            cases.Add((c, cur.ThenBlock));
+            if (cur.ElseBlock is { Statements: [IfStatement next] }) cur = next;
+            else { dflt = cur.ElseBlock; cur = null; }
+        }
+        if (cases.Count < 4) return false;
+        long min = cases.Min(x => x.Val), max = cases.Max(x => x.Val);
+        long range = vt!.Signed ? max - min : (long)((ulong)max - (ulong)min);
+        if (range < 0 || range > 4096 || range > cases.Count * 4 + 16) return false;
+
+        string tbl = NewLabel("jt"), def = NewLabel("jtdef"), end = NewLabel("jtend");
+        Gen(new VariableExpression(var!), null);
+        if (min != 0) { E($"movabs ${min}, %rcx"); E("sub %rcx, %rax"); }
+        E($"cmp ${range}, %rax");
+        E($"ja {def}");
+        E($"lea {tbl}(%rip), %rcx");
+        E("movslq (%rcx,%rax,4), %rdx");
+        E("add %rcx, %rdx");
+        E("jmp *%rdx");
+        E(".balign 4");
+        L(tbl);
+        var labels = cases.ToDictionary(x => x.Val, _ => NewLabel("case"));
+        for (long v = 0; v <= range; v++)
+            E($".long {(labels.TryGetValue(min + v, out var lb) ? lb : def)} - {tbl}");
+        foreach (var (val, body) in cases)
+        {
+            L(labels[val]);
+            Block(body);
+            E($"jmp {end}");
+        }
+        L(def);
+        if (dflt != null) Block(dflt);
+        L(end);
+        return true;
     }
 
     void Block(BlockStatement b)
