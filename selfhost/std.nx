@@ -1,0 +1,322 @@
+// Базові структури для компілятора NyxilumLang на самій NyxilumLang (S8, SYSTEMS_ROADMAP.md).
+// Системний режим x86-64: nx compile-native файл.nx --target linux-x64
+//
+//   StrBuf - рядок, що росте (байти UTF-8; завжди з нулем у кінці - cstr() без копії)
+//   Vec    - список int64 (і вказівників через int64(p) / asptr(v))
+//   Map    - рядок -> int64, відкрита адресація, FNV-1a; ключі копіюються
+
+// ---------- StrBuf ----------
+struct StrBuf {
+    data: ptr<uint8>
+    len: int64
+    cap: int64
+
+    // місце ще під n байтів (і нуль у кінці)
+    func StrBuf.reserve(n: int64) {
+        var need = self.len + n + 1
+        if need <= self.cap {
+            return
+        }
+        var c = self.cap * 2
+        if c < need {
+            c = need
+        }
+        self.data = asptr(realloc(self.data, c))
+        self.cap = c
+    }
+
+    func StrBuf.byte(b: int64) {
+        self.reserve(1)
+        self.data[self.len] = uint8(b)
+        self.len = self.len + 1
+        self.data[self.len] = 0
+    }
+
+    func StrBuf.addN(p: ptr<uint8>, n: int64) {
+        if n <= 0 {
+            return
+        }
+        self.reserve(n)
+        memcpy(self.data + self.len, p, n)
+        self.len = self.len + n
+        self.data[self.len] = 0
+    }
+
+    func StrBuf.add(s: ptr<uint8>) {
+        self.addN(s, strLen(s))
+    }
+
+    func StrBuf.addInt(v: int64) {
+        var tmp = stackbuf(32)
+        var n = fmtInt(tmp, v)
+        self.addN(tmp, n)
+    }
+
+    func StrBuf.addBuf(o: ptr<StrBuf>) {
+        self.addN(o.data, o.len)
+    }
+
+    func StrBuf.clear() {
+        self.len = 0
+        self.data[0] = 0
+    }
+
+    func StrBuf.cstr() -> ptr<uint8> {
+        return self.data
+    }
+
+    // окрема копія вмісту (alloc; звільняти free)
+    func StrBuf.dup() -> ptr<uint8> {
+        var r: ptr<uint8> = asptr(alloc(self.len + 1))
+        memcpy(r, self.data, self.len + 1)
+        return r
+    }
+
+    func StrBuf.eq(s: ptr<uint8>) -> bool {
+        return strEq(self.data, s)
+    }
+
+    func StrBuf.release() {
+        free(self.data)
+        free(self)
+    }
+}
+
+func strBufNew() -> ptr<StrBuf> {
+    var b = new(StrBuf)
+    b.cap = 16
+    b.len = 0
+    b.data = asptr(alloc(16))
+    b.data[0] = 0
+    return b
+}
+
+// копія n байтів з p як рядок з нулем (alloc)
+func strNDup(p: ptr<uint8>, n: int64) -> ptr<uint8> {
+    var r: ptr<uint8> = asptr(alloc(n + 1))
+    memcpy(r, p, n)
+    r[n] = 0
+    return r
+}
+
+// n байтів однакові?
+func memEq(a: ptr<uint8>, b: ptr<uint8>, n: int64) -> bool {
+    var i: int64 = 0
+    while i < n {
+        if a[i] != b[i] {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+// ---------- Vec ----------
+struct Vec {
+    data: ptr<int64>
+    len: int64
+    cap: int64
+
+    func Vec.push(v: int64) {
+        if self.len == self.cap {
+            var c = self.cap * 2
+            if c < 8 {
+                c = 8
+            }
+            self.data = asptr(realloc(self.data, c * 8))
+            self.cap = c
+        }
+        self.data[self.len] = v
+        self.len = self.len + 1
+    }
+
+    func Vec.pushPtr(p: ptr<void>) {
+        self.push(int64(p))
+    }
+
+    func Vec.get(i: int64) -> int64 {
+        if i < 0 || i >= self.len {
+            __nx_print_str("Vec.get: індекс поза межами ")
+            __nx_print_i64(i)
+            __nx_print_nl()
+            exit(70)
+        }
+        return self.data[i]
+    }
+
+    func Vec.getPtr(i: int64) -> ptr<void> {
+        return asptr(self.get(i))
+    }
+
+    func Vec.set(i: int64, v: int64) {
+        if i < 0 || i >= self.len {
+            __nx_print_str("Vec.set: індекс поза межами ")
+            __nx_print_i64(i)
+            __nx_print_nl()
+            exit(70)
+        }
+        self.data[i] = v
+    }
+
+    func Vec.pop() -> int64 {
+        if self.len == 0 {
+            __nx_print_str("Vec.pop: порожній список")
+            __nx_print_nl()
+            exit(70)
+        }
+        self.len = self.len - 1
+        return self.data[self.len]
+    }
+
+    func Vec.last() -> int64 {
+        return self.get(self.len - 1)
+    }
+
+    func Vec.release() {
+        free(self.data)
+        free(self)
+    }
+}
+
+func vecNew() -> ptr<Vec> {
+    var v = new(Vec)
+    v.len = 0
+    v.cap = 0
+    v.data = asptr(0)
+    return v
+}
+
+// ---------- Map: рядок -> int64 ----------
+// Комірка порожня, коли key == null. Видалення немає (компілятору не потрібне).
+struct MapSlot {
+    key: ptr<uint8>
+    klen: int64
+    hash: int64
+    val: int64
+}
+
+func fnv1a(p: ptr<uint8>, n: int64) -> int64 {
+    var h: int64 = 0 - 3750763034362895579   // 14695981039346656037 як int64
+    var i: int64 = 0
+    while i < n {
+        h = h ^ int64(p[i])
+        h = h * 1099511628211
+        i = i + 1
+    }
+    return h
+}
+
+struct Map {
+    slots: ptr<MapSlot>
+    cap: int64
+    len: int64
+
+    // індекс комірки з цим ключем або порожньої, куди його класти
+    func Map.find(k: ptr<uint8>, n: int64, h: int64) -> int64 {
+        var mask = self.cap - 1
+        var i = h & mask
+        while true {
+            var s = self.slots + i
+            if s.key == null {
+                return i
+            }
+            if s.hash == h && s.klen == n && memEq(s.key, k, n) {
+                return i
+            }
+            i = (i + 1) & mask
+        }
+        return 0 - 1
+    }
+
+    func Map.grow() {
+        var old = self.slots
+        var oldCap = self.cap
+        self.cap = oldCap * 2
+        self.slots = asptr(alloc(self.cap * sizeof(MapSlot)))
+        memset(self.slots, 0, self.cap * sizeof(MapSlot))
+        var i: int64 = 0
+        while i < oldCap {
+            var s = old + i
+            if s.key != null {
+                var j = self.find(s.key, s.klen, s.hash)
+                memcpy(self.slots + j, s, sizeof(MapSlot))
+            }
+            i = i + 1
+        }
+        free(old)
+    }
+
+    func Map.putN(k: ptr<uint8>, n: int64, v: int64) {
+        if (self.len + 1) * 4 > self.cap * 3 {
+            self.grow()
+        }
+        var h = fnv1a(k, n)
+        var s = self.slots + self.find(k, n, h)
+        if s.key == null {
+            s.key = strNDup(k, n)
+            s.klen = n
+            s.hash = h
+            self.len = self.len + 1
+        }
+        s.val = v
+    }
+
+    func Map.put(k: ptr<uint8>, v: int64) {
+        self.putN(k, strLen(k), v)
+    }
+
+    func Map.hasN(k: ptr<uint8>, n: int64) -> bool {
+        var s = self.slots + self.find(k, n, fnv1a(k, n))
+        return s.key != null
+    }
+
+    func Map.has(k: ptr<uint8>) -> bool {
+        return self.hasN(k, strLen(k))
+    }
+
+    // значення або def, якщо ключа нема
+    func Map.getN(k: ptr<uint8>, n: int64, def: int64) -> int64 {
+        var s = self.slots + self.find(k, n, fnv1a(k, n))
+        if s.key == null {
+            return def
+        }
+        return s.val
+    }
+
+    func Map.get(k: ptr<uint8>, def: int64) -> int64 {
+        return self.getN(k, strLen(k), def)
+    }
+
+    // обхід: for i in 0..m.cap { if m.keyAt(i) != null { ... } }
+    func Map.keyAt(i: int64) -> ptr<uint8> {
+        var s = self.slots + i
+        return s.key
+    }
+
+    func Map.valAt(i: int64) -> int64 {
+        var s = self.slots + i
+        return s.val
+    }
+
+    func Map.release() {
+        var i: int64 = 0
+        while i < self.cap {
+            var s = self.slots + i
+            if s.key != null {
+                free(s.key)
+            }
+            i = i + 1
+        }
+        free(self.slots)
+        free(self)
+    }
+}
+
+func mapNew() -> ptr<Map> {
+    var m = new(Map)
+    m.cap = 16
+    m.len = 0
+    m.slots = asptr(alloc(16 * sizeof(MapSlot)))
+    memset(m.slots, 0, 16 * sizeof(MapSlot))
+    return m
+}

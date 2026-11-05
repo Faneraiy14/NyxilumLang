@@ -1,0 +1,84 @@
+// S8 крок 2: selfhost/std.nx - StrBuf, Vec, Map; великі обсяги й порівняння з простою моделлю
+import "../../selfhost/std.nx"
+
+func main() {
+    // StrBuf: рядок росте з 16 байт до ~600 КБ
+    var b = strBufNew()
+    b.add("привіт")
+    b.byte(44)
+    b.byte(32)
+    b.addInt(0 - 9223372036854775807 - 1)
+    print(b.cstr())
+    print(b.len)
+    b.clear()
+    for i in 0..100000 {
+        b.addInt(i % 10)
+        b.addN("abcde", 5)
+    }
+    print(b.len)
+    var c = b.dup()
+    print(strLen(c) == b.len && c[599999] == 101 && c[6] == 49)
+    free(c)
+
+    // Vec: 1 млн елементів, pop, вказівники
+    var v = vecNew()
+    for i in 0..1000000 {
+        v.push(i * 3)
+    }
+    var sum: int64 = 0
+    for i in 0..1000000 {
+        sum = sum + v.get(i)
+    }
+    print(v.len)
+    print(sum)
+    print(v.pop())
+    print(v.last())
+    v.set(0, 77)
+    print(v.get(0))
+    var pv = vecNew()
+    pv.pushPtr(asptr(b))
+    var bb: ptr<StrBuf> = asptr(pv.getPtr(0))
+    print(bb.len)
+
+    // Map: 200 тис. ключів "k<i>", перезапис, відсутні, кирилиця, ключ-зріз
+    var m = mapNew()
+    var kb = strBufNew()
+    for i in 0..200000 {
+        kb.clear()
+        kb.byte(107)
+        kb.addInt(i)
+        m.put(kb.cstr(), i * 2)
+    }
+    print(m.len)
+    var ok = true
+    for i in 0..200000 {
+        kb.clear()
+        kb.byte(107)
+        kb.addInt(i)
+        if m.get(kb.cstr(), 0 - 1) != i * 2 {
+            ok = false
+        }
+    }
+    print(ok)
+    print(m.get("k200000", 0 - 1))
+    print(m.has("k5"))
+    m.put("k5", 555)
+    print(m.get("k5", 0))
+    print(m.len)
+    m.put("функція", 42)
+    print(m.getN("функція_інше", 14, 0))
+    print(m.has(""))
+    m.put("", 1)
+    print(m.has(""))
+    var cnt: int64 = 0
+    for i in 0..m.cap {
+        if m.keyAt(i) != null {
+            cnt = cnt + 1
+        }
+    }
+    print(cnt == m.len)
+    m.release()
+    kb.release()
+    b.release()
+    v.release()
+}
