@@ -430,13 +430,13 @@ public class Nx
                 program = ModuleResolver.ResolveImports(program, path);
                 string x64Asm = new NyxilumLang.Native.NativeCodegenX64().Compile(program, objOnly);
                 File.WriteAllText(asmPath, x64Asm);
-                RunShell("as", $"--64 {asmPath} -o {objPath}");
+                RunShell("as", "--64", asmPath, "-o", objPath);
                 if (objOnly)
                 {
                     Console.WriteLine($"✅ Об'єкт x86-64 (System V ABI): {objPath}");
                     return;
                 }
-                RunShell("ld", $"-m elf_x86_64 {objPath} -o {outPath}");
+                RunShell("ld", "-m", "elf_x86_64", objPath, "-o", outPath);
                 Console.WriteLine($"✅ Скомпільовано в ELF x86-64: {outPath}");
                 return;
             }
@@ -451,8 +451,8 @@ public class Nx
                 string armAsm = new NyxilumLang.Native.NativeCodegenArm64().Compile(program);
                 File.WriteAllText(asmPath, armAsm);
                 Console.WriteLine($"Асемблер записано: {asmPath}");
-                RunShell("aarch64-linux-gnu-as", $"{asmPath} -o {objPath}");
-                RunShell("aarch64-linux-gnu-ld", $"-static -z max-page-size=16384 {objPath} -o {outPath}");
+                RunShell("aarch64-linux-gnu-as", asmPath, "-o", objPath);
+                RunShell("aarch64-linux-gnu-ld", "-static", "-z", "max-page-size=16384", objPath, "-o", outPath);
                 Console.WriteLine($"✅ Скомпільовано в ARM64 ELF-бінарник: {outPath} (Android: Termux чи adb shell)");
                 return;
             }
@@ -462,11 +462,11 @@ public class Nx
             File.WriteAllText(asmPath, asmText);
             Console.WriteLine($"Асемблер записано: {asmPath}");
 
-            RunShell("as", $"--32 {asmPath} -o {objPath}");
+            RunShell("as", "--32", asmPath, "-o", objPath);
 
             if (target == NyxilumLang.Native.NativeTarget.Linux)
             {
-                RunShell("ld", $"-m elf_i386 {objPath} -o {outPath}");
+                RunShell("ld", "-m", "elf_i386", objPath, "-o", outPath);
                 Console.WriteLine($"✅ Скомпільовано в СПРАВЖНІЙ ELF-бінарник: {outPath}");
             }
             else if (target == NyxilumLang.Native.NativeTarget.NyxOSKernel)
@@ -500,8 +500,8 @@ public class Nx
                     }
                     """);
                 string elfPath = outPath + ".elf";
-                RunShell("ld", $"-m elf_i386 -T {ldScriptPath} -o {elfPath} {objPath}");
-                RunShell("objcopy", $"-O binary {elfPath} {outPath}.bin");
+                RunShell("ld", "-m", "elf_i386", "-T", ldScriptPath, "-o", elfPath, objPath);
+                RunShell("objcopy", "-O", "binary", elfPath, $"{outPath}.bin");
                 Console.WriteLine($"✅ Скомпільовано в ПЛАСКИЙ бінарник для NyxOS: {outPath}.bin");
                 Console.WriteLine("   Встанови на NyxOS через пакетний менеджер (make-pkg.py у репозиторії NyxOS) чи install-hello-стиль вбудовування, потім \"run <файл>.bin\".");
             }
@@ -513,14 +513,17 @@ public class Nx
         }
     }
 
-    private static void RunShell(string cmd, string args)
+    // кожен аргумент окремо (ArgumentList) - шляхи з пробілами не розпадаються
+    private static void RunShell(string cmd, params string[] argv)
     {
-        var psi = new System.Diagnostics.ProcessStartInfo(cmd, args)
+        string args = string.Join(" ", argv);
+        var psi = new System.Diagnostics.ProcessStartInfo(cmd)
         {
             RedirectStandardError = true,
             RedirectStandardOutput = true,
             UseShellExecute = false,
         };
+        foreach (var a in argv) psi.ArgumentList.Add(a);
         using var proc = System.Diagnostics.Process.Start(psi)!;
         string stderr = proc.StandardError.ReadToEnd();
         proc.WaitForExit();
