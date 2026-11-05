@@ -1,0 +1,396 @@
+// Дерево розбору NyxilumLang на Nx (S8 крок 4) - один вид вузла на всі оператори й вирази,
+// поля значать різне залежно від kind (див. таблицю нижче). Відповідає AST/*.cs.
+// astDump - той самий текст, що `nx dump-ast` (Tools/AstSexprDumper.cs).
+import "std.nx"
+
+// оператори
+var N_EXPR: int64 = 1       // a = вираз
+var N_VAR: int64 = 2        // s1 ім'я, s2 тип|null, a ініціалізатор|null, flag volatile
+var N_IF: int64 = 3         // a умова, b then, c else|null
+var N_WHILE: int64 = 4      // a умова, b тіло
+var N_FOR: int64 = 5        // s1 змінна, a початок, b кінець|null, c тіло
+var N_BLOCK: int64 = 6      // list оператори
+var N_RETURN: int64 = 7     // a значення|null
+var N_PRINT: int64 = 8      // a вираз
+var N_FUNC: int64 = 9       // s1 ім'я (S.m для методів), s2 тип результату|null, list параметри, b тіло, flag naked
+var N_STRUCT: int64 = 10    // s1 ім'я, s2 батько|null, list поля (N_PARAM), list2 методи (N_FUNC)
+var N_TRY: int64 = 11       // a try-блок, s2 змінна catch, b catch-блок
+var N_IMPORT: int64 = 12    // s1 шлях, list2 імена (N_PARAM з s1) або null
+var N_BREAK: int64 = 13
+var N_CONTINUE: int64 = 14
+var N_THROW: int64 = 15     // a значення
+// вирази
+var N_NUM: int64 = 20       // s1 сирий запис; flag 1 - синтетична 1 з x++ / x--
+var N_STR: int64 = 21       // s1 значення, len довжина (може мати \0)
+var N_BOOL: int64 = 22      // flag 1/0
+var N_NULL: int64 = 23
+var N_NAME: int64 = 24      // s1 ім'я змінної
+var N_BIN: int64 = 25       // s1 оператор, a ліво, b право
+var N_UNARY: int64 = 26     // s1 оператор, a операнд
+var N_CALL: int64 = 27      // s1 ім'я функції, list аргументи
+var N_ARRAY: int64 = 28     // list елементи
+var N_INDEX: int64 = 29     // a масив, b індекс
+var N_MEMBER: int64 = 30    // a об'єкт, s2 поле
+var N_NEW: int64 = 31       // s1 структура, list поля (N_PARAM: s1 ім'я, a значення)
+var N_LAMBDA: int64 = 32    // list параметри, b тіло
+var N_CALLV: int64 = 33     // a що викликати, list аргументи
+var N_MCALL: int64 = 34     // a об'єкт, s2 метод, list аргументи
+var N_PARAM: int64 = 40     // s1 ім'я, s2 тип; у N_NEW - a значення
+
+struct Node {
+    kind: int64
+    line: int64
+    s1: ptr<uint8>
+    len: int64
+    s2: ptr<uint8>
+    a: ptr<Node>
+    b: ptr<Node>
+    c: ptr<Node>
+    list: ptr<Vec>
+    list2: ptr<Vec>
+    flag: int64
+}
+
+func nodeNew(kind: int64) -> ptr<Node> {
+    var n = new(Node)
+    memset(n, 0, sizeof(Node))
+    n.kind = kind
+    return n
+}
+
+func nodeAt(v: ptr<Vec>, i: int64) -> ptr<Node> {
+    return asptr(v.get(i))
+}
+
+// ---------- дамп (як AstSexprDumper.cs) ----------
+func dumpPad(sb: ptr<StrBuf>, d: int64) {
+    var i: int64 = 0
+    while i < d * 2 {
+        sb.byte(32)
+        i = i + 1
+    }
+}
+
+func dumpStr(sb: ptr<StrBuf>, p: ptr<uint8>, n: int64) {
+    sb.byte(34)
+    var i: int64 = 0
+    while i < n {
+        var c = int64(p[i])
+        if c == 92 {
+            sb.add("\\\\")
+        } else if c == 34 {
+            sb.add("\\\"")
+        } else if c == 10 {
+            sb.add("\\n")
+        } else if c == 9 {
+            sb.add("\\t")
+        } else if c == 13 {
+            sb.add("\\r")
+        } else if c == 0 {
+            sb.add("\\0")
+        } else {
+            sb.byte(c)
+        }
+        i = i + 1
+    }
+    sb.byte(34)
+}
+
+func dumpOpt(sb: ptr<StrBuf>, s: ptr<uint8>) {
+    if s == null {
+        sb.byte(95)
+    } else {
+        sb.add(s)
+    }
+}
+
+func dumpHead(sb: ptr<StrBuf>, name: ptr<uint8>, line: int64) {
+    sb.byte(40)
+    sb.add(name)
+    sb.byte(64)
+    sb.addInt(line)
+}
+
+func dumpBlock(sb: ptr<StrBuf>, b: ptr<Node>, d: int64) {
+    if b == null {
+        sb.byte(95)
+        return
+    }
+    dumpHead(sb, "block", b.line)
+    var i: int64 = 0
+    while i < b.list.len {
+        sb.byte(10)
+        dumpPad(sb, d + 1)
+        dumpStmt(sb, nodeAt(b.list, i), d + 1)
+        i = i + 1
+    }
+    sb.byte(41)
+}
+
+func dumpParams(sb: ptr<StrBuf>, ps: ptr<Vec>) {
+    sb.byte(40)
+    var i: int64 = 0
+    while i < ps.len {
+        if i > 0 {
+            sb.byte(32)
+        }
+        var p = nodeAt(ps, i)
+        sb.add(p.s1)
+        sb.byte(58)
+        sb.add(p.s2)
+        i = i + 1
+    }
+    sb.byte(41)
+}
+
+func dumpStmt(sb: ptr<StrBuf>, s: ptr<Node>, d: int64) {
+    var k = s.kind
+    if k == N_EXPR {
+        dumpHead(sb, "expr", s.line)
+        sb.byte(32)
+        dumpExpr(sb, s.a, d)
+        sb.byte(41)
+    } else if k == N_VAR {
+        dumpHead(sb, "var", s.line)
+        sb.byte(32)
+        sb.add(s.s1)
+        sb.byte(32)
+        dumpOpt(sb, s.s2)
+        if s.flag != 0 {
+            sb.add(" volatile ")
+        } else {
+            sb.byte(32)
+        }
+        if s.a == null {
+            sb.byte(95)
+        } else {
+            dumpExpr(sb, s.a, d)
+        }
+        sb.byte(41)
+    } else if k == N_IF {
+        dumpHead(sb, "if", s.line)
+        sb.byte(32)
+        dumpExpr(sb, s.a, d)
+        sb.byte(32)
+        dumpBlock(sb, s.b, d)
+        sb.byte(32)
+        dumpBlock(sb, s.c, d)
+        sb.byte(41)
+    } else if k == N_WHILE {
+        dumpHead(sb, "while", s.line)
+        sb.byte(32)
+        dumpExpr(sb, s.a, d)
+        sb.byte(32)
+        dumpBlock(sb, s.b, d)
+        sb.byte(41)
+    } else if k == N_FOR {
+        dumpHead(sb, "for", s.line)
+        sb.byte(32)
+        sb.add(s.s1)
+        sb.byte(32)
+        dumpExpr(sb, s.a, d)
+        sb.byte(32)
+        if s.b == null {
+            sb.byte(95)
+        } else {
+            dumpExpr(sb, s.b, d)
+        }
+        sb.byte(32)
+        dumpBlock(sb, s.c, d)
+        sb.byte(41)
+    } else if k == N_BLOCK {
+        dumpBlock(sb, s, d)
+    } else if k == N_RETURN {
+        dumpHead(sb, "return", s.line)
+        sb.byte(32)
+        if s.a == null {
+            sb.byte(95)
+        } else {
+            dumpExpr(sb, s.a, d)
+        }
+        sb.byte(41)
+    } else if k == N_PRINT {
+        dumpHead(sb, "print", s.line)
+        sb.byte(32)
+        dumpExpr(sb, s.a, d)
+        sb.byte(41)
+    } else if k == N_FUNC {
+        dumpHead(sb, "func", s.line)
+        sb.byte(32)
+        sb.add(s.s1)
+        sb.byte(32)
+        dumpParams(sb, s.list)
+        sb.add(" -> ")
+        dumpOpt(sb, s.s2)
+        if s.flag != 0 {
+            sb.add(" naked ")
+        } else {
+            sb.byte(32)
+        }
+        dumpBlock(sb, s.b, d)
+        sb.byte(41)
+    } else if k == N_STRUCT {
+        dumpHead(sb, "struct", s.line)
+        sb.byte(32)
+        sb.add(s.s1)
+        sb.add(" extends ")
+        dumpOpt(sb, s.s2)
+        sb.byte(32)
+        dumpParams(sb, s.list)
+        var i: int64 = 0
+        while i < s.list2.len {
+            sb.byte(10)
+            dumpPad(sb, d + 1)
+            dumpStmt(sb, nodeAt(s.list2, i), d + 1)
+            i = i + 1
+        }
+        sb.byte(41)
+    } else if k == N_TRY {
+        dumpHead(sb, "try", s.line)
+        sb.byte(32)
+        dumpBlock(sb, s.a, d)
+        sb.add(" catch ")
+        sb.add(s.s2)
+        sb.byte(32)
+        dumpBlock(sb, s.b, d)
+        sb.byte(41)
+    } else if k == N_IMPORT {
+        dumpHead(sb, "import", s.line)
+        sb.byte(32)
+        dumpStr(sb, s.s1, s.len)
+        if s.list2 != null {
+            sb.add(" {")
+            var i: int64 = 0
+            while i < s.list2.len {
+                sb.byte(32)
+                sb.add(nodeAt(s.list2, i).s1)
+                i = i + 1
+            }
+            sb.add(" }")
+        }
+        sb.byte(41)
+    } else if k == N_BREAK {
+        dumpHead(sb, "break", s.line)
+        sb.byte(41)
+    } else if k == N_CONTINUE {
+        dumpHead(sb, "continue", s.line)
+        sb.byte(41)
+    } else if k == N_THROW {
+        dumpHead(sb, "throw", s.line)
+        sb.byte(32)
+        dumpExpr(sb, s.a, d)
+        sb.byte(41)
+    } else {
+        sb.add("(?)")
+    }
+}
+
+func dumpArgs(sb: ptr<StrBuf>, args: ptr<Vec>, d: int64) {
+    var i: int64 = 0
+    while i < args.len {
+        sb.byte(32)
+        dumpExpr(sb, nodeAt(args, i), d)
+        i = i + 1
+    }
+}
+
+func dumpExpr(sb: ptr<StrBuf>, e: ptr<Node>, d: int64) {
+    var k = e.kind
+    if k == N_NUM {
+        if e.flag != 0 {
+            sb.byte(35)
+        }
+        sb.add(e.s1)
+    } else if k == N_STR {
+        dumpStr(sb, e.s1, e.len)
+    } else if k == N_BOOL {
+        if e.flag != 0 {
+            sb.add("true")
+        } else {
+            sb.add("false")
+        }
+    } else if k == N_NULL {
+        sb.add("null")
+    } else if k == N_NAME {
+        sb.add(e.s1)
+    } else if k == N_BIN {
+        sb.byte(40)
+        sb.add(e.s1)
+        sb.byte(32)
+        dumpExpr(sb, e.a, d)
+        sb.byte(32)
+        dumpExpr(sb, e.b, d)
+        sb.byte(41)
+    } else if k == N_UNARY {
+        sb.add("(u")
+        sb.add(e.s1)
+        sb.byte(32)
+        dumpExpr(sb, e.a, d)
+        sb.byte(41)
+    } else if k == N_CALL {
+        sb.add("(call ")
+        sb.add(e.s1)
+        dumpArgs(sb, e.list, d)
+        sb.byte(41)
+    } else if k == N_ARRAY {
+        sb.add("[arr")
+        dumpArgs(sb, e.list, d)
+        sb.byte(93)
+    } else if k == N_INDEX {
+        sb.add("(idx ")
+        dumpExpr(sb, e.a, d)
+        sb.byte(32)
+        dumpExpr(sb, e.b, d)
+        sb.byte(41)
+    } else if k == N_MEMBER {
+        sb.add("(. ")
+        dumpExpr(sb, e.a, d)
+        sb.byte(32)
+        sb.add(e.s2)
+        sb.byte(41)
+    } else if k == N_NEW {
+        sb.add("(new ")
+        sb.add(e.s1)
+        var i: int64 = 0
+        while i < e.list.len {
+            var f = nodeAt(e.list, i)
+            sb.byte(32)
+            sb.add(f.s1)
+            sb.byte(58)
+            dumpExpr(sb, f.a, d)
+            i = i + 1
+        }
+        sb.byte(41)
+    } else if k == N_LAMBDA {
+        sb.add("(lambda ")
+        dumpParams(sb, e.list)
+        sb.byte(32)
+        dumpBlock(sb, e.b, d)
+        sb.byte(41)
+    } else if k == N_CALLV {
+        sb.add("(callv ")
+        dumpExpr(sb, e.a, d)
+        dumpArgs(sb, e.list, d)
+        sb.byte(41)
+    } else if k == N_MCALL {
+        sb.add("(mcall ")
+        dumpExpr(sb, e.a, d)
+        sb.byte(32)
+        sb.add(e.s2)
+        dumpArgs(sb, e.list, d)
+        sb.byte(41)
+    } else {
+        sb.add("(?)")
+    }
+}
+
+func astDump(prog: ptr<Vec>) -> ptr<StrBuf> {
+    var sb = strBufNew()
+    var i: int64 = 0
+    while i < prog.len {
+        dumpStmt(sb, nodeAt(prog, i), 0)
+        sb.byte(10)
+        i = i + 1
+    }
+    return sb
+}

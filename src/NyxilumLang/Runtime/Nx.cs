@@ -86,6 +86,12 @@ public class Nx
             return;
         }
 
+        if (command == "dump-ast" && args.Length > 1)
+        {
+            RunDumpAst(args[1]);
+            return;
+        }
+
         if (command == "dump-tokens" && args.Length > 1)
         {
             RunDumpTokens(args[1]);
@@ -304,6 +310,33 @@ public class Nx
             Console.WriteLine($"Parse Error: {ex.Message}");
             Environment.Exit(1);
         }
+    }
+
+    // "nx dump-ast файл.nx" - повне дерево S-виразами (Tools/AstSexprDumper.cs), еталон для
+    // selfhost/parser.nx. Помилка розбору - "Parse Error: ..." у stderr, код 1.
+    private static void RunDumpAst(string path)
+    {
+        if (!File.Exists(path))
+        {
+            Console.Error.WriteLine($"Error: Cannot find file '{path}'");
+            Environment.Exit(1);
+            return;
+        }
+        string text;
+        try
+        {
+            var program = new Parser(new Lexer(File.ReadAllText(path, Encoding.UTF8)).Tokenize()).ParseProgram();
+            text = NyxilumLang.Tools.AstSexprDumper.Dump(program);
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine((ex.Message.StartsWith("Невідомий символ") || ex.Message.StartsWith("Незакрита інтерполяція") ? "Lexer Error: " : "Parse Error: ") + ex.Message);
+            Environment.Exit(1);
+            return;
+        }
+        using var stdout = Console.OpenStandardOutput();
+        var bytes = new UTF8Encoding(false).GetBytes(text);
+        stdout.Write(bytes, 0, bytes.Length);
     }
 
     // "nx dump-tokens файл.nx" - токени лексера рядками «Тип<TAB>значення<TAB>рядок»

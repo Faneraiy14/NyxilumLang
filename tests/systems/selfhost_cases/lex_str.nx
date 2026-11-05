@@ -1,0 +1,8 @@
+var s = "a\0b\tc\\d\"e\qf\$g"
+var t = "x${ m["k"] + {a: 1}.a }y${
+ z
+}w"
+var ім'я = п'ять + _a1
+/* багато
+рядків */ var after = 1
+var u = "кінець\

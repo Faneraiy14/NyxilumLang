@@ -46,17 +46,23 @@ if "$NX" compile-native http_server.nx -o "$W/hs" --target linux-x64 >/dev/null 
     else kill $hp 2>/dev/null; bad "HTTP-сервер" "файл:$r1 текст:$r2 нема:$r3 вихід:$r4"; fi
 else bad "HTTP-сервер" "не скомпілювався"; fi
 
-# S8: лексер на Nx (selfhost/lexer.nx) дає ті самі токени, що C# (nx dump-tokens), на всіх .nx репозиторію
-if "$NX" compile-native ../../selfhost/dump_tokens.nx -o "$W/dt" --target linux-x64 >/dev/null 2>&1; then
-    lt=0; lbad=""
+# S8: лексер і парсер на Nx (selfhost/) дають те саме, що C# (nx dump-tokens / nx dump-ast), на всіх .nx
+# репозиторію, включно з selfhost_cases/ (крайні випадки й помилки - текст помилки теж має збігтися)
+if "$NX" compile-native ../../selfhost/dump_tokens.nx -o "$W/dt" --target linux-x64 >/dev/null 2>&1 &&
+   "$NX" compile-native ../../selfhost/dump_ast.nx -o "$W/da" --target linux-x64 >/dev/null 2>&1; then
+    lt=0; lbad=""; pbad=""
     while IFS= read -r f; do
         lt=$((lt + 1))
         "$NX" dump-tokens "$f" > "$W/lc.out" 2>&1; lce=$?
         "$W/dt" "$f" > "$W/ln.out" 2>&1; lne=$?
         if [ $lce != $lne ] || ! cmp -s "$W/lc.out" "$W/ln.out"; then lbad="$lbad $f"; fi
+        "$NX" dump-ast "$f" > "$W/pc.out" 2>&1; pce=$?
+        "$W/da" "$f" > "$W/pn.out" 2>&1; pne=$?
+        if [ $pce != $pne ] || ! cmp -s "$W/pc.out" "$W/pn.out"; then pbad="$pbad $f"; fi
     done < <(cd ../.. && git ls-files '*.nx' | sed 's|^|../../|')
     if [ -z "$lbad" ]; then ok "лексер на Nx = C# ($lt файлів)"; else bad "лексер на Nx" "$lbad"; fi
-else bad "лексер на Nx" "dump_tokens.nx не скомпілювався"; fi
+    if [ -z "$pbad" ]; then ok "парсер на Nx = C# ($lt файлів)"; else bad "парсер на Nx" "$pbad"; fi
+else bad "лексер/парсер на Nx" "selfhost/dump_*.nx не скомпілювались"; fi
 
 python3 gen_arith.py "$W/a.nx" "$W/a.c"
 if gcc -O0 -w "$W/a.c" -o "$W/a_c" && "$W/a_c" > "$W/a_c.out" && "$NX" compile-native "$W/a.nx" -o "$W/a_nx" --target linux-x64 >/dev/null 2>&1 && "$W/a_nx" > "$W/a_nx.out" && cmp -s "$W/a_c.out" "$W/a_nx.out"; then

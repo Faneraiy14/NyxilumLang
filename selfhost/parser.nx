@@ -1,0 +1,852 @@
+// Парсер NyxilumLang на Nx (S8 крок 4) - порт src/NyxilumLang/Core/Parser.cs один в один:
+// ті самі правила, пріоритети, межі вкладеності (500) і тексти помилок.
+// Перевірка: dump_ast.nx дає те саме, що `nx dump-ast`, на всіх .nx репозиторію.
+import "lexer.nx"
+import "ast.nx"
+
+var PARSE_MAX_DEPTH: int64 = 500
+
+struct Parser {
+    toks: ptr<Vec>
+    pos: int64
+    noStruct: bool
+    pendingGt: bool
+    stmtDepth: int64
+    exprDepth: int64
+
+    func Parser.peek() -> ptr<Token> {
+        if self.pos < self.toks.len {
+            return asptr(self.toks.get(self.pos))
+        }
+        return asptr(self.toks.last())
+    }
+
+    func Parser.advance() -> ptr<Token> {
+        var t = self.peek()
+        if self.pos < self.toks.len {
+            self.pos = self.pos + 1
+        }
+        return t
+    }
+
+    // поточний токен такого типу з таким текстом?
+    func Parser.is(kind: int64, s: ptr<uint8>) -> bool {
+        var t = self.peek()
+        return t.kind == kind && strEq(t.val, s) && t.len == strLen(s)
+    }
+
+    func Parser.isP(s: ptr<uint8>) -> bool {
+        return self.is(TK_PUNCT, s)
+    }
+
+    func Parser.isOp(s: ptr<uint8>) -> bool {
+        return self.is(TK_OP, s)
+    }
+
+    func Parser.isKw(s: ptr<uint8>) -> bool {
+        return self.is(TK_KEYWORD, s)
+    }
+
+    // "<msg> на рядку L, стовпець C" (як у C#) і вихід
+    func Parser.fail(msg: ptr<uint8>) {
+        var t = self.peek()
+        parseFailAt(msg, t.line, t.col, "")
+    }
+
+    func Parser.consume(kind: int64, msg: ptr<uint8>) -> ptr<Token> {
+        if self.peek().kind == kind {
+            return self.advance()
+        }
+        self.fail(msg)
+        return asptr(0)
+    }
+
+    func Parser.consumeVarName(msg: ptr<uint8>) -> ptr<Token> {
+        var t = self.peek()
+        if t.kind == TK_KEYWORD && t.len > 0 {
+            var b = strBufNew()
+            b.add("«")
+            b.add(t.val)
+            b.add("» - слово мови (вбудоване), змінну так назвати не можна - візьми іншу назву, напр. «мій_")
+            b.add(t.val)
+            b.add("»,")
+            parseFailAt(b.cstr(), t.line, t.col, "")
+        }
+        return self.consume(TK_IDENT, msg)
+    }
+
+    func Parser.deepExpr() {
+        self.exprDepth = self.exprDepth + 1
+        if self.exprDepth > PARSE_MAX_DEPTH {
+            var t = self.peek()
+            parseFailAt("Вираз занадто глибоко вкладений (> 500 рівнів)", t.line, t.col, ".")
+        }
+    }
+
+    func Parser.chainCheck(n: int64) {
+        if n > PARSE_MAX_DEPTH {
+            var t = self.peek()
+            parseFailAt("Занадто довгий ланцюжок операторів (> 500)", t.line, t.col, ".")
+        }
+    }
+
+    // ---------- оператори ----------
+    func Parser.program() -> ptr<Vec> {
+        var out = vecNew()
+        while self.peek().kind != TK_EOF {
+            var s = self.statement()
+            if s != null {
+                out.pushPtr(s)
+            }
+        }
+        return out
+    }
+
+    func Parser.statement() -> ptr<Node> {
+        self.stmtDepth = self.stmtDepth + 1
+        if self.stmtDepth > PARSE_MAX_DEPTH {
+            var t = self.peek()
+            parseFailAt("Занадто глибоко вкладені блоки (> 500 рівнів)", t.line, t.col, ".")
+        }
+        var r = self.statementInner()
+        self.stmtDepth = self.stmtDepth - 1
+        return r
+    }
+
+    func Parser.statementInner() -> ptr<Node> {
+        var t = self.peek()
+        if self.isP(";") {
+            self.advance()
+            return asptr(0)
+        }
+        var s: ptr<Node> = asptr(0)
+        if self.isKw("func") {
+            s = self.funcDecl(asptr(0))
+        } else if self.isKw("var") {
+            s = self.varDecl()
+        } else if self.isKw("if") {
+            s = self.ifStmt()
+        } else if self.isKw("while") {
+            s = self.whileStmt()
+        } else if self.isKw("for") {
+            s = self.forStmt()
+        } else if self.isKw("return") {
+            s = self.returnStmt()
+        } else if self.isKw("print") {
+            self.advance()
+            self.consume(TK_PUNCT, "Очікується '('")
+            s = nodeNew(N_PRINT)
+            s.a = self.expression()
+            self.consume(TK_PUNCT, "Очікується ')'")
+        } else if self.isKw("struct") {
+            s = self.structDecl()
+        } else if self.isKw("try") {
+            s = self.tryStmt()
+        } else if self.isKw("throw") {
+            self.advance()
+            s = nodeNew(N_THROW)
+            s.a = self.expression()
+        } else if self.isKw("import") {
+            s = self.importStmt()
+        } else if self.isKw("break") {
+            self.advance()
+            s = nodeNew(N_BREAK)
+        } else if self.isKw("continue") {
+            self.advance()
+            s = nodeNew(N_CONTINUE)
+        } else if self.isP("{") {
+            s = self.block()
+        } else {
+            s = nodeNew(N_EXPR)
+            s.a = self.expression()
+        }
+        s.line = t.line
+        return s
+    }
+
+    func Parser.tryStmt() -> ptr<Node> {
+        self.advance()
+        var s = nodeNew(N_TRY)
+        s.a = self.block()
+        if !self.isKw("catch") {
+            self.fail("Очікується 'catch'")
+        }
+        self.advance()
+        self.consume(TK_PUNCT, "Очікується '(' після catch")
+        s.s2 = self.consume(TK_IDENT, "Очікується назва змінної помилки").val
+        self.consume(TK_PUNCT, "Очікується ')'")
+        s.b = self.block()
+        return s
+    }
+
+    func Parser.importStmt() -> ptr<Node> {
+        self.advance()
+        var p = self.consume(TK_STRING, "Очікується шлях до файлу (рядок) після import")
+        var s = nodeNew(N_IMPORT)
+        s.s1 = p.val
+        s.len = p.len
+        if self.isP("{") {
+            self.advance()
+            s.list2 = vecNew()
+            while !self.isP("}") {
+                var nt = self.consume(TK_IDENT, "Очікується назва в списку вибіркового import")
+                var nn = nodeNew(N_PARAM)
+                nn.s1 = nt.val
+                s.list2.pushPtr(nn)
+                if self.isP(",") {
+                    self.advance()
+                }
+            }
+            self.consume(TK_PUNCT, "Очікується '}' після списку вибіркового import")
+        }
+        return s
+    }
+
+    func Parser.structDecl() -> ptr<Node> {
+        self.advance()
+        var s = nodeNew(N_STRUCT)
+        s.s1 = self.consume(TK_IDENT, "Очікується назва структури").val
+        if self.isKw("extends") {
+            self.advance()
+            s.s2 = self.consume(TK_IDENT, "Очікується назва батьківської структури після 'extends'").val
+        }
+        self.consume(TK_PUNCT, "Очікується '{'")
+        s.list = vecNew()
+        s.list2 = vecNew()
+        while !self.isP("}") {
+            if self.isKw("func") {
+                var mt = self.peek()
+                var m = self.funcDecl(s.s1)
+                m.line = mt.line
+                s.list2.pushPtr(m)
+            } else {
+                var fname = self.consume(TK_IDENT, "Очікується назва поля")
+                if self.isP(":") {
+                    self.advance()
+                } else {
+                    self.fail("Очікується ':' після назви поля")
+                }
+                var f = nodeNew(N_PARAM)
+                f.s1 = fname.val
+                f.s2 = self.type()
+                s.list.pushPtr(f)
+            }
+        }
+        self.consume(TK_PUNCT, "Очікується '}'")
+        return s
+    }
+
+    func Parser.param(name: ptr<uint8>, type: ptr<uint8>) -> ptr<Node> {
+        var p = nodeNew(N_PARAM)
+        p.s1 = name
+        p.s2 = type
+        return p
+    }
+
+    func Parser.funcDecl(parentStruct: ptr<uint8>) -> ptr<Node> {
+        self.advance()
+        var name = self.consume(TK_IDENT, "Очікується назва функції").val
+        var structName = parentStruct
+        if self.isP(".") {
+            self.advance()
+            structName = name
+            name = self.consume(TK_IDENT, "Очікується назва методу").val
+        }
+        self.consume(TK_PUNCT, "Очікується '('")
+        var f = nodeNew(N_FUNC)
+        f.list = vecNew()
+        if structName != null {
+            f.list.pushPtr(self.param("self", structName))
+        }
+        if !self.isP(")") {
+            while true {
+                if self.isP(",") {
+                    self.advance()
+                } else {
+                    var pn = self.consumeVarName("Очікується назва параметра")
+                    var pt: ptr<uint8> = "any"
+                    if self.isP(":") {
+                        self.advance()
+                        pt = self.type()
+                    }
+                    f.list.pushPtr(self.param(pn.val, pt))
+                    if self.isP(",") {
+                        self.advance()
+                    }
+                }
+                if self.isP(")") {
+                    break
+                }
+            }
+        }
+        self.consume(TK_PUNCT, "Очікується ')'")
+        if self.isOp("->") {
+            self.advance()
+            f.s2 = self.type()
+        }
+        if self.is(TK_IDENT, "naked") {
+            self.advance()
+            f.flag = 1
+        }
+        f.b = self.block()
+        if structName != null {
+            var fb = strBufNew()
+            fb.add(structName)
+            fb.byte(46)
+            fb.add(name)
+            f.s1 = fb.cstr()
+        } else {
+            f.s1 = name
+        }
+        return f
+    }
+
+    func Parser.type() -> ptr<uint8> {
+        if self.isP("[") {
+            self.advance()
+            var elem: ptr<uint8> = "any"
+            if !self.isP("]") {
+                elem = self.type()
+            }
+            var b = strBufNew()
+            b.byte(91)
+            b.add(elem)
+            if self.isP(";") {
+                self.advance()
+                var cnt = self.consume(TK_NUMBER, "Очікується довжина масиву після ';'")
+                self.consume(TK_PUNCT, "Очікується ']'")
+                b.byte(59)
+                b.add(cnt.val)
+                b.byte(93)
+                return b.cstr()
+            }
+            self.consume(TK_PUNCT, "Очікується ']'")
+            b.byte(93)
+            return b.cstr()
+        }
+        var t = self.peek()
+        if t.kind == TK_KEYWORD || t.kind == TK_IDENT {
+            self.advance()
+            if strEq(t.val, "ptr") && self.isOp("<") {
+                self.advance()
+                var inner = self.type()
+                if self.pendingGt {
+                    self.pendingGt = false
+                } else if self.isOp(">") {
+                    self.advance()
+                } else if self.isOp(">>") {
+                    self.advance()
+                    self.pendingGt = true
+                } else {
+                    self.fail("Очікується '>' після типу елемента вказівника")
+                }
+                var pb = strBufNew()
+                pb.add("ptr<")
+                pb.add(inner)
+                pb.byte(62)
+                return pb.cstr()
+            }
+            return t.val
+        }
+        self.fail("Очікується тип")
+        return asptr(0)
+    }
+
+    func Parser.varDecl() -> ptr<Node> {
+        self.advance()
+        var s = nodeNew(N_VAR)
+        if self.is(TK_IDENT, "volatile") {
+            self.advance()
+            s.flag = 1
+        }
+        s.s1 = self.consumeVarName("Очікується назва змінної").val
+        if self.isP(":") {
+            self.advance()
+            s.s2 = self.type()
+        }
+        if self.isOp("=") {
+            self.advance()
+            s.a = self.expression()
+        }
+        return s
+    }
+
+    func Parser.ifStmt() -> ptr<Node> {
+        self.advance()
+        var s = nodeNew(N_IF)
+        s.a = self.condition()
+        s.b = self.block()
+        if self.isKw("else") {
+            self.advance()
+            if self.isKw("if") {
+                var nested = self.ifStmt()
+                var eb = nodeNew(N_BLOCK)
+                eb.list = vecNew()
+                eb.list.pushPtr(nested)
+                s.c = eb
+            } else {
+                s.c = self.block()
+            }
+        }
+        return s
+    }
+
+    func Parser.whileStmt() -> ptr<Node> {
+        self.advance()
+        var s = nodeNew(N_WHILE)
+        s.a = self.condition()
+        s.b = self.block()
+        return s
+    }
+
+    func Parser.condition() -> ptr<Node> {
+        var outer = self.noStruct
+        self.noStruct = true
+        var e = self.expression()
+        self.noStruct = outer
+        return e
+    }
+
+    func Parser.forStmt() -> ptr<Node> {
+        self.advance()
+        var s = nodeNew(N_FOR)
+        s.s1 = self.consumeVarName("Очікується назва змінної").val
+        if self.isKw("in") {
+            self.advance()
+        } else {
+            self.fail("Очікується 'in'")
+        }
+        var outer = self.noStruct
+        self.noStruct = true
+        s.a = self.addition()
+        if self.isOp("..") {
+            self.advance()
+            s.b = self.addition()
+        }
+        self.noStruct = outer
+        s.c = self.block()
+        return s
+    }
+
+    func Parser.returnStmt() -> ptr<Node> {
+        var ret = self.advance()
+        var s = nodeNew(N_RETURN)
+        var nx = self.peek()
+        var bare = nx.kind == TK_EOF || self.isP("}") || nx.line != ret.line
+        if !bare {
+            s.a = self.expression()
+        }
+        return s
+    }
+
+    func Parser.block() -> ptr<Node> {
+        self.consume(TK_PUNCT, "Очікується '{'")
+        var b = nodeNew(N_BLOCK)
+        b.list = vecNew()
+        while self.peek().kind != TK_EOF && !self.isP("}") {
+            var s = self.statement()
+            if s != null {
+                b.list.pushPtr(s)
+            }
+        }
+        self.consume(TK_PUNCT, "Очікується '}'")
+        return b
+    }
+
+    // ---------- вирази ----------
+    func Parser.expression() -> ptr<Node> {
+        self.deepExpr()
+        var e = self.assignment()
+        self.exprDepth = self.exprDepth - 1
+        return e
+    }
+
+    func Parser.assignment() -> ptr<Node> {
+        self.deepExpr()
+        var left = self.orExpr()
+        var r = left
+        if self.isOp("=") {
+            self.advance()
+            r = bin("=", left, self.assignment())
+        } else if self.isOp("+=") || self.isOp("-=") || self.isOp("*=") || self.isOp("/=") {
+            var op = strNDup(self.advance().val, 1)
+            var right = self.assignment()
+            r = bin("=", left, bin(op, left, right))
+        } else if self.isOp("++") || self.isOp("--") {
+            var op2: ptr<uint8> = "+"
+            if self.isOp("--") {
+                op2 = "-"
+            }
+            self.advance()
+            var one = nodeNew(N_NUM)
+            one.s1 = "1"
+            one.flag = 1
+            r = bin("=", left, bin(op2, left, one))
+        }
+        self.exprDepth = self.exprDepth - 1
+        return r
+    }
+
+    func Parser.orExpr() -> ptr<Node> {
+        var left = self.andExpr()
+        var n: int64 = 0
+        while self.isOp("||") {
+            n = n + 1
+            self.chainCheck(n)
+            self.advance()
+            left = bin("||", left, self.andExpr())
+        }
+        return left
+    }
+
+    func Parser.andExpr() -> ptr<Node> {
+        var left = self.bitOr()
+        var n: int64 = 0
+        while self.isOp("&&") {
+            n = n + 1
+            self.chainCheck(n)
+            self.advance()
+            left = bin("&&", left, self.bitOr())
+        }
+        return left
+    }
+
+    func Parser.bitOr() -> ptr<Node> {
+        var left = self.bitXor()
+        var n: int64 = 0
+        while self.isOp("|") {
+            n = n + 1
+            self.chainCheck(n)
+            self.advance()
+            left = bin("|", left, self.bitXor())
+        }
+        return left
+    }
+
+    func Parser.bitXor() -> ptr<Node> {
+        var left = self.bitAnd()
+        var n: int64 = 0
+        while self.isOp("^") {
+            n = n + 1
+            self.chainCheck(n)
+            self.advance()
+            left = bin("^", left, self.bitAnd())
+        }
+        return left
+    }
+
+    func Parser.bitAnd() -> ptr<Node> {
+        var left = self.equality()
+        var n: int64 = 0
+        while self.isOp("&") {
+            n = n + 1
+            self.chainCheck(n)
+            self.advance()
+            left = bin("&", left, self.equality())
+        }
+        return left
+    }
+
+    func Parser.equality() -> ptr<Node> {
+        var left = self.comparison()
+        var n: int64 = 0
+        while self.isOp("==") || self.isOp("!=") {
+            n = n + 1
+            self.chainCheck(n)
+            var op = self.advance().val
+            left = bin(op, left, self.comparison())
+        }
+        return left
+    }
+
+    func Parser.comparison() -> ptr<Node> {
+        var left = self.shift()
+        var n: int64 = 0
+        while self.isOp("<") || self.isOp("<=") || self.isOp(">") || self.isOp(">=") {
+            n = n + 1
+            self.chainCheck(n)
+            var op = self.advance().val
+            left = bin(op, left, self.shift())
+        }
+        return left
+    }
+
+    func Parser.shift() -> ptr<Node> {
+        var left = self.addition()
+        var n: int64 = 0
+        while self.isOp("<<") || self.isOp(">>") {
+            n = n + 1
+            self.chainCheck(n)
+            var op = self.advance().val
+            left = bin(op, left, self.addition())
+        }
+        return left
+    }
+
+    func Parser.addition() -> ptr<Node> {
+        var left = self.multiplication()
+        var n: int64 = 0
+        while self.isOp("+") || self.isOp("-") {
+            n = n + 1
+            self.chainCheck(n)
+            var op = self.advance().val
+            left = bin(op, left, self.multiplication())
+        }
+        return left
+    }
+
+    func Parser.multiplication() -> ptr<Node> {
+        var left = self.unary()
+        var n: int64 = 0
+        while self.isOp("*") || self.isOp("/") || self.isOp("%") {
+            n = n + 1
+            self.chainCheck(n)
+            var op = self.advance().val
+            left = bin(op, left, self.unary())
+        }
+        return left
+    }
+
+    func Parser.unary() -> ptr<Node> {
+        if self.isOp("!") || self.isOp("-") || self.isOp("~") {
+            var op = self.advance().val
+            self.deepExpr()
+            var u = nodeNew(N_UNARY)
+            u.s1 = op
+            u.a = self.unary()
+            self.exprDepth = self.exprDepth - 1
+            return u
+        }
+        return self.primary()
+    }
+
+    // аргументи до ')' (struct-літерали всередині знову дозволені)
+    func Parser.args() -> ptr<Vec> {
+        var args = vecNew()
+        var outer = self.noStruct
+        self.noStruct = false
+        while !self.isP(")") {
+            args.pushPtr(self.expression())
+            if self.isP(",") {
+                self.advance()
+            }
+        }
+        self.noStruct = outer
+        self.consume(TK_PUNCT, "Очікується ')'")
+        return args
+    }
+
+    func Parser.primary() -> ptr<Node> {
+        var t = self.peek()
+        if t.kind == TK_NUMBER {
+            self.advance()
+            var num = nodeNew(N_NUM)
+            num.s1 = t.val
+            return num
+        }
+        if t.kind == TK_STRING {
+            self.advance()
+            var st = nodeNew(N_STR)
+            st.s1 = t.val
+            st.len = t.len
+            return st
+        }
+        if t.kind == TK_BOOL {
+            self.advance()
+            var bo = nodeNew(N_BOOL)
+            if strEq(t.val, "true") {
+                bo.flag = 1
+            }
+            return bo
+        }
+        if self.isKw("null") {
+            self.advance()
+            return nodeNew(N_NULL)
+        }
+        if self.isP("[") {
+            self.advance()
+            var arr = nodeNew(N_ARRAY)
+            arr.list = vecNew()
+            var outer = self.noStruct
+            self.noStruct = false
+            while !self.isP("]") {
+                arr.list.pushPtr(self.expression())
+                if self.isP(",") {
+                    self.advance()
+                }
+            }
+            self.noStruct = outer
+            self.consume(TK_PUNCT, "Очікується ']'")
+            return arr
+        }
+        if self.isKw("func") {
+            self.advance()
+            self.consume(TK_PUNCT, "Очікується '('")
+            var lam = nodeNew(N_LAMBDA)
+            lam.list = vecNew()
+            if !self.isP(")") {
+                while true {
+                    if self.isP(",") {
+                        self.advance()
+                    } else {
+                        var pn = self.consumeVarName("Очікується назва параметра")
+                        lam.list.pushPtr(self.param(pn.val, "any"))
+                        if self.isP(",") {
+                            self.advance()
+                        }
+                    }
+                    if self.isP(")") {
+                        break
+                    }
+                }
+            }
+            self.consume(TK_PUNCT, "Очікується ')'")
+            lam.b = self.block()
+            return lam
+        }
+        if t.kind == TK_IDENT || t.kind == TK_KEYWORD {
+            self.advance()
+            if !self.noStruct && t.len > 0 && isUpperFirst(t.val) && self.isP("{") {
+                self.advance()
+                var si = nodeNew(N_NEW)
+                si.s1 = t.val
+                si.list = vecNew()
+                while !self.isP("}") {
+                    var fname = self.consume(TK_IDENT, "Очікується назва поля")
+                    self.consume(TK_PUNCT, "Очікується ':'")
+                    var fi = nodeNew(N_PARAM)
+                    fi.s1 = fname.val
+                    fi.a = self.expression()
+                    si.list.pushPtr(fi)
+                    if self.isP(",") {
+                        self.advance()
+                    }
+                }
+                self.consume(TK_PUNCT, "Очікується '}'")
+                return si
+            }
+            var e = nodeNew(N_NAME)
+            e.s1 = t.val
+            while true {
+                if self.isP(".") {
+                    self.advance()
+                    var m = nodeNew(N_MEMBER)
+                    m.a = e
+                    m.s2 = self.consume(TK_IDENT, "Очікується назва поля").val
+                    e = m
+                } else if self.isP("(") {
+                    self.advance()
+                    var args = self.args()
+                    if e.kind == N_MEMBER {
+                        var mc = nodeNew(N_MCALL)
+                        mc.a = e.a
+                        mc.s2 = e.s2
+                        mc.list = args
+                        e = mc
+                    } else if e.kind == N_NAME {
+                        var c = nodeNew(N_CALL)
+                        c.s1 = e.s1
+                        c.list = args
+                        e = c
+                    } else {
+                        var cv = nodeNew(N_CALLV)
+                        cv.a = e
+                        cv.list = args
+                        e = cv
+                    }
+                } else if self.isP("[") {
+                    self.advance()
+                    var outer2 = self.noStruct
+                    self.noStruct = false
+                    var ix = nodeNew(N_INDEX)
+                    ix.a = e
+                    ix.b = self.expression()
+                    self.noStruct = outer2
+                    self.consume(TK_PUNCT, "Очікується ']'")
+                    e = ix
+                } else {
+                    break
+                }
+            }
+            return e
+        }
+        if self.isP("(") {
+            self.advance()
+            var outer3 = self.noStruct
+            self.noStruct = false
+            var pe = self.expression()
+            self.noStruct = outer3
+            self.consume(TK_PUNCT, "Очікується ')'")
+            return pe
+        }
+        parseFailAt("Невідомий вираз", t.line, t.col, "")
+        return asptr(0)
+    }
+}
+
+func bin(op: ptr<uint8>, l: ptr<Node>, r: ptr<Node>) -> ptr<Node> {
+    var b = nodeNew(N_BIN)
+    b.s1 = op
+    b.a = l
+    b.b = r
+    return b
+}
+
+// перша літера велика? (char.IsUpper у C#: латиниця, Latin-1, грецька, кирилиця)
+func isUpperFirst(s: ptr<uint8>) -> bool {
+    var c = int64(s[0])
+    if c < 128 {
+        return c >= 65 && c <= 90
+    }
+    var cp: int64 = 0
+    if (c & 224) == 192 {
+        cp = ((c & 31) << 6) | (int64(s[1]) & 63)
+    } else {
+        return false
+    }
+    if cp >= 192 && cp <= 222 && cp != 215 {
+        return true
+    }
+    if cp >= 913 && cp <= 939 && cp != 930 {
+        return true
+    }
+    if cp >= 1024 && cp <= 1071 {
+        return true
+    }
+    if cp >= 1120 && cp <= 1215 {
+        return (cp & 1) == 0
+    }
+    return false
+}
+
+func parseFailAt(msg: ptr<uint8>, line: int64, col: int64, tail: ptr<uint8>) {
+    var e = strBufNew()
+    e.add("Parse Error: ")
+    e.add(msg)
+    e.add(" на рядку ")
+    e.addInt(line)
+    e.add(", стовпець ")
+    e.addInt(col)
+    e.add(tail)
+    e.byte(10)
+    fdWrite(2, e.data, e.len)
+    exit(1)
+}
+
+// дерево з n байтів тексту (BOM пропускається)
+func parseBytes(src: ptr<uint8>, n: int64) -> ptr<Vec> {
+    var start: int64 = 0
+    if n >= 3 && src[0] == 239 && src[1] == 187 && src[2] == 191 {
+        start = 3
+    }
+    var p = new(Parser)
+    p.toks = lexBytes(src + start, n - start)
+    p.pos = 0
+    p.noStruct = false
+    p.pendingGt = false
+    p.stmtDepth = 0
+    p.exprDepth = 0
+    var prog = p.program()
+    free(p)
+    return prog
+}

@@ -1,0 +1,20 @@
+// dump_ast файл.nx - те саме, що `nx dump-ast файл.nx`, але лексером і парсером на Nx (S8 крок 4)
+import "parser.nx"
+
+func main() -> int32 {
+    if argCount() < 2 {
+        fdWriteStr(2, "використання: dump_ast файл.nx\n")
+        return 2
+    }
+    var n: int64 = 0
+    var src = fileReadAll(arg(1), addr(n))
+    if src == null {
+        fdWriteStr(2, "Error: Cannot find file '")
+        fdWriteStr(2, arg(1))
+        fdWriteStr(2, "'\n")
+        return 1
+    }
+    var sb = astDump(parseBytes(src, n))
+    fdWrite(1, sb.data, sb.len)
+    return 0
+}
