@@ -1,9 +1,8 @@
 // Лексер NyxilumLang на самій NyxilumLang (S8 крок 3) - порт src/NyxilumLang/Core/Lexer.cs.
 // Вихід той самий, що в C#: типи, значення й рядки токенів (перевірка: nx dump-tokens).
 // Байти UTF-8 >= 0x80 вважаються літерами (кирилиця в іменах); апостроф - лише між літерами.
-// Свідомо як у C#: рядки всередині ${...} рахуються з 1 (окремий лексер), /* */ не рахує
-// переносів, //-коментар не рухає стовпець. Стовпець - у символах (C# - у UTF-16, для
-// звичайного тексту те саме).
+// Переноси в /* */ і в рядкових літералах рахуються; ${...} лексується з того місця файлу, де
+// стоїть. Стовпець - у символах (C# - у UTF-16, для звичайного тексту те саме).
 import "std.nx"
 
 var TK_KEYWORD: int64 = 0
@@ -147,6 +146,22 @@ struct Lexer {
         self.emit(kind, s, strLen(s))
     }
 
+    // токен на заданому місці (рядкові літерали - на місці відкривної лапки)
+    func Lexer.emitAt(kind: int64, p: ptr<uint8>, n: int64, line: int64, col: int64) {
+        self.emit(kind, p, n)
+        var t: ptr<Token> = asptr(self.out.last())
+        t.line = line
+        t.col = col
+    }
+
+    // стовпець позиції q: від останнього переносу nl (або від start зі стовпцем c0)
+    func Lexer.colOf(q: int64, nl: int64, start: int64, c0: int64) -> int64 {
+        if nl < 0 {
+            return c0 + utf8Chars(self.src + start, q - start)
+        }
+        return utf8Chars(self.src + nl, q - nl)
+    }
+
     func Lexer.run() {
         var kw = lexKeywords()
         while self.pos < self.n {
@@ -173,10 +188,18 @@ struct Lexer {
 
             if c == 47 && d == 42 {
                 self.pos = self.pos + 2
+                self.col = self.col + 2
                 while self.pos + 1 < self.n && !(self.at(self.pos) == 42 && self.at(self.pos + 1) == 47) {
+                    if self.at(self.pos) == 10 {
+                        self.line = self.line + 1
+                        self.col = 1
+                    } else if (self.at(self.pos) & 192) != 128 {
+                        self.col = self.col + 1
+                    }
                     self.pos = self.pos + 1
                 }
                 self.pos = self.pos + 2
+                self.col = self.col + 2
                 continue
             }
 
@@ -299,6 +322,10 @@ struct Lexer {
 
     // рядок "...", з \-екрануванням і ${вираз}
     func Lexer.str() {
+        var sLine = self.line
+        var sCol = self.col
+        var sStart = self.pos
+        var lastNl: int64 = 0 - 1   // останній перенос усередині рядка
         self.pos = self.pos + 1
         var s = strBufNew()
         var parts = vecNew()   // StrBuf* - шматки тексту між ${}
@@ -317,6 +344,10 @@ struct Lexer {
                     e = 0
                 }
                 s.byte(e)
+                if self.at(self.pos + 1) == 10 {
+                    self.line = self.line + 1
+                    lastNl = self.pos + 1
+                }
                 self.pos = self.pos + 2
                 continue
             }
@@ -325,9 +356,15 @@ struct Lexer {
                 s = strBufNew()
                 self.pos = self.pos + 2
                 var es = self.pos
+                var eLine = self.line
+                var eCol = self.colOf(es, lastNl, sStart, sCol)
                 var depth: int64 = 1
                 while self.pos < self.n && depth > 0 {
                     var x = self.at(self.pos)
+                    if x == 10 {
+                        self.line = self.line + 1
+                        lastNl = self.pos
+                    }
                     if x == 123 {
                         depth = depth + 1
                     } else if x == 125 {
@@ -341,23 +378,28 @@ struct Lexer {
                 if depth != 0 {
                     var eb = strBufNew()
                     eb.add("Незакрита інтерполяція \"\${...\" у рядку ")
-                    eb.addInt(self.line)
+                    eb.addInt(eLine)
                     lexFail(eb)
                 }
-                var sub = lexBytes(self.src + es, self.pos - es)
+                var sub = lexBytesAt(self.src + es, self.pos - es, eLine, eCol)
                 sub.pop()   // EOF
                 exprs.pushPtr(sub)
                 self.pos = self.pos + 1
                 continue
             }
+            if c == 10 {
+                self.line = self.line + 1
+                lastNl = self.pos
+            }
             s.byte(c)
             self.pos = self.pos + 1
         }
         self.pos = self.pos + 1
+        var afterCol = self.colOf(self.pos, lastNl, sStart, sCol)
 
         if parts.len == 0 {
-            self.emit(TK_STRING, s.data, s.len)
-            self.col = self.col + utf8Chars(s.data, s.len) + 2
+            self.emitAt(TK_STRING, s.data, s.len, sLine, sCol)
+            self.col = afterCol
             s.release()
             parts.release()
             exprs.release()
@@ -365,17 +407,17 @@ struct Lexer {
         }
         parts.pushPtr(s)
         // "a${b}c" -> ( "" + "a" + ( b ) + "c" )
-        self.emitS(TK_PUNCT, "(")
-        self.emitS(TK_STRING, "")
+        self.emitAt(TK_PUNCT, "(", 1, sLine, sCol)
+        self.emitAt(TK_STRING, "", 0, sLine, sCol)
         var i: int64 = 0
         while i < parts.len {
             var p: ptr<StrBuf> = asptr(parts.get(i))
-            self.emitS(TK_OP, "+")
-            self.emit(TK_STRING, p.data, p.len)
+            self.emitAt(TK_OP, "+", 1, sLine, sCol)
+            self.emitAt(TK_STRING, p.data, p.len, sLine, sCol)
             p.release()
             if i < exprs.len {
-                self.emitS(TK_OP, "+")
-                self.emitS(TK_PUNCT, "(")
+                self.emitAt(TK_OP, "+", 1, sLine, sCol)
+                self.emitAt(TK_PUNCT, "(", 1, sLine, sCol)
                 var ts: ptr<Vec> = asptr(exprs.get(i))
                 var j: int64 = 0
                 while j < ts.len {
@@ -383,11 +425,12 @@ struct Lexer {
                     j = j + 1
                 }
                 ts.release()
-                self.emitS(TK_PUNCT, ")")
+                self.emitAt(TK_PUNCT, ")", 1, sLine, sCol)
             }
             i = i + 1
         }
-        self.emitS(TK_PUNCT, ")")
+        self.emitAt(TK_PUNCT, ")", 1, sLine, sCol)
+        self.col = afterCol
         parts.release()
         exprs.release()
     }
@@ -395,12 +438,17 @@ struct Lexer {
 
 // токени (Vec з ptr<Token>, останній - EOF) з n байтів src
 func lexBytes(src: ptr<uint8>, n: int64) -> ptr<Vec> {
+    return lexBytesAt(src, n, 1, 1)
+}
+
+// те саме, але відлік рядків/стовпців з line:col (вставка ${...} усередині файлу)
+func lexBytesAt(src: ptr<uint8>, n: int64, line: int64, col: int64) -> ptr<Vec> {
     var lx = new(Lexer)
     lx.src = src
     lx.n = n
     lx.pos = 0
-    lx.line = 1
-    lx.col = 1
+    lx.line = line
+    lx.col = col
     lx.out = vecNew()
     lx.run()
     var out = lx.out

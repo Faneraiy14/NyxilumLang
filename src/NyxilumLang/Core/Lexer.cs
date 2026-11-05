@@ -22,6 +22,9 @@ public class Lexer
 
     public Lexer(string source) { _source = source; }
 
+    // Лексер вставки ${...}: рядки й стовпці - від місця вставки у файлі, а не з 1.
+    private Lexer(string source, int line, int column) { _source = source; _line = line; _column = column; }
+
     public List<Token> Tokenize()
     {
         while (_pos < _source.Length)
@@ -45,8 +48,14 @@ public class Lexer
             if (c == '/' && _pos + 1 < _source.Length && _source[_pos + 1] == '*')
             {
                 _pos += 2;
-                while (_pos + 1 < _source.Length && !(_source[_pos] == '*' && _source[_pos + 1] == '/')) _pos++;
+                _column += 2;
+                while (_pos + 1 < _source.Length && !(_source[_pos] == '*' && _source[_pos + 1] == '/'))
+                {
+                    if (_source[_pos] == '\n') { _line++; _column = 1; } else _column++;
+                    _pos++;
+                }
                 _pos += 2;
+                _column += 2;
                 continue;
             }
 
@@ -115,6 +124,10 @@ public class Lexer
 
             if (c == '"')
             {
+                // Токени рядка - на рядку/стовпці відкривної лапки; переноси всередині
+                // рахуються (інакше все нижче мало б неправильні номери рядків).
+                int strLine = _line, strColumn = _column, strStart = _pos;
+                int lastNl = -1; // позиція останнього переносу всередині рядка
                 _pos++;
                 string str = "";
                 var literalParts = new List<string>();
@@ -137,6 +150,7 @@ public class Lexer
                             var other => other
                         };
                         str += escaped;
+                        if (_source[_pos + 1] == '\n') { _line++; lastNl = _pos + 1; }
                         _pos += 2;
                         continue;
                     }
@@ -154,34 +168,38 @@ public class Lexer
 
                         _pos += 2;
                         int exprStart = _pos;
+                        int exprLine = _line, exprColumn = lastNl < 0 ? strColumn + (exprStart - strStart) : exprStart - lastNl;
                         int depth = 1;
                         while (_pos < _source.Length && depth > 0)
                         {
+                            if (_source[_pos] == '\n') { _line++; lastNl = _pos; }
                             if (_source[_pos] == '{') depth++;
                             else if (_source[_pos] == '}') { depth--; if (depth == 0) break; }
                             _pos++;
                         }
                         if (depth != 0)
-                            throw new Exception($"Незакрита інтерполяція \"${{...\" у рядку {_line}");
+                            throw new Exception($"Незакрита інтерполяція \"${{...\" у рядку {exprLine}");
 
                         string exprSource = _source.Substring(exprStart, _pos - exprStart);
                         _pos++; // '}'
 
-                        var exprTokens = new Lexer(exprSource).Tokenize();
+                        var exprTokens = new Lexer(exprSource, exprLine, exprColumn).Tokenize();
                         exprTokens.RemoveAt(exprTokens.Count - 1); // прибрати EOF
                         exprTokenLists.Add(exprTokens);
                         continue;
                     }
 
+                    if (_source[_pos] == '\n') { _line++; lastNl = _pos; }
                     str += _source[_pos];
                     _pos++;
                 }
                 _pos++;
+                int afterColumn = lastNl < 0 ? strColumn + (_pos - strStart) : _pos - lastNl;
 
                 if (!hasInterpolation)
                 {
-                    _tokens.Add(new Token(TokenType.String, str, _line, _column));
-                    _column += str.Length + 2;
+                    _tokens.Add(new Token(TokenType.String, str, strLine, strColumn));
+                    _column = afterColumn;
                     continue;
                 }
 
@@ -194,21 +212,22 @@ public class Lexer
                 // жодних змін під новий синтаксис. Порожній рядок на початку —
                 // гарантія, що ланцюжок стає рядковим із самого першого +,
                 // незалежно від того, чи рядок починається з тексту чи з виразу.
-                _tokens.Add(new Token(TokenType.Punctuation, "(", _line, _column));
-                _tokens.Add(new Token(TokenType.String, "", _line, _column));
+                _tokens.Add(new Token(TokenType.Punctuation, "(", strLine, strColumn));
+                _tokens.Add(new Token(TokenType.String, "", strLine, strColumn));
                 for (int i = 0; i < literalParts.Count; i++)
                 {
-                    _tokens.Add(new Token(TokenType.Operator, "+", _line, _column));
-                    _tokens.Add(new Token(TokenType.String, literalParts[i], _line, _column));
+                    _tokens.Add(new Token(TokenType.Operator, "+", strLine, strColumn));
+                    _tokens.Add(new Token(TokenType.String, literalParts[i], strLine, strColumn));
                     if (i < exprTokenLists.Count)
                     {
-                        _tokens.Add(new Token(TokenType.Operator, "+", _line, _column));
-                        _tokens.Add(new Token(TokenType.Punctuation, "(", _line, _column));
+                        _tokens.Add(new Token(TokenType.Operator, "+", strLine, strColumn));
+                        _tokens.Add(new Token(TokenType.Punctuation, "(", strLine, strColumn));
                         _tokens.AddRange(exprTokenLists[i]);
-                        _tokens.Add(new Token(TokenType.Punctuation, ")", _line, _column));
+                        _tokens.Add(new Token(TokenType.Punctuation, ")", strLine, strColumn));
                     }
                 }
-                _tokens.Add(new Token(TokenType.Punctuation, ")", _line, _column));
+                _tokens.Add(new Token(TokenType.Punctuation, ")", strLine, strColumn));
+                _column = afterColumn;
                 continue;
             }
 
