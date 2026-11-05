@@ -1,0 +1,213 @@
+// nxc - компілятор NyxilumLang (системний режим x86-64), написаний на самій NyxilumLang (S8 крок 5).
+//   nxc файл.nx -o вихід.s [--obj] [--prelude X64Prelude.nx]
+// Видає асемблер GNU as - той самий текст, що `nx compile-native файл.nx --target linux-x64`
+// кладе у вихід.s. Прелюдія: --prelude, або $NX_PRELUDE, або src/NyxilumLang/Native/X64Prelude.nx
+// відносно поточної теки.
+import "codegen_expr.nx"
+
+func readSource(path: ptr<uint8>, n: ptr<int64>) -> ptr<uint8> {
+    var src = fileReadAll(path, n)
+    if src == null {
+        var e = strBufNew()
+        e.add("Error: Cannot find file '")
+        e.add(path)
+        e.add("'")
+        e.byte(10)
+        fdWrite(1, e.data, e.len)
+        exit(1)
+    }
+    return src
+}
+
+func compileProgram(prelude: ptr<Vec>, program: ptr<Vec>, objectOnly: bool) -> ptr<StrBuf> {
+    cgInitTypes()
+    cg_structs = mapNew()
+    cg_structDecls = mapNew()
+    cg_laidOut = mapNew()
+    cg_layingOut = mapNew()
+    cg_funcs = mapNew()
+    cg_funcOrder = vecNew()
+    cg_globals = mapNew()
+    cg_text = strBufNew()
+    cg_data = strBufNew()
+    cg_rodata = strBufNew()
+    cg_strings = mapNew()
+    cg_strCount = 0
+    cg_label = 0
+    cg_usedRegs = asptr(alloc(5 * 8))
+
+    var all = vecNew()
+    var i: int64 = 0
+    while i < prelude.len {
+        all.push(prelude.get(i))
+        i = i + 1
+    }
+    i = 0
+    while i < program.len {
+        all.push(program.get(i))
+        i = i + 1
+    }
+
+    i = 0
+    while i < all.len {
+        var s = nodeAt(all, i)
+        if s.kind == N_STRUCT {
+            var si = new(StructInfo)
+            si.name = s.s1
+            si.fields = vecNew()
+            si.size = 0
+            si.align = 1
+            cg_structs.put(s.s1, int64(si))
+        }
+        i = i + 1
+    }
+    i = 0
+    while i < all.len {
+        var s2 = nodeAt(all, i)
+        if s2.kind == N_STRUCT {
+            cg_structDecls.put(s2.s1, int64(s2))
+        }
+        i = i + 1
+    }
+    i = 0
+    while i < all.len {
+        var s3 = nodeAt(all, i)
+        if s3.kind == N_STRUCT {
+            layoutByName(s3.s1)
+        }
+        i = i + 1
+    }
+
+    i = 0
+    while i < all.len {
+        var st = nodeAt(all, i)
+        cg_line = st.line
+        if st.kind == N_STRUCT {
+            var m: int64 = 0
+            while m < st.list2.len {
+                declare(nodeAt(st.list2, m), st.s1)
+                m = m + 1
+            }
+        } else if st.kind == N_FUNC {
+            if contains(st.s1, 46) {
+                declare(st, strNDup(st.s1, lastIndexOf(st.s1, 46)))
+            } else {
+                declare(st, asptr(0))
+            }
+        } else if st.kind == N_VAR {
+            declareGlobal(st)
+        } else if st.kind == N_IMPORT {
+            cgErr("import у системному режимі ще не підтримується")
+        } else {
+            cgErr("на верхньому рівні дозволені лише func, struct і var (код - у func main)")
+        }
+        i = i + 1
+    }
+
+    T("# Згенеровано NativeCodegenX64 (NyxilumLang, системний режим x86-64) - НЕ редагувати вручну.")
+    T(".section .text")
+    if !objectOnly {
+        var main = funcGet("main")
+        if main == null {
+            cgFail("системний бекенд: у файлі немає func main() (для бібліотеки - --obj)")
+        }
+        if main.params.len > 0 {
+            cgFail("системний бекенд: main() поки без параметрів")
+        }
+        T(".globl _start")
+        T("_start:")
+        T("    xor %ebp, %ebp")
+        T(cat3("    mov %rsp, ", globalGet("__nx_args").label, "(%rip)"))
+        T("    and $-16, %rsp")
+        T(cat("    call ", funcGet("__nx_tls_init").label))
+        T(cat("    call ", main.label))
+        if inReg(main.ret) {
+            T("    mov %rax, %rdi")
+        } else {
+            T("    xor %edi, %edi")
+        }
+        T("    mov $231, %eax")
+        T("    syscall")
+    }
+    T("__nx_clone_asm:")
+    T("    mov %rcx, %r10")
+    T("    mov $56, %eax")
+    T("    syscall")
+    T("    test %rax, %rax")
+    T("    jnz 1f")
+    T("    xor %ebp, %ebp")
+    T("    pop %rdi")
+    T("    and $-16, %rsp")
+    T(cat("    call ", funcGet("__nx_thread_entry").label))
+    T("    xor %edi, %edi")
+    T("    mov $60, %eax")
+    T("    syscall")
+    T("1:  ret")
+    i = 0
+    while i < cg_funcOrder.len {
+        compileFunc(asptr(cg_funcOrder.get(i)))
+        i = i + 1
+    }
+
+    var o = strBufNew()
+    o.addBuf(cg_text)
+    if cg_rodata.len > 0 {
+        o.add(".section .rodata\n")
+        o.addBuf(cg_rodata)
+    }
+    if cg_data.len > 0 {
+        o.add(".section .data\n")
+        o.addBuf(cg_data)
+    }
+    o.add(".section .note.GNU-stack,\"\",@progbits\n")
+    return o
+}
+
+func main() -> int32 {
+    var input: ptr<uint8> = asptr(0)
+    var output: ptr<uint8> = asptr(0)
+    var prel: ptr<uint8> = envGet("NX_PRELUDE")
+    var objOnly = false
+    var i: int64 = 1
+    while i < argCount() {
+        var a = arg(i)
+        if strEq(a, "-o") && i + 1 < argCount() {
+            i = i + 1
+            output = arg(i)
+        } else if strEq(a, "--obj") {
+            objOnly = true
+        } else if strEq(a, "--prelude") && i + 1 < argCount() {
+            i = i + 1
+            prel = arg(i)
+        } else {
+            input = a
+        }
+        i = i + 1
+    }
+    if input == null || output == null {
+        fdWriteStr(2, "використання: nxc файл.nx -o вихід.s [--obj] [--prelude X64Prelude.nx]\n")
+        return 2
+    }
+    if prel == null {
+        prel = "src/NyxilumLang/Native/X64Prelude.nx"
+    }
+    __diag_head = "Native compile error: "
+    __diag_fd = 1
+
+    var pn: int64 = 0
+    var psrc = fileReadAll(prel, addr(pn))
+    if psrc == null {
+        cgFail(cat("системний бекенд: не знайдено вбудовану прелюдію X64Prelude.nx: ", prel))
+    }
+    var n: int64 = 0
+    var src = readSource(input, addr(n))
+    var program = parseBytes(src, n)
+    program = resolveImports(program, input)
+    var prelude = parseBytes(psrc, pn)
+    var out = compileProgram(prelude, program, objOnly)
+    if fileWriteAll(output, out.data, out.len) < 0 {
+        fdWriteStr(2, "nxc: не вдалося записати вихідний файл\n")
+        return 1
+    }
+    return 0
+}

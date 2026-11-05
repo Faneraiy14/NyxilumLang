@@ -243,8 +243,9 @@ NyxilumLang (extern - разом із S10).
    «тип, значення, рядок» на всіх .nx у репозиторії.
 4. ✅ `selfhost/parser.nx` + `ast.nx` - дерево як AST/*.cs; перевірка - `nx dump-ast` (повне дерево S-виразами)
    проти dump_ast.nx на всіх .nx і selfhost_cases (помилки теж).
-5. `selfhost/codegen.nx` - порт NativeCodegenX64 + прелюдія; перевірка - однаковий .s на всіх
-   tests/systems, потім розкрутка (стадія 2 == стадія 3).
+5. ✅ `selfhost/nxc.nx` (codegen*.nx, modules.nx, numparse.nx) - порт NativeCodegenX64, ModuleResolver і
+   double.Parse; .s побайтово як у C# на всіх tests/systems, errors/ і згенерованих тестах; розкрутка:
+   стадія 2 == стадія 3 == C# (05.11.2026). Залишилось для кроку 6: as/ld.
 6. Свій асемблер + ELF (без as/ld).
 - Компілятор NyxilumLang, переписаний на NyxilumLang (статичний режим), що видає x86-64.
 - Свій асемблер (машинний код напряму, без GNU `as`) і запис ELF (без `ld`).

@@ -821,16 +821,13 @@ func isUpperFirst(s: ptr<uint8>) -> bool {
 
 func parseFailAt(msg: ptr<uint8>, line: int64, col: int64, tail: ptr<uint8>) {
     var e = strBufNew()
-    e.add("Parse Error: ")
     e.add(msg)
     e.add(" на рядку ")
     e.addInt(line)
     e.add(", стовпець ")
     e.addInt(col)
     e.add(tail)
-    e.byte(10)
-    fdWrite(2, e.data, e.len)
-    exit(1)
+    diagFail("Parse Error: ", e)
 }
 
 // дерево з n байтів тексту (BOM пропускається)

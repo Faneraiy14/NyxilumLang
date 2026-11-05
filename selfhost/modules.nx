@@ -1,0 +1,358 @@
+// import для компілятора на Nx (S8 крок 5) - порт Runtime/ModuleResolver.cs:
+// import "файл.nx" [{ імена }] розгортається на місці (рекурсивно), кожен файл розбирається раз,
+// однакове оголошення входить один раз (за вузлом), цикли розриваються. Вибірковий import бере
+// перелічені імена з усім, від чого вони залежать (виклики, змінні, S { }, extends, методи структур,
+// імена з "_" на початку - завжди).
+import "parser.nx"
+
+struct ModCtx {
+    cache: ptr<Map>       // повний шлях -> ptr<Vec> (розгорнуті оператори модуля)
+    inProgress: ptr<Map>  // повний шлях -> 1, поки модуль розгортається
+}
+
+// ---------- шляхи ----------
+func cwdPath() -> ptr<uint8> {
+    var buf: ptr<uint8> = asptr(alloc(4096))
+    var r = syscall(79, buf, 4096)
+    if r <= 0 {
+        buf[0] = 47
+        buf[1] = 0
+    }
+    return buf
+}
+
+// абсолютний нормалізований шлях (без . і ..), як Path.GetFullPath(Path.Combine(dir, p))
+func fullPath(dir: ptr<uint8>, p: ptr<uint8>) -> ptr<uint8> {
+    var raw = strBufNew()
+    if p[0] != 47 {
+        if dir[0] != 47 {
+            raw.add(cwdPath())
+            raw.byte(47)
+        }
+        raw.add(dir)
+        raw.byte(47)
+    }
+    raw.add(p)
+    // розкласти на частини й зібрати
+    var parts = vecNew()
+    var s = raw.data
+    var i: int64 = 0
+    while s[i] != 0 {
+        while s[i] == 47 {
+            i = i + 1
+        }
+        if s[i] == 0 {
+            break
+        }
+        var st = i
+        while s[i] != 0 && s[i] != 47 {
+            i = i + 1
+        }
+        var n = i - st
+        if n == 1 && s[st] == 46 {
+            continue
+        }
+        if n == 2 && s[st] == 46 && s[st + 1] == 46 {
+            if parts.len > 0 {
+                parts.pop()
+            }
+            continue
+        }
+        parts.pushPtr(strNDup(s + st, n))
+    }
+    var out = strBufNew()
+    if parts.len == 0 {
+        out.byte(47)
+    }
+    var k: int64 = 0
+    while k < parts.len {
+        out.byte(47)
+        out.add(asptr(parts.get(k)))
+        k = k + 1
+    }
+    return out.cstr()
+}
+
+func dirName(p: ptr<uint8>) -> ptr<uint8> {
+    var n = strLen(p)
+    var i = n - 1
+    while i > 0 && p[i] != 47 {
+        i = i - 1
+    }
+    if i <= 0 {
+        return "/"
+    }
+    return strNDup(p, i)
+}
+
+func baseName(p: ptr<uint8>) -> ptr<uint8> {
+    var n = strLen(p)
+    var i = n - 1
+    while i >= 0 && p[i] != 47 {
+        i = i - 1
+    }
+    return p + i + 1
+}
+
+func endsWithNx(p: ptr<uint8>) -> bool {
+    var n = strLen(p)
+    if n < 3 {
+        return false
+    }
+    var a = int64(p[n - 3])
+    var b = int64(p[n - 2]) | 32
+    var c = int64(p[n - 1]) | 32
+    return a == 46 && b == 110 && c == 120
+}
+
+// ключ кешу: як StringComparer.OrdinalIgnoreCase (ASCII)
+func pathKey(p: ptr<uint8>) -> ptr<uint8> {
+    var n = strLen(p)
+    var k = strNDup(p, n)
+    var i: int64 = 0
+    while i < n {
+        if k[i] >= 65 && k[i] <= 90 {
+            k[i] = k[i] + 32
+        }
+        i = i + 1
+    }
+    return k
+}
+
+// ---------- розгортання ----------
+func modLoad(ctx: ptr<ModCtx>, full: ptr<uint8>, importPath: ptr<uint8>) -> ptr<Vec> {
+    var key = pathKey(full)
+    var cached = ctx.cache.get(key, 0)
+    if cached != 0 {
+        return asptr(cached)
+    }
+    if ctx.inProgress.get(key, 0) != 0 {
+        return asptr(0)
+    }
+    var n: int64 = 0
+    var src = fileReadAll(full, addr(n))
+    if src == null {
+        var e = strBufNew()
+        if endsWithNx(importPath) {
+            e.add("Файл модуля не знайдено: ")
+            e.add(full)
+        } else {
+            e.add("Пакет '")
+            e.add(importPath)
+            e.add("' не знайдено в nx_modules/ (шукано від ")
+            e.add(dirName(full))
+            e.add(" до кореня диска). Встанови його: nx install <owner/repo>")
+        }
+        diagFail("", e)
+    }
+    ctx.inProgress.put(key, 1)
+    var savedFile = __diag_file
+    var fb = strBufNew()
+    fb.add(baseName(full))
+    fb.add(": ")
+    __diag_file = fb.cstr()
+    var parsed = parseBytes(src, n)
+    __diag_file = savedFile
+    var expanded = modExpand(ctx, parsed, dirName(full))
+    ctx.inProgress.put(key, 0)
+    ctx.cache.put(key, int64(expanded))
+    return expanded
+}
+
+func modExpand(ctx: ptr<ModCtx>, prog: ptr<Vec>, dir: ptr<uint8>) -> ptr<Vec> {
+    var out = vecNew()
+    var i: int64 = 0
+    while i < prog.len {
+        var s = nodeAt(prog, i)
+        if s.kind != N_IMPORT {
+            out.pushPtr(s)
+        } else {
+            var full = fullPath(dir, s.s1)
+            var mod = modLoad(ctx, full, s.s1)
+            if mod != null {
+                var part = mod
+                if s.list2 != null {
+                    part = modFilter(mod, s.list2, s.s1)
+                }
+                var j: int64 = 0
+                while j < part.len {
+                    out.push(part.get(j))
+                    j = j + 1
+                }
+            }
+        }
+        i = i + 1
+    }
+    return out
+}
+
+// оператори програми з розгорнутими import; кожен вузол - один раз (перша поява)
+func resolveImports(prog: ptr<Vec>, entryPath: ptr<uint8>) -> ptr<Vec> {
+    var ctx = new(ModCtx)
+    ctx.cache = mapNew()
+    ctx.inProgress = mapNew()
+    var entry = fullPath(".", entryPath)
+    ctx.inProgress.put(pathKey(entry), 1)
+    var flat = modExpand(ctx, prog, dirName(entry))
+    var seen = mapNew()
+    var out = vecNew()
+    var buf = stackbuf(32)
+    var i: int64 = 0
+    while i < flat.len {
+        var n = fmtInt(buf, flat.get(i))
+        if !seen.hasN(buf, n) {
+            seen.putN(buf, n, 1)
+            out.push(flat.get(i))
+        }
+        i = i + 1
+    }
+    return out
+}
+
+// ---------- вибірковий import ----------
+func declName(s: ptr<Node>) -> ptr<uint8> {
+    if s.kind == N_FUNC || s.kind == N_STRUCT || s.kind == N_VAR {
+        return s.s1
+    }
+    return asptr(0)
+}
+
+// імена, на які посилається вузол (як CollectReferences у C#)
+func collectRefs(n: ptr<Node>, refs: ptr<Vec>) {
+    if n == null {
+        return
+    }
+    var k = n.kind
+    if k == N_CALL || k == N_NAME || k == N_NEW {
+        refs.pushPtr(n.s1)
+    }
+    if k == N_STRUCT && n.s2 != null {
+        refs.pushPtr(n.s2)
+    }
+    collectRefs(n.a, refs)
+    collectRefs(n.b, refs)
+    collectRefs(n.c, refs)
+    if n.list != null && k != N_IMPORT {
+        var i: int64 = 0
+        while i < n.list.len {
+            collectRefs(nodeAt(n.list, i), refs)
+            i = i + 1
+        }
+    }
+    if n.list2 != null && k != N_IMPORT {
+        var j: int64 = 0
+        while j < n.list2.len {
+            collectRefs(nodeAt(n.list2, j), refs)
+            j = j + 1
+        }
+    }
+}
+
+func modFilter(stmts: ptr<Vec>, names: ptr<Vec>, importPath: ptr<uint8>) -> ptr<Vec> {
+    // ім'я -> перше входження в byNameKeys (порядок), вузли з цим ім'ям шукаємо проходом
+    var byName = mapNew()
+    var keys = vecNew()
+    var i: int64 = 0
+    while i < stmts.len {
+        var nm = declName(nodeAt(stmts, i))
+        if nm != null && !byName.has(nm) {
+            byName.put(nm, 1)
+            keys.pushPtr(nm)
+        }
+        i = i + 1
+    }
+    var missing = strBufNew()
+    var mc: int64 = 0
+    i = 0
+    while i < names.len {
+        var want = nodeAt(names, i).s1
+        if !byName.has(want) {
+            if mc > 0 {
+                missing.add(", ")
+            }
+            missing.add(want)
+            mc = mc + 1
+        }
+        i = i + 1
+    }
+    if mc > 0 {
+        var e = strBufNew()
+        e.add("Вибірковий import з \"")
+        e.add(importPath)
+        e.add("\" не знайшов: ")
+        e.addBuf(missing)
+        diagFail("", e)
+    }
+    var included = mapNew()   // адреса вузла (текстом) -> 1
+    var visited = mapNew()
+    var queue = vecNew()
+    i = 0
+    while i < names.len {
+        queue.pushPtr(nodeAt(names, i).s1)
+        i = i + 1
+    }
+    i = 0
+    while i < keys.len {
+        var kn: ptr<uint8> = asptr(keys.get(i))
+        if kn[0] == 95 {
+            queue.pushPtr(kn)
+        }
+        i = i + 1
+    }
+    var buf = stackbuf(32)
+    var qh: int64 = 0
+    while qh < queue.len {
+        var name: ptr<uint8> = asptr(queue.get(qh))
+        qh = qh + 1
+        if visited.has(name) || !byName.has(name) {
+            visited.put(name, 1)
+            continue
+        }
+        visited.put(name, 1)
+        var j: int64 = 0
+        while j < stmts.len {
+            var d = nodeAt(stmts, j)
+            var dn = declName(d)
+            if dn != null && strEq(dn, name) {
+                var bl = fmtInt(buf, int64(d))
+                if !included.hasN(buf, bl) {
+                    included.putN(buf, bl, 1)
+                    var refs = vecNew()
+                    collectRefs(d, refs)
+                    var r: int64 = 0
+                    while r < refs.len {
+                        var rn: ptr<uint8> = asptr(refs.get(r))
+                        if !strEq(rn, "main") {
+                            queue.pushPtr(rn)
+                        }
+                        r = r + 1
+                    }
+                    if d.kind == N_STRUCT {
+                        var pre = strBufNew()
+                        pre.add(name)
+                        pre.byte(46)
+                        var m: int64 = 0
+                        while m < keys.len {
+                            var mk: ptr<uint8> = asptr(keys.get(m))
+                            if strStarts(mk, pre.cstr()) {
+                                queue.pushPtr(mk)
+                            }
+                            m = m + 1
+                        }
+                    }
+                }
+            }
+            j = j + 1
+        }
+    }
+    var out = vecNew()
+    i = 0
+    while i < stmts.len {
+        var bl2 = fmtInt(buf, stmts.get(i))
+        if included.hasN(buf, bl2) {
+            out.push(stmts.get(i))
+        }
+        i = i + 1
+    }
+    return out
+}

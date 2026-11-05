@@ -62,14 +62,31 @@ func lexKeywords() -> ptr<Map> {
     return m
 }
 
-// повідомлення як у C# (Lexer Error: ...) у stderr і вихід з кодом 1
-func lexFail(b: ptr<StrBuf>) {
+// Куди й з яким початком друкувати помилки. Типово - як `nx dump-tokens`/`dump-ast`
+// ("Lexer Error: " / "Parse Error: " у stderr); компілятор (nxc) ставить "Native compile error: "
+// і stdout, як `nx compile-native`. __diag_file - "файл.nx: " для помилок в імпортованих модулях.
+var __diag_head: ptr<uint8> = null
+var __diag_file: ptr<uint8> = null
+var __diag_fd: int64 = 2
+
+func diagFail(kindHead: ptr<uint8>, b: ptr<StrBuf>) {
     var e = strBufNew()
-    e.add("Lexer Error: ")
+    if __diag_head != null {
+        e.add(__diag_head)
+    } else {
+        e.add(kindHead)
+    }
+    if __diag_file != null {
+        e.add(__diag_file)
+    }
     e.addBuf(b)
     e.byte(10)
-    fdWrite(2, e.data, e.len)
+    fdWrite(__diag_fd, e.data, e.len)
     exit(1)
+}
+
+func lexFail(b: ptr<StrBuf>) {
+    diagFail("Lexer Error: ", b)
 }
 
 func isAsciiLetter(c: int64) -> bool {

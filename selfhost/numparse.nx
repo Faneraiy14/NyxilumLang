@@ -1,0 +1,302 @@
+// Розбір чисел з тексту для компілятора на Nx (S8 крок 5):
+//   parseDoubleBits("3.14") - біти float64, точно як double.Parse у C# (найближче, при рівності - парне);
+//   parseLongText("123", ok) - ціле 64 біти як long.TryParse, далі ulong.TryParse (без знака).
+// Великі цілі - масив 32-бітних «цифр» (молодші спершу) у ptr<int64>; без звільнення пам'яті
+// (компілятор - коротка програма).
+import "std.nx"
+
+struct Big {
+    d: ptr<int64>   // кожна комірка - 0..2^32-1
+    n: int64        // скільки комірок зайнято (без старших нулів)
+    cap: int64
+}
+
+func bigNew(cap: int64) -> ptr<Big> {
+    var b = new(Big)
+    b.cap = cap
+    b.n = 0
+    b.d = asptr(alloc(cap * 8))
+    memset(b.d, 0, cap * 8)
+    return b
+}
+
+func bigTrim(b: ptr<Big>) {
+    while b.n > 0 && b.d[b.n - 1] == 0 {
+        b.n = b.n - 1
+    }
+}
+
+func bigCopy(a: ptr<Big>, cap: int64) -> ptr<Big> {
+    var c = cap
+    if c < a.n + 1 {
+        c = a.n + 1
+    }
+    var b = bigNew(c)
+    var i: int64 = 0
+    while i < a.n {
+        b.d[i] = a.d[i]
+        i = i + 1
+    }
+    b.n = a.n
+    return b
+}
+
+// b = b * m + add (m, add < 2^32); місця має вистачати
+func bigMulAdd(b: ptr<Big>, m: int64, add: int64) {
+    var carry = add
+    var i: int64 = 0
+    while i < b.n {
+        var v = b.d[i] * m + carry
+        b.d[i] = v & 4294967295
+        carry = int64(uint64(v) >> 32)
+        i = i + 1
+    }
+    if carry != 0 {
+        b.d[b.n] = carry
+        b.n = b.n + 1
+    }
+}
+
+func bigBits(b: ptr<Big>) -> int64 {
+    if b.n == 0 {
+        return 0
+    }
+    var top = b.d[b.n - 1]
+    var k: int64 = 0
+    while top != 0 {
+        k = k + 1
+        top = top >> 1
+    }
+    return (b.n - 1) * 32 + k
+}
+
+// новий b << s (s >= 0)
+func bigShl(a: ptr<Big>, s: int64) -> ptr<Big> {
+    var w = s / 32
+    var r = s % 32
+    var b = bigNew(a.n + w + 2)
+    var i: int64 = 0
+    while i < a.n {
+        var v = a.d[i] << r
+        b.d[i + w] = b.d[i + w] | (v & 4294967295)
+        b.d[i + w + 1] = b.d[i + w + 1] | (v >> 32)
+        i = i + 1
+    }
+    b.n = a.n + w + 2
+    bigTrim(b)
+    return b
+}
+
+// біт номер k
+func bigBit(a: ptr<Big>, k: int64) -> int64 {
+    var w = k / 32
+    if w >= a.n {
+        return 0
+    }
+    return (a.d[w] >> (k % 32)) & 1
+}
+
+// -1, 0, 1
+func bigCmp(a: ptr<Big>, b: ptr<Big>) -> int64 {
+    if a.n != b.n {
+        if a.n < b.n {
+            return 0 - 1
+        }
+        return 1
+    }
+    var i = a.n - 1
+    while i >= 0 {
+        if a.d[i] != b.d[i] {
+            if a.d[i] < b.d[i] {
+                return 0 - 1
+            }
+            return 1
+        }
+        i = i - 1
+    }
+    return 0
+}
+
+// a -= b (a >= b)
+func bigSub(a: ptr<Big>, b: ptr<Big>) {
+    var borrow: int64 = 0
+    var i: int64 = 0
+    while i < a.n {
+        var bv: int64 = 0
+        if i < b.n {
+            bv = b.d[i]
+        }
+        var v = a.d[i] - bv - borrow
+        if v < 0 {
+            v = v + 4294967296
+            borrow = 1
+        } else {
+            borrow = 0
+        }
+        a.d[i] = v
+        i = i + 1
+    }
+    bigTrim(a)
+}
+
+// частка floor(num / den) (вміщається в 64 біти) і залишок у num (num змінюється)
+func bigDivSmallQ(num: ptr<Big>, den: ptr<Big>) -> int64 {
+    var nb = bigBits(num)
+    var db = bigBits(den)
+    var q: int64 = 0
+    var s = nb - db
+    while s >= 0 {
+        var t = bigShl(den, s)
+        q = q << 1
+        if bigCmp(num, t) >= 0 {
+            bigSub(num, t)
+            q = q | 1
+        }
+        s = s - 1
+    }
+    return q
+}
+
+// q (2^52 <= q < 2^54 до округлення) * 2^e2 -> біти float64; nearest-even вже зроблено
+func makeDouble(q: int64, e2: int64) -> int64 {
+    var qq = q
+    var ee = e2
+    while qq >= 9007199254740992 {
+        qq = qq >> 1
+        ee = ee + 1
+    }
+    var exp = ee + 52 + 1023
+    if exp >= 2047 {
+        return 9218868437227405312   // нескінченність
+    }
+    if exp <= 0 {
+        return 0                      // дуже малі (субнормальні) у літералах не трапляються - 0
+    }
+    return (exp << 52) | (qq - 4503599627370496)
+}
+
+// біти float64 найближчого до десяткового тексту "цифри[.цифри]"
+func parseDoubleBits(s: ptr<uint8>) -> int64 {
+    var len = strLen(s)
+    var num = bigNew(len / 9 + 4)
+    var e10: int64 = 0
+    var seenDot = false
+    var i: int64 = 0
+    while i < len {
+        var c = int64(s[i])
+        if c == 46 {
+            seenDot = true
+        } else if c >= 48 && c <= 57 {
+            bigMulAdd(num, 10, c - 48)
+            if seenDot {
+                e10 = e10 - 1
+            }
+        }
+        i = i + 1
+    }
+    bigTrim(num)
+    if num.n == 0 {
+        return 0
+    }
+    if e10 >= 0 {
+        var big = bigCopy(num, num.n + e10 / 9 + 4)
+        var k: int64 = 0
+        while k < e10 {
+            bigMulAdd(big, 10, 0)
+            k = k + 1
+        }
+        var bits = bigBits(big)
+        if bits <= 53 {
+            var v: int64 = 0
+            var j = big.n - 1
+            while j >= 0 {
+                v = (v << 32) | big.d[j]
+                j = j - 1
+            }
+            return makeDouble(v << (53 - bits), bits - 53)
+        }
+        var sh = bits - 53
+        var q: int64 = 0
+        var b2 = bits - 1
+        while b2 >= sh {
+            q = (q << 1) | bigBit(big, b2)
+            b2 = b2 - 1
+        }
+        // залишок: молодші sh біт; половина - біт sh-1
+        var half = bigBit(big, sh - 1)
+        var rest = false
+        var t: int64 = 0
+        while t < sh - 1 {
+            if bigBit(big, t) != 0 {
+                rest = true
+            }
+            t = t + 1
+        }
+        if half != 0 && (rest || (q & 1) != 0) {
+            q = q + 1
+        }
+        return makeDouble(q, sh)
+    }
+    // num / 10^-e10: q = floor(num * 2^k / den) з 53 бітами
+    var den = bigNew(len / 9 + 4 + (0 - e10) / 9)
+    den.d[0] = 1
+    den.n = 1
+    var k2: int64 = 0
+    while k2 < 0 - e10 {
+        bigMulAdd(den, 10, 0)
+        k2 = k2 + 1
+    }
+    var kk = 53 + bigBits(den) - bigBits(num)
+    while true {
+        var scaled: ptr<Big> = asptr(0)
+        var dd = den
+        if kk >= 0 {
+            scaled = bigShl(num, kk)
+        } else {
+            scaled = bigCopy(num, num.n + 1)
+            dd = bigShl(den, 0 - kk)
+        }
+        var q2 = bigDivSmallQ(scaled, dd)
+        if q2 >= 9007199254740992 {
+            kk = kk - 1
+        } else if q2 < 4503599627370496 {
+            kk = kk + 1
+        } else {
+            // scaled тепер - залишок; порівняти 2*залишок з дільником
+            var twice = bigShl(scaled, 1)
+            var c2 = bigCmp(twice, dd)
+            if c2 > 0 || (c2 == 0 && (q2 & 1) != 0) {
+                q2 = q2 + 1
+            }
+            return makeDouble(q2, 0 - kk)
+        }
+    }
+    return 0
+}
+
+// long.TryParse, потім ulong.TryParse (лише цифри); ok[0] = 0, якщо не вміщається в 64 біти
+func parseLongText(s: ptr<uint8>, ok: ptr<int64>) -> int64 {
+    var v: uint64 = 0
+    var i: int64 = 0
+    ok[0] = 1
+    if s[0] == 0 {
+        ok[0] = 0
+        return 0
+    }
+    while s[i] != 0 {
+        var c = int64(s[i])
+        if c < 48 || c > 57 {
+            ok[0] = 0
+            return 0
+        }
+        var d = uint64(c - 48)
+        // v * 10 + d > 2^64 - 1 ?
+        if v > uint64(1844674407370955161) || (v == uint64(1844674407370955161) && d > uint64(5)) {
+            ok[0] = 0
+            return 0
+        }
+        v = v * uint64(10) + d
+        i = i + 1
+    }
+    return int64(v)
+}

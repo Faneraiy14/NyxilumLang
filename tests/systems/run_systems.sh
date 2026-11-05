@@ -64,9 +64,34 @@ if "$NX" compile-native ../../selfhost/dump_tokens.nx -o "$W/dt" --target linux-
     if [ -z "$pbad" ]; then ok "парсер на Nx = C# ($lt файлів)"; else bad "парсер на Nx" "$pbad"; fi
 else bad "лексер/парсер на Nx" "selfhost/dump_*.nx не скомпілювались"; fi
 
+# S8 крок 5: компілятор на Nx (selfhost/nxc.nx) дає побайтово той самий .s, що C#, на всіх тестах;
+# розкрутка: nxc (зібраний C#) збирає себе -> стадія 2, вона знову себе -> стадія 3; .s стадій 2 і 3 і C# однакові
+PRE="$(cd ../.. && pwd)/src/NyxilumLang/Native/X64Prelude.nx"
+if "$NX" compile-native ../../selfhost/nxc.nx -o "$W/nxc" --target linux-x64 >/dev/null 2>&1; then
+    cbad=""; cn=0
+    for f in [0-9]*.nx http_server.nx; do
+        n="${f%.nx}"; o=""; [ -f "c/$n.c" ] && o="--obj"
+        "$NX" compile-native "$f" -o "$W/cs_$n" --target linux-x64 $o >/dev/null 2>&1
+        "$W/nxc" "$f" -o "$W/nx_$n.s" $o --prelude "$PRE" >/dev/null 2>&1
+        cn=$((cn + 1)); cmp -s "$W/cs_$n.s" "$W/nx_$n.s" || cbad="$cbad $n"
+    done
+    for f in errors/*.nx; do
+        c=$("$NX" compile-native "$f" -o "$W/ce" --target linux-x64 2>&1); n=$("$W/nxc" "$f" -o "$W/ne.s" --prelude "$PRE" 2>&1)
+        cn=$((cn + 1)); [ "$c" = "$n" ] || cbad="$cbad $f"
+    done
+    if [ -z "$cbad" ]; then ok "компілятор на Nx = C# ($cn файлів: .s і тексти помилок)"; else bad "компілятор на Nx" "$cbad"; fi
+    mkdir -p "$W/b2" "$W/b3"
+    if "$W/nxc" ../../selfhost/nxc.nx -o "$W/b2/nxc.s" --prelude "$PRE" && (cd "$W/b2" && as --64 nxc.s -o nxc.o && ld -m elf_x86_64 nxc.o -o nxc) &&
+       "$W/b2/nxc" ../../selfhost/nxc.nx -o "$W/b3/nxc.s" --prelude "$PRE" && (cd "$W/b3" && as --64 nxc.s -o nxc.o && ld -m elf_x86_64 nxc.o -o nxc) &&
+       cmp -s "$W/nxc.s" "$W/b2/nxc.s" && cmp -s "$W/b2/nxc.s" "$W/b3/nxc.s" && cmp -s "$W/b2/nxc" "$W/b3/nxc"; then
+        ok "розкрутка: стадія 2 == стадія 3 == C# ($(wc -l < "$W/b2/nxc.s") рядків .s, бінарники однакові)"
+    else bad "розкрутка" "стадії різняться"; fi
+else bad "компілятор на Nx" "selfhost/nxc.nx не скомпілювався"; fi
+
 python3 gen_arith.py "$W/a.nx" "$W/a.c"
 if gcc -O0 -w "$W/a.c" -o "$W/a_c" && "$W/a_c" > "$W/a_c.out" && "$NX" compile-native "$W/a.nx" -o "$W/a_nx" --target linux-x64 >/dev/null 2>&1 && "$W/a_nx" > "$W/a_nx.out" && cmp -s "$W/a_c.out" "$W/a_nx.out"; then
     ok "арифметика проти C ($(wc -l < "$W/a_c.out") результатів)"
+    if [ -x "$W/nxc" ]; then "$W/nxc" "$W/a.nx" -o "$W/a_n.s" --prelude "$PRE" >/dev/null 2>&1; cmp -s "$W/a_nx.s" "$W/a_n.s" && ok "арифметика: nxc = C# (.s)" || bad "арифметика: nxc != C# (.s)"; fi
 else bad "арифметика проти C" "$(diff "$W/a_c.out" "$W/a_nx.out" 2>&1 | head -5)"; fi
 
 for seed in 1 2; do

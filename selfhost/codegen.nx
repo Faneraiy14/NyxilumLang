@@ -1,0 +1,858 @@
+// Генератор коду x86-64 на Nx (S8 крок 5) - порт src/NyxilumLang/Native/NativeCodegenX64.cs
+// рядок у рядок: ті самі типи, правила, мітки, порядок функцій і тексти помилок, тож .s
+// має бути побайтово таким самим, як у C# (перевірка: run_systems.sh).
+// Стан - глобальні змінні cg_* (одна компіляція на процес).
+import "modules.nx"
+import "numparse.nx"
+
+// ---------- рядки ----------
+func cat(a: ptr<uint8>, b: ptr<uint8>) -> ptr<uint8> {
+    return strCat(a, b)
+}
+
+func cat3(a: ptr<uint8>, b: ptr<uint8>, c: ptr<uint8>) -> ptr<uint8> {
+    var s = strBufNew()
+    s.add(a)
+    s.add(b)
+    s.add(c)
+    return s.cstr()
+}
+
+func cat4(a: ptr<uint8>, b: ptr<uint8>, c: ptr<uint8>, d: ptr<uint8>) -> ptr<uint8> {
+    var s = strBufNew()
+    s.add(a)
+    s.add(b)
+    s.add(c)
+    s.add(d)
+    return s.cstr()
+}
+
+func cat5(a: ptr<uint8>, b: ptr<uint8>, c: ptr<uint8>, d: ptr<uint8>, e: ptr<uint8>) -> ptr<uint8> {
+    var s = strBufNew()
+    s.add(a)
+    s.add(b)
+    s.add(c)
+    s.add(d)
+    s.add(e)
+    return s.cstr()
+}
+
+func cat6(a: ptr<uint8>, b: ptr<uint8>, c: ptr<uint8>, d: ptr<uint8>, e: ptr<uint8>, f: ptr<uint8>) -> ptr<uint8> {
+    var s = strBufNew()
+    s.add(a)
+    s.add(b)
+    s.add(c)
+    s.add(d)
+    s.add(e)
+    s.add(f)
+    return s.cstr()
+}
+
+func its(v: int64) -> ptr<uint8> {
+    var r: ptr<uint8> = asptr(alloc(24))
+    fmtInt(r, v)
+    return r
+}
+
+func contains(s: ptr<uint8>, c: int64) -> bool {
+    var i: int64 = 0
+    while s[i] != 0 {
+        if int64(s[i]) == c {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+func lastIndexOf(s: ptr<uint8>, c: int64) -> int64 {
+    var r: int64 = 0 - 1
+    var i: int64 = 0
+    while s[i] != 0 {
+        if int64(s[i]) == c {
+            r = i
+        }
+        i = i + 1
+    }
+    return r
+}
+
+func endsWith(s: ptr<uint8>, suf: ptr<uint8>) -> bool {
+    var n = strLen(s)
+    var m = strLen(suf)
+    return n >= m && strEq(s + n - m, suf)
+}
+
+// ---------- типи ----------
+var K_INT: int64 = 0
+var K_FLOAT: int64 = 1
+var K_BOOL: int64 = 2
+var K_PTR: int64 = 3
+var K_VOID: int64 = 4
+var K_STRUCT: int64 = 5
+var K_ARRAY: int64 = 6
+
+struct Ty {
+    kind: int64
+    size: int64
+    count: int64
+    align: int64
+    signed: bool
+    elem: ptr<Ty>
+    sname: ptr<uint8>
+}
+
+func tyMake(kind: int64, size: int64, signed: bool) -> ptr<Ty> {
+    var t = new(Ty)
+    t.kind = kind
+    t.size = size
+    t.count = 0
+    t.align = 1
+    t.signed = signed
+    t.elem = asptr(0)
+    t.sname = asptr(0)
+    return t
+}
+
+var T_I8: ptr<Ty> = null
+var T_U8: ptr<Ty> = null
+var T_I16: ptr<Ty> = null
+var T_U16: ptr<Ty> = null
+var T_I32: ptr<Ty> = null
+var T_U32: ptr<Ty> = null
+var T_I64: ptr<Ty> = null
+var T_U64: ptr<Ty> = null
+var T_F64: ptr<Ty> = null
+var T_F32: ptr<Ty> = null
+var T_BOOL: ptr<Ty> = null
+var T_VOID: ptr<Ty> = null
+var T_VOIDPTR: ptr<Ty> = null
+
+func tyPtr(e: ptr<Ty>) -> ptr<Ty> {
+    var t = tyMake(K_PTR, 8, false)
+    t.elem = e
+    return t
+}
+
+func cgInitTypes() {
+    T_I8 = tyMake(K_INT, 1, true)
+    T_U8 = tyMake(K_INT, 1, false)
+    T_I16 = tyMake(K_INT, 2, true)
+    T_U16 = tyMake(K_INT, 2, false)
+    T_I32 = tyMake(K_INT, 4, true)
+    T_U32 = tyMake(K_INT, 4, false)
+    T_I64 = tyMake(K_INT, 8, true)
+    T_U64 = tyMake(K_INT, 8, false)
+    T_F64 = tyMake(K_FLOAT, 8, false)
+    T_F32 = tyMake(K_FLOAT, 4, false)
+    T_BOOL = tyMake(K_BOOL, 1, false)
+    T_VOID = tyMake(K_VOID, 0, false)
+    T_VOIDPTR = tyPtr(T_VOID)
+}
+
+func isInt(t: ptr<Ty>) -> bool {
+    return t.kind == K_INT
+}
+
+func isPtr(t: ptr<Ty>) -> bool {
+    return t.kind == K_PTR
+}
+
+func isFloat(t: ptr<Ty>) -> bool {
+    return t.kind == K_FLOAT
+}
+
+func isAggregate(t: ptr<Ty>) -> bool {
+    return t.kind == K_STRUCT || t.kind == K_ARRAY
+}
+
+func inReg(t: ptr<Ty>) -> bool {
+    return t.kind == K_INT || t.kind == K_BOOL || t.kind == K_PTR
+}
+
+func tyStr(t: ptr<Ty>) -> ptr<uint8> {
+    var k = t.kind
+    if k == K_INT {
+        if t.signed {
+            return cat("int", its(t.size * 8))
+        }
+        return cat("uint", its(t.size * 8))
+    }
+    if k == K_FLOAT {
+        return cat("float", its(t.size * 8))
+    }
+    if k == K_BOOL {
+        return "bool"
+    }
+    if k == K_VOID {
+        return "void"
+    }
+    if k == K_PTR {
+        return cat3("ptr<", tyStr(t.elem), ">")
+    }
+    if k == K_ARRAY {
+        return cat5("[", tyStr(t.elem), "; ", its(t.count), "]")
+    }
+    return t.sname
+}
+
+func strEqN(a: ptr<uint8>, b: ptr<uint8>) -> bool {
+    if a == null || b == null {
+        return a == null && b == null
+    }
+    return strEq(a, b)
+}
+
+func tySame(a: ptr<Ty>, o: ptr<Ty>) -> bool {
+    if a.kind == K_STRUCT {
+        return o.kind == K_STRUCT && strEqN(a.sname, o.sname)
+    }
+    if a.kind == K_ARRAY {
+        return o.kind == K_ARRAY && a.count == o.count && tySame(a.elem, o.elem)
+    }
+    if !(a.kind == o.kind && a.size == o.size && a.signed == o.signed && strEqN(a.sname, o.sname)) {
+        return false
+    }
+    return a.kind != K_PTR || tySame(a.elem, o.elem)
+}
+
+// ---------- таблиці ----------
+struct Field {
+    name: ptr<uint8>
+    type: ptr<Ty>
+    off: int64
+}
+
+struct StructInfo {
+    name: ptr<uint8>
+    fields: ptr<Vec>
+    size: int64
+    align: int64
+}
+
+struct Param {
+    name: ptr<uint8>
+    type: ptr<Ty>
+}
+
+struct Func {
+    name: ptr<uint8>
+    label: ptr<uint8>
+    params: ptr<Vec>
+    ret: ptr<Ty>
+    decl: ptr<Node>
+    owner: ptr<uint8>
+}
+
+struct Global {
+    type: ptr<Ty>
+    label: ptr<uint8>
+}
+
+struct Local {
+    type: ptr<Ty>
+    off: int64
+}
+
+struct LoopL {
+    cont: ptr<uint8>
+    brk: ptr<uint8>
+}
+
+var cg_structs: ptr<Map> = null
+var cg_structDecls: ptr<Map> = null
+var cg_laidOut: ptr<Map> = null
+var cg_layingOut: ptr<Map> = null
+var cg_funcs: ptr<Map> = null
+var cg_funcOrder: ptr<Vec> = null
+var cg_globals: ptr<Map> = null
+var cg_text: ptr<StrBuf> = null
+var cg_data: ptr<StrBuf> = null
+var cg_rodata: ptr<StrBuf> = null
+var cg_strings: ptr<Map> = null   // рядок -> номер + 1 (дійсний, лише якщо номер < cg_strCount)
+var cg_strCount: int64 = 0
+var cg_label: int64 = 0
+var cg_b: ptr<StrBuf> = null
+var cg_scopes: ptr<Vec> = null    // ptr<Map>: ім'я -> ptr<Local>
+var cg_frame: int64 = 0
+var cg_depth: int64 = 0
+var cg_cur: ptr<Func> = null
+var cg_loops: ptr<Vec> = null
+var cg_line: int64 = 0
+var cg_regPlan: ptr<Map> = null   // ім'я -> номер регістра + 1
+var cg_usedRegs: ptr<int64> = null
+var cg_condJump: ptr<uint8> = null
+var cg_condFused: bool = false
+
+func structInfo(name: ptr<uint8>) -> ptr<StructInfo> {
+    return asptr(cg_structs.get(name, 0))
+}
+
+func funcGet(name: ptr<uint8>) -> ptr<Func> {
+    return asptr(cg_funcs.get(name, 0))
+}
+
+func globalGet(name: ptr<uint8>) -> ptr<Global> {
+    return asptr(cg_globals.get(name, 0))
+}
+
+// помилка "рядок N: ..." (як Err у C#) і вихід
+func cgErr(msg: ptr<uint8>) {
+    var e = strBufNew()
+    e.add("рядок ")
+    e.addInt(cg_line)
+    e.add(": ")
+    e.add(msg)
+    diagFail("", e)
+}
+
+// помилка без номера рядка
+func cgFail(msg: ptr<uint8>) {
+    var e = strBufNew()
+    e.add(msg)
+    diagFail("", e)
+}
+
+func tryLocal(name: ptr<uint8>) -> ptr<Local> {
+    var i = cg_scopes.len - 1
+    while i >= 0 {
+        var m: ptr<Map> = asptr(cg_scopes.get(i))
+        var v = m.get(name, 0)
+        if v != 0 {
+            return asptr(v)
+        }
+        i = i - 1
+    }
+    return asptr(0)
+}
+
+func topScope() -> ptr<Map> {
+    return asptr(cg_scopes.last())
+}
+
+// ---------- типи з тексту ----------
+func parseTypeP(s: ptr<uint8>, param: bool) -> ptr<Ty> {
+    if param && (s == null || strEq(s, "any")) {
+        return T_I64
+    }
+    if s != null {
+        if strEq(s, "int8") {
+            return T_I8
+        }
+        if strEq(s, "uint8") {
+            return T_U8
+        }
+        if strEq(s, "int16") {
+            return T_I16
+        }
+        if strEq(s, "uint16") {
+            return T_U16
+        }
+        if strEq(s, "int32") {
+            return T_I32
+        }
+        if strEq(s, "uint32") {
+            return T_U32
+        }
+        if strEq(s, "int64") {
+            return T_I64
+        }
+        if strEq(s, "uint64") {
+            return T_U64
+        }
+        if strEq(s, "float64") || strEq(s, "number") {
+            return T_F64
+        }
+        if strEq(s, "float32") {
+            return T_F32
+        }
+        if strEq(s, "bool") {
+            return T_BOOL
+        }
+        if strEq(s, "void") {
+            return T_VOID
+        }
+        var n = strLen(s)
+        if strStarts(s, "ptr<") && endsWith(s, ">") {
+            return tyPtr(parseTypeP(strNDup(s + 4, n - 5), false))
+        }
+        if strStarts(s, "[") && endsWith(s, "]") && contains(s, 59) {
+            var semi = lastIndexOf(s, 59)
+            var el = parseTypeP(strNDup(s + 1, semi - 1), false)
+            // int.TryParse: лише цифри, до 2^31-1
+            var cnt: int64 = 0
+            var okc = semi + 1 < n - 1
+            var i = semi + 1
+            while i < n - 1 {
+                var c = int64(s[i])
+                if c < 48 || c > 57 {
+                    okc = false
+                } else {
+                    cnt = cnt * 10 + c - 48
+                    if cnt > 2147483647 {
+                        okc = false
+                    }
+                }
+                i = i + 1
+            }
+            if !okc || cnt <= 0 {
+                cgErr(cat3("довжина масиву в ", s, " має бути додатним цілим"))
+            }
+            if el.kind == K_VOID {
+                cgErr("масив void не має сенсу")
+            }
+            if el.kind == K_STRUCT {
+                layoutByName(el.sname)
+            }
+            var es = el.size
+            if el.kind == K_STRUCT {
+                es = structInfo(el.sname).size
+            }
+            var at = tyMake(K_ARRAY, es * cnt, false)
+            at.elem = el
+            at.count = cnt
+            at.align = alignOf(el)
+            return at
+        }
+        var si = structInfo(s)
+        if si != null {
+            var st = tyMake(K_STRUCT, si.size, false)
+            st.sname = s
+            return st
+        }
+    }
+    var shown = s
+    if s == null {
+        shown = "(не вказано)"
+    }
+    cgErr(cat3("невідомий тип «", shown, "» (є int8..int64, uint8..uint64, float32, float64, bool, ptr<T>, структури)"))
+    return asptr(0)
+}
+
+func parseType(s: ptr<uint8>) -> ptr<Ty> {
+    return parseTypeP(s, false)
+}
+
+func layoutByName(name: ptr<uint8>) {
+    if cg_laidOut.has(name) {
+        return
+    }
+    if cg_layingOut.get(name, 0) != 0 {
+        cgErr(cat5("структура ", name, " містить сама себе за значенням - тримай ptr<", name, ">"))
+    }
+    cg_layingOut.put(name, 1)
+    layout(asptr(cg_structDecls.get(name, 0)))
+    cg_layingOut.put(name, 0)
+    cg_laidOut.put(name, 1)
+}
+
+func alignOf(t: ptr<Ty>) -> int64 {
+    if t.kind == K_STRUCT {
+        return structInfo(t.sname).align
+    }
+    if t.kind == K_ARRAY {
+        return t.align
+    }
+    if t.size > 1 {
+        return t.size
+    }
+    return 1
+}
+
+func layout(s: ptr<Node>) {
+    var saved = cg_line
+    cg_line = s.line
+    if s.s2 != null {
+        cgErr("extends у системному режимі ще немає")
+    }
+    var si = structInfo(s.s1)
+    var off: int64 = 0
+    var i: int64 = 0
+    while i < s.list.len {
+        var fd = nodeAt(s.list, i)
+        var t = parseType(fd.s2)
+        if t.kind == K_VOID {
+            cgErr(cat5("поле ", s.s1, ".", fd.s1, ": void не може бути полем"))
+        }
+        if t.kind == K_STRUCT {
+            layoutByName(t.sname)
+            var t2 = tyMake(K_STRUCT, structInfo(t.sname).size, false)
+            t2.sname = t.sname
+            t = t2
+        }
+        var a = alignOf(t)
+        off = (off + a - 1) / a * a
+        var f = new(Field)
+        f.name = fd.s1
+        f.type = t
+        f.off = off
+        si.fields.pushPtr(f)
+        off = off + t.size
+        if a > si.align {
+            si.align = a
+        }
+        i = i + 1
+    }
+    var sz = (off + si.align - 1) / si.align * si.align
+    if sz < 1 {
+        sz = 1
+    }
+    si.size = sz
+    cg_line = saved
+}
+
+func fieldOf(si: ptr<StructInfo>, name: ptr<uint8>) -> ptr<Field> {
+    var i: int64 = 0
+    while i < si.fields.len {
+        var f: ptr<Field> = asptr(si.fields.get(i))
+        if strEq(f.name, name) {
+            return f
+        }
+        i = i + 1
+    }
+    return asptr(0)
+}
+
+// ---------- імена й оголошення ----------
+var HEX_DIGITS: ptr<uint8> = "0123456789abcdef"
+
+func mangleAdd(sb: ptr<StrBuf>, u: int64) {
+    sb.add("_U")
+    sb.byte(int64(HEX_DIGITS[(u >> 12) & 15]))
+    sb.byte(int64(HEX_DIGITS[(u >> 8) & 15]))
+    sb.byte(int64(HEX_DIGITS[(u >> 4) & 15]))
+    sb.byte(int64(HEX_DIGITS[u & 15]))
+}
+
+// як Mangle у C#: латиниця, цифри, _ - як є; решта (по UTF-16) - _Uxxxx
+func mangle(name: ptr<uint8>) -> ptr<uint8> {
+    var sb = strBufNew()
+    var i: int64 = 0
+    while name[i] != 0 {
+        var c = int64(name[i])
+        if (c >= 97 && c <= 122) || (c >= 65 && c <= 90) || (c >= 48 && c <= 57) || c == 95 {
+            sb.byte(c)
+            i = i + 1
+        } else if c < 128 {
+            mangleAdd(sb, c)
+            i = i + 1
+        } else {
+            var cp: int64 = 0
+            var n: int64 = 1
+            if (c & 224) == 192 {
+                cp = c & 31
+                n = 2
+            } else if (c & 240) == 224 {
+                cp = c & 15
+                n = 3
+            } else {
+                cp = c & 7
+                n = 4
+            }
+            var k: int64 = 1
+            while k < n {
+                cp = (cp << 6) | (int64(name[i + k]) & 63)
+                k = k + 1
+            }
+            if cp > 65535 {
+                var v = cp - 65536
+                mangleAdd(sb, 55296 + (v >> 10))
+                mangleAdd(sb, 56320 + (v & 1023))
+            } else {
+                mangleAdd(sb, cp)
+            }
+            i = i + n
+        }
+    }
+    return sb.cstr()
+}
+
+func declare(fd: ptr<Node>, owner: ptr<uint8>) {
+    cg_line = fd.line
+    var bare = fd.s1
+    if owner != null && contains(fd.s1, 46) {
+        bare = fd.s1 + lastIndexOf(fd.s1, 46) + 1
+    }
+    var key = bare
+    if owner != null {
+        key = cat3(owner, ".", bare)
+    }
+    if cg_funcs.has(key) {
+        cgErr(cat3("функцію «", key, "» оголошено двічі"))
+    }
+    if fd.flag != 0 {
+        cgErr("naked-функції в x86-64 ще немає")
+    }
+    var f = new(Func)
+    f.name = key
+    f.decl = fd
+    f.owner = owner
+    if owner != null {
+        f.label = cat3(mangle(owner), "__", mangle(bare))
+    } else {
+        f.label = mangle(bare)
+    }
+    f.params = vecNew()
+    var i: int64 = 0
+    while i < fd.list.len {
+        var p = nodeAt(fd.list, i)
+        var pr = new(Param)
+        pr.name = p.s1
+        if owner != null && strEq(p.s1, "self") {
+            pr.type = tyPtr(parseType(owner))
+        } else {
+            pr.type = parseTypeP(p.s2, true)
+        }
+        f.params.pushPtr(pr)
+        i = i + 1
+    }
+    if fd.s2 == null {
+        f.ret = T_VOID
+    } else {
+        f.ret = parseType(fd.s2)
+    }
+    if f.ret.kind == K_STRUCT {
+        cgErr("повертати структуру за значенням ще не можна - поверни ptr<…>")
+    }
+    cg_funcs.put(key, int64(f))
+    cg_funcOrder.pushPtr(f)
+}
+
+func isNumLit(e: ptr<Node>) -> bool {
+    return e.kind == N_NUM
+}
+
+// IsIntText: синтетична 1 (x++) - ціла; інакше - без крапки в сирому записі
+func isIntText(e: ptr<Node>) -> bool {
+    if e.flag != 0 {
+        return true
+    }
+    return !contains(e.s1, 46)
+}
+
+func literalType(e: ptr<Node>) -> ptr<Ty> {
+    if e.kind == N_NUM && isIntText(e) {
+        return T_I64
+    }
+    if e.kind == N_NUM {
+        return T_F64
+    }
+    if e.kind == N_BOOL {
+        return T_BOOL
+    }
+    if e.kind == N_STR {
+        return tyPtr(T_U8)
+    }
+    if e.kind == N_UNARY && strEq(e.s1, "-") {
+        return literalType(e.a)
+    }
+    cgErr("глобальна змінна: початкове значення має бути сталою")
+    return asptr(0)
+}
+
+func fits(v: int64, t: ptr<Ty>, negative: bool) -> bool {
+    if t.size == 8 {
+        return !(negative && !t.signed && v != 0)
+    }
+    var bits = t.size * 8
+    if t.signed {
+        return v >= 0 - (1 << (bits - 1)) && v < (1 << (bits - 1))
+    }
+    return v >= 0 && v < (1 << bits)
+}
+
+func canon(v: int64, t: ptr<Ty>) -> int64 {
+    if t.size == 1 {
+        if t.signed {
+            return int64(int8(v))
+        }
+        return int64(uint8(v))
+    }
+    if t.size == 2 {
+        if t.signed {
+            return int64(int16(v))
+        }
+        return int64(uint16(v))
+    }
+    if t.size == 4 {
+        if t.signed {
+            return int64(int32(v))
+        }
+        return int64(uint32(v))
+    }
+    return v
+}
+
+// ConstInt без виходу: null - успіх (значення в out[0]), інакше текст помилки
+func constIntTry(e0: ptr<Node>, t: ptr<Ty>, out: ptr<int64>) -> ptr<uint8> {
+    var e = e0
+    var neg = false
+    while e.kind == N_UNARY && strEq(e.s1, "-") {
+        neg = !neg
+        e = e.a
+    }
+    if e.kind != N_NUM || !isIntText(e) {
+        return "очікується ціла стала"
+    }
+    var raw = e.s1
+    var ok: int64 = 0
+    var v = parseLongText(raw, addr(ok))
+    if ok == 0 {
+        return cat3("число ", raw, " не вміщається в 64 біти")
+    }
+    if neg {
+        v = 0 - v
+    }
+    if !fits(v, t, neg) {
+        var sign: ptr<uint8> = ""
+        if neg {
+            sign = "-"
+        }
+        return cat5("стала ", sign, raw, " не вміщається в ", tyStr(t))
+    }
+    out[0] = canon(v, t)
+    return asptr(0)
+}
+
+func constInt(e: ptr<Node>, t: ptr<Ty>) -> int64 {
+    var v: int64 = 0
+    var err = constIntTry(e, t, addr(v))
+    if err != null {
+        cgErr(err)
+    }
+    return v
+}
+
+// біти float64 сталої (з мінусами попереду)
+func constFloatBits(e0: ptr<Node>) -> int64 {
+    var e = e0
+    var neg = false
+    while e.kind == N_UNARY && strEq(e.s1, "-") {
+        neg = !neg
+        e = e.a
+    }
+    if e.kind != N_NUM {
+        cgErr("очікується дробова стала")
+    }
+    var bits = parseDoubleBits(e.s1)
+    if neg {
+        bits = bits ^ (0 - 9223372036854775807 - 1)
+    }
+    return bits
+}
+
+func f32BitsOf(dbits: int64) -> int64 {
+    var f = float32(bitsToFloat64(dbits))
+    return int64(float32Bits(f))
+}
+
+func declareGlobal(vd: ptr<Node>) {
+    cg_line = vd.line
+    var t: ptr<Ty> = asptr(0)
+    if vd.s2 != null {
+        t = parseType(vd.s2)
+    } else if vd.a != null {
+        t = literalType(vd.a)
+    } else {
+        cgErr(cat3("глобальна ", vd.s1, ": вкажи тип"))
+    }
+    if t.kind == K_STRUCT || t.kind == K_VOID {
+        cgErr(cat5("глобальна ", vd.s1, ": тип ", tyStr(t), " не підходить"))
+    }
+    var label = cat("__g_", mangle(vd.s1))
+    var g = new(Global)
+    g.type = t
+    g.label = label
+    cg_globals.put(vd.s1, int64(g))
+    var dir: ptr<uint8> = ".quad"
+    if t.size == 1 {
+        dir = ".byte"
+    } else if t.size == 2 {
+        dir = ".short"
+    } else if t.size == 4 {
+        dir = ".long"
+    }
+    var init = vd.a
+    var val: ptr<uint8> = asptr(0)
+    if init == null {
+        val = "0"
+    } else if isFloat(t) {
+        var db = constFloatBits(init)
+        if t.size == 4 {
+            val = its(f32BitsOf(db))
+        } else {
+            val = its(db)
+        }
+    } else if t.kind == K_BOOL {
+        if init.kind == N_BOOL && init.flag != 0 {
+            val = "1"
+        } else if init.kind == N_BOOL {
+            val = "0"
+        } else {
+            cgErr("глобальна bool: лише true/false")
+        }
+    } else if isPtr(t) && init.kind == N_STR {
+        val = stringLabel(init.s1, init.len)
+    } else if isPtr(t) && init.kind == N_NULL {
+        val = "0"
+    } else if isInt(t) {
+        val = its(constInt(init, t))
+    } else {
+        cgErr(cat3("глобальна ", vd.s1, ": початкове значення має бути сталою"))
+    }
+    var al = t.size
+    if al < 1 {
+        al = 1
+    }
+    cg_data.add("    .balign ")
+    cg_data.addInt(al)
+    cg_data.byte(10)
+    cg_data.add(label)
+    cg_data.add(": ")
+    cg_data.add(dir)
+    cg_data.byte(32)
+    cg_data.add(val)
+    cg_data.byte(10)
+}
+
+func stringLabel(s: ptr<uint8>, n: int64) -> ptr<uint8> {
+    var idx = cg_strings.getN(s, n, 0)
+    if idx != 0 && idx - 1 < cg_strCount {
+        return cat(".Lstr", its(idx - 1))
+    }
+    var l = cat(".Lstr", its(cg_strCount))
+    cg_strings.putN(s, n, cg_strCount + 1)
+    cg_strCount = cg_strCount + 1
+    cg_rodata.add(l)
+    cg_rodata.add(": .byte ")
+    var i: int64 = 0
+    while i < n {
+        cg_rodata.addInt(int64(s[i]))
+        cg_rodata.byte(44)
+        i = i + 1
+    }
+    cg_rodata.add("0\n")
+    return l
+}
+
+func newLabel(what: ptr<uint8>) -> ptr<uint8> {
+    var l = cat3(".L", what, its(cg_label))
+    cg_label = cg_label + 1
+    return l
+}
+
+func E(line: ptr<uint8>) {
+    cg_b.add("    ")
+    cg_b.add(line)
+    cg_b.byte(10)
+}
+
+func L(label: ptr<uint8>) {
+    cg_b.add(label)
+    cg_b.add(":\n")
+}
+
+func T(line: ptr<uint8>) {
+    cg_text.add(line)
+    cg_text.byte(10)
+}

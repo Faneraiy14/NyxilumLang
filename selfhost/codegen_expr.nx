@@ -1,0 +1,1434 @@
+// Генератор x86-64 на Nx, частина 3: вирази, присвоєння, арифметика, виклики, перетворення.
+// Результат у rax (цілі, bool, ptr) або xmm0 (дробові). Порт NativeCodegenX64.cs.
+import "codegen_stmt.nx"
+
+func ptrTo(t: ptr<Ty>) -> ptr<Ty> {
+    if t.kind == K_ARRAY {
+        return tyPtr(t.elem)
+    }
+    return tyPtr(t)
+}
+
+func gen(e: ptr<Node>, want0: ptr<Ty>) -> ptr<Ty> {
+    var want = want0
+    var k = e.kind
+    if k == N_NUM {
+        if want != null && !isInt(want) && !isFloat(want) {
+            want = asptr(0)
+        }
+        if isIntText(e) && (want == null || isInt(want)) {
+            var t = want
+            if t == null {
+                t = T_I64
+            }
+            E(cat3("movabs $", its(constInt(e, t)), ", %rax"))
+            return t
+        }
+        var db = parseDoubleBits(e.s1)
+        if want != null && isFloat(want) && want.size == 4 {
+            E(cat3("mov $", its(int64(int32(f32BitsOf(db)))), ", %eax"))
+            E("movd %eax, %xmm0")
+            return T_F32
+        }
+        E(cat3("movabs $", its(db), ", %rax"))
+        E("movq %rax, %xmm0")
+        return T_F64
+    }
+    if k == N_BOOL {
+        E(cat3("mov $", its(e.flag), ", %eax"))
+        return T_BOOL
+    }
+    if k == N_STR {
+        E(cat3("lea ", stringLabel(e.s1, e.len), "(%rip), %rax"))
+        return tyPtr(T_U8)
+    }
+    if k == N_NULL {
+        E("xor %eax, %eax")
+        return T_VOIDPTR
+    }
+    if k == N_NAME {
+        var lv = tryLocal(e.s1)
+        if lv != null {
+            loadLocal(lv.off, lv.type)
+            return lv.type
+        }
+        var g = globalGet(e.s1)
+        if g != null {
+            loadMem(cat(g.label, "(%rip)"), g.type)
+            return g.type
+        }
+        if cg_funcs.has(e.s1) {
+            cgErr(cat5("«", e.s1, "» - функція; адресу дає funcaddr(", e.s1, ")"))
+        }
+        cgErr(cat3("невідома змінна «", e.s1, "»"))
+    }
+    if k == N_UNARY {
+        return unary(e, want)
+    }
+    if k == N_BIN && strEq(e.s1, "=") {
+        return assign(e)
+    }
+    if k == N_BIN && (strEq(e.s1, "&&") || strEq(e.s1, "||")) {
+        var end = newLabel("sc")
+        var lt = gen(e.a, asptr(0))
+        if lt.kind != K_BOOL {
+            cgErr(cat4(e.s1, ": потрібен bool, а тут ", tyStr(lt), ""))
+        }
+        E("test %al, %al")
+        if strEq(e.s1, "&&") {
+            E(cat("jz ", end))
+        } else {
+            E(cat("jnz ", end))
+        }
+        var rt = gen(e.b, asptr(0))
+        if rt.kind != K_BOOL {
+            cgErr(cat4(e.s1, ": потрібен bool, а тут ", tyStr(rt), ""))
+        }
+        L(end)
+        return T_BOOL
+    }
+    if k == N_BIN {
+        return binary(e, want)
+    }
+    if k == N_CALL {
+        return call(e, want)
+    }
+    if k == N_MCALL {
+        return method(e)
+    }
+    if k == N_INDEX || k == N_MEMBER {
+        var et = address(e)
+        if isAggregate(et) {
+            return ptrTo(et)
+        }
+        loadMem("(%rax)", et)
+        return et
+    }
+    if k == N_NEW {
+        var info = structInfo(e.s1)
+        if info == null {
+            cgErr(cat("невідома структура ", e.s1))
+        }
+        E(cat3("mov $", its(info.size), ", %edi"))
+        callLabel(funcGet("__nx_alloc").label)
+        pushT(T_VOIDPTR)
+        var i: int64 = 0
+        while i < e.list.len {
+            var fi = nodeAt(e.list, i)
+            var f = fieldOf(info, fi.s1)
+            if f == null {
+                cgErr(cat4("у ", info.name, " немає поля ", fi.s1))
+            }
+            if isAggregate(f.type) {
+                var what: ptr<uint8> = "структуру"
+                if f.type.kind == K_ARRAY {
+                    what = "масив"
+                }
+                cgErr(cat6(info.name, ".", f.name, ": поле-", what, " заповнюй після створення"))
+            }
+            convert(gen(fi.a, f.type), f.type, cat3(info.name, ".", f.name))
+            E("mov (%rsp), %rcx")
+            storeMem(cat(its(f.off), "(%rcx)"), f.type)
+            i = i + 1
+        }
+        popTo("%rax")
+        return tyPtr(parseType(info.name))
+    }
+    cgErr(cat3("вираз ", exprTypeName(k), " ще не підтримується в системному режимі"))
+    return asptr(0)
+}
+
+func exprTypeName(k: int64) -> ptr<uint8> {
+    if k == N_ARRAY {
+        return "ArrayLiteralExpression"
+    } else if k == N_LAMBDA {
+        return "FunctionExpression"
+    } else if k == N_CALLV {
+        return "CallValueExpression"
+    }
+    return "?"
+}
+
+func elemSize(p: ptr<Ty>) -> int64 {
+    if p.elem.kind == K_VOID {
+        return 1
+    }
+    if p.elem.kind == K_STRUCT {
+        return structInfo(p.elem.sname).size
+    }
+    return p.elem.size
+}
+
+func isScale(n: int64) -> bool {
+    return n == 1 || n == 2 || n == 4 || n == 8
+}
+
+// адреса lvalue (p[i], p.поле) у rax; тип значення за адресою
+func address(e: ptr<Node>) -> ptr<Ty> {
+    if e.kind == N_INDEX {
+        var pt = gen(e.a, asptr(0))
+        if !isPtr(pt) {
+            cgErr(cat("індексувати можна лише ptr<T>, а тут ", tyStr(pt)))
+        }
+        if pt.elem.kind == K_VOID {
+            cgErr("ptr<void> не можна індексувати - спершу присвой у ptr<T>")
+        }
+        var esz = elemSize(pt)
+        if isScale(esz) {
+            var sit: int64 = 0
+            var sidx = simpleOperand(e.b, T_I64, addr(sit))
+            if sidx != null {
+                var stt: ptr<Ty> = asptr(sit)
+                if isInt(stt) {
+                    E(cat3("mov ", sidx, ", %rcx"))
+                    E(cat3("lea (%rax,%rcx,", its(esz), "), %rax"))
+                    return pt.elem
+                }
+            }
+        }
+        pushT(pt)
+        var hint: ptr<Ty> = asptr(0)
+        if isIntLit(e.b) {
+            hint = T_I64
+        }
+        var it = gen(e.b, hint)
+        if !isInt(it) {
+            cgErr(cat("індекс має бути цілим, а тут ", tyStr(it)))
+        }
+        popTo("%rcx")
+        var sc = scale(elemSize(pt))
+        E(cat3("lea (%rcx,%rax,", sc, "), %rax"))
+        return pt.elem
+    }
+    if e.kind == N_MEMBER {
+        var ot = gen(e.a, asptr(0))
+        if !(isPtr(ot) && ot.elem.kind == K_STRUCT) {
+            cgErr(cat4(".", e.s2, ": потрібен вказівник на структуру, а тут ", tyStr(ot)))
+        }
+        var info = structInfo(ot.elem.sname)
+        var f = fieldOf(info, e.s2)
+        if f == null {
+            cgErr(cat4("у ", info.name, " немає поля ", e.s2))
+        }
+        if f.off != 0 {
+            E(cat3("add $", its(f.off), ", %rax"))
+        }
+        return f.type
+    }
+    cgErr("ліворуч від = має бути змінна, p[i] або p.поле")
+    return asptr(0)
+}
+
+func scale(size: int64) -> ptr<uint8> {
+    if isScale(size) {
+        return its(size)
+    }
+    E(cat3("imul $", its(size), ", %rax, %rax"))
+    return "1"
+}
+
+func assign(asg: ptr<Node>) -> ptr<Ty> {
+    if asg.a.kind == N_NAME {
+        var name = asg.a.s1
+        var lv = tryLocal(name)
+        if lv != null {
+            convert(gen(asg.b, lv.type), lv.type, cat("присвоєння ", name))
+            storeLocal(lv.off, lv.type)
+            return lv.type
+        }
+        var g = globalGet(name)
+        if g != null {
+            convert(gen(asg.b, g.type), g.type, cat("присвоєння ", name))
+            storeMem(cat(g.label, "(%rip)"), g.type)
+            return g.type
+        }
+        cgErr(cat5("невідома змінна «", name, "» (оголоси: var ", name, " = ...)"))
+    }
+    var t = address(asg.a)
+    if isAggregate(t) {
+        cgErr(cat3("присвоїти ", tyStr(t), " цілком не можна - копіюй memcpy(куди, звідки, sizeof(...)) або по полях"))
+    }
+    if inReg(t) {
+        var svt: int64 = 0
+        var sval = simpleOperand(asg.b, t, addr(svt))
+        if sval != null {
+            convert(asptr(svt), t, "присвоєння")
+            E(cat3("mov ", sval, ", %rcx"))
+            var r: ptr<uint8> = "%rcx"
+            var mv: ptr<uint8> = "mov"
+            if t.kind == K_BOOL || t.size == 1 {
+                r = "%cl"
+                mv = "movb"
+            } else if t.size == 2 {
+                r = "%cx"
+                mv = "movw"
+            } else if t.size == 4 {
+                r = "%ecx"
+                mv = "movl"
+            }
+            E(cat4(mv, " ", r, ", (%rax)"))
+            E("mov %rcx, %rax")
+            return t
+        }
+    }
+    pushT(T_VOIDPTR)
+    convert(gen(asg.b, t), t, "присвоєння")
+    popTo("%rcx")
+    storeMem("(%rcx)", t)
+    return t
+}
+
+func unary(u: ptr<Node>, want: ptr<Ty>) -> ptr<Ty> {
+    var op = u.s1
+    if strEq(op, "!") {
+        var t = gen(u.a, asptr(0))
+        if t.kind != K_BOOL {
+            cgErr(cat("! потребує bool, а тут ", tyStr(t)))
+        }
+        E("xor $1, %eax")
+        return T_BOOL
+    }
+    if strEq(op, "-") {
+        if isIntLit(u) && (want == null || isInt(want)) {
+            var lt = want
+            if lt == null {
+                lt = T_I64
+            }
+            E(cat3("movabs $", its(constInt(u, lt)), ", %rax"))
+            return lt
+        }
+        var t2 = gen(u.a, want)
+        if isFloat(t2) && t2.size == 4 {
+            E("movd %xmm0, %eax")
+            E("btc $31, %eax")
+            E("movd %eax, %xmm0")
+            return t2
+        }
+        if isFloat(t2) {
+            E("movq %xmm0, %rax")
+            E("btc $63, %rax")
+            E("movq %rax, %xmm0")
+            return t2
+        }
+        if !isInt(t2) {
+            cgErr(cat3("унарний мінус для ", tyStr(t2), " не має сенсу"))
+        }
+        E("neg %rax")
+        canonReg(t2)
+        return t2
+    }
+    if strEq(op, "~") {
+        var w: ptr<Ty> = asptr(0)
+        if want != null && isInt(want) {
+            w = want
+        }
+        var t3 = gen(u.a, w)
+        if !isInt(t3) {
+            cgErr(cat("~ лише для цілих, а тут ", tyStr(t3)))
+        }
+        E("not %rax")
+        canonReg(t3)
+        return t3
+    }
+    cgErr(cat("невідомий оператор ", op))
+    return asptr(0)
+}
+
+func binary(bin: ptr<Node>, want0: ptr<Ty>) -> ptr<Ty> {
+    var want = want0
+    var op = bin.s1
+    var cmp = isCmpOp(op)
+    var lh: ptr<Ty> = asptr(0)
+    var rh: ptr<Ty> = asptr(0)
+    var ll = isIntLit(bin.a) || isFloatLit(bin.a)
+    var rl = isIntLit(bin.b) || isFloatLit(bin.b)
+    var plusMinus = strEq(op, "+") || strEq(op, "-")
+    if want != null && !isInt(want) && !isFloat(want) {
+        want = asptr(0)
+    }
+    if ll && rl {
+        if cmp {
+            lh = asptr(0)
+        } else {
+            lh = want
+        }
+        rh = lh
+        if isFloatLit(bin.a) || isFloatLit(bin.b) {
+            if want != null && isFloat(want) {
+                lh = want
+            } else {
+                lh = T_F64
+            }
+            rh = lh
+        }
+    } else if ll {
+        var rt0 = typeOf(bin.b)
+        if isPtr(rt0) && plusMinus {
+            lh = T_I64
+        } else if isPtr(rt0) {
+            lh = T_VOIDPTR
+        } else {
+            lh = rt0
+        }
+    } else if rl {
+        var lt0 = typeOf(bin.a)
+        if isPtr(lt0) && plusMinus {
+            rh = T_I64
+        } else {
+            rh = lt0
+        }
+    }
+    if strEq(op, "<<") || strEq(op, ">>") {
+        if isIntLit(bin.b) {
+            if lh != null {
+                rh = lh
+            } else {
+                rh = typeOf(bin.a)
+            }
+        } else {
+            rh = asptr(0)
+        }
+    }
+    if lh != null && isPtr(lh) {
+        lh = asptr(0)
+    }
+    if rh != null && isPtr(rh) {
+        rh = asptr(0)
+    }
+
+    var jumpFalse = cg_condJump
+    cg_condJump = asptr(0)
+    var lt = gen(bin.a, lh)
+    var srtv: int64 = 0
+    var simple: ptr<uint8> = asptr(0)
+    if !isFloat(lt) {
+        simple = simpleOperand(bin.b, rh, addr(srtv))
+    }
+    var rt: ptr<Ty> = asptr(0)
+    if simple != null {
+        E(cat3("mov ", simple, ", %rcx"))
+        rt = asptr(srtv)
+    } else {
+        pushT(lt)
+        rt = gen(bin.b, rh)
+    }
+
+    if isFloat(lt) || isFloat(rt) {
+        if !(isFloat(lt) && isFloat(rt)) || lt.size != rt.size {
+            var which = rt
+            if isFloat(lt) {
+                which = lt
+            }
+            cgErr(cat6(op, ": ", tyStr(lt), " і ", tyStr(rt), cat3(" - перетвори явно ", tyStr(which), "(...)")))
+        }
+        E("movapd %xmm0, %xmm1")
+        popXmm(0)
+        var x: ptr<uint8> = "sd"
+        var x1: ptr<uint8> = "d"
+        if lt.size == 4 {
+            x = "ss"
+            x1 = "s"
+        }
+        if strEq(op, "+") {
+            E(cat3("add", x, " %xmm1, %xmm0"))
+            return lt
+        }
+        if strEq(op, "-") {
+            E(cat3("sub", x, " %xmm1, %xmm0"))
+            return lt
+        }
+        if strEq(op, "*") {
+            E(cat3("mul", x, " %xmm1, %xmm0"))
+            return lt
+        }
+        if strEq(op, "/") {
+            E(cat3("div", x, " %xmm1, %xmm0"))
+            return lt
+        }
+        if strEq(op, "%") {
+            var ld: ptr<uint8> = "fldl"
+            var st: ptr<uint8> = "fstpl"
+            if lt.size == 4 {
+                ld = "flds"
+                st = "fstps"
+            }
+            var again = newLabel("fprem")
+            E("sub $16, %rsp")
+            E(cat3("movs", x1, " %xmm1, 8(%rsp)"))
+            E(cat3("movs", x1, " %xmm0, (%rsp)"))
+            E(cat(ld, " 8(%rsp)"))
+            E(cat(ld, " (%rsp)"))
+            L(again)
+            E("fprem")
+            E("fnstsw %ax")
+            E("test $0x400, %ax")
+            E(cat("jnz ", again))
+            E("fstp %st(1)")
+            E(cat(st, " (%rsp)"))
+            E(cat3("movs", x1, " (%rsp), %xmm0"))
+            E("add $16, %rsp")
+            return lt
+        }
+        if strEq(op, "<") {
+            E(cat3("ucomi", x, " %xmm0, %xmm1"))
+            E("seta %al")
+        } else if strEq(op, "<=") {
+            E(cat3("ucomi", x, " %xmm0, %xmm1"))
+            E("setae %al")
+        } else if strEq(op, ">") {
+            E(cat3("ucomi", x, " %xmm1, %xmm0"))
+            E("seta %al")
+        } else if strEq(op, ">=") {
+            E(cat3("ucomi", x, " %xmm1, %xmm0"))
+            E("setae %al")
+        } else if strEq(op, "==") {
+            E(cat3("ucomi", x, " %xmm1, %xmm0"))
+            E("sete %al")
+            E("setnp %cl")
+            E("and %cl, %al")
+        } else if strEq(op, "!=") {
+            E(cat3("ucomi", x, " %xmm1, %xmm0"))
+            E("setne %al")
+            E("setp %cl")
+            E("or %cl, %al")
+        } else {
+            cgErr(cat5("оператор ", op, " для ", tyStr(lt), " немає"))
+        }
+        E("movzbq %al, %rax")
+        return T_BOOL
+    }
+
+    if simple == null {
+        E("mov %rax, %rcx")
+        popTo("%rax")
+    }
+
+    if lt.kind == K_BOOL || rt.kind == K_BOOL {
+        if !(lt.kind == K_BOOL && rt.kind == K_BOOL) || !(strEq(op, "==") || strEq(op, "!=")) {
+            cgErr(cat6(op, ": ", tyStr(lt), " і ", tyStr(rt), " не поєднуються"))
+        }
+        E("cmp %rcx, %rax")
+        if strEq(op, "==") {
+            E("sete %al")
+        } else {
+            E("setne %al")
+        }
+        E("movzbq %al, %rax")
+        return T_BOOL
+    }
+
+    if isPtr(lt) || isPtr(rt) {
+        if strEq(op, "+") && isPtr(lt) && isInt(rt) {
+            ptrAdd(lt, "%rcx")
+            return lt
+        }
+        if strEq(op, "+") && isInt(lt) && isPtr(rt) {
+            E("xchg %rax, %rcx")
+            ptrAdd(rt, "%rcx")
+            return rt
+        }
+        if strEq(op, "-") && isPtr(lt) && isInt(rt) {
+            E("neg %rcx")
+            ptrAdd(lt, "%rcx")
+            return lt
+        }
+        if strEq(op, "-") && isPtr(lt) && isPtr(rt) {
+            if !tySame(lt, rt) {
+                cgErr(cat4("різниця вказівників різних типів: ", tyStr(lt), " і ", tyStr(rt)))
+            }
+            E("sub %rcx, %rax")
+            var sz = elemSize(lt)
+            if sz > 1 {
+                E(cat3("mov $", its(sz), ", %rcx"))
+                E("cqo")
+                E("idiv %rcx")
+            }
+            return T_I64
+        }
+        if cmp && isPtr(lt) && isPtr(rt) {
+            if !(tySame(lt, rt) || lt.elem.kind == K_VOID || rt.elem.kind == K_VOID) {
+                cgErr(cat4("порівняння вказівників різних типів: ", tyStr(lt), " і ", tyStr(rt)))
+            }
+            return compare(op, false, jumpFalse)
+        }
+        cgErr(cat6(op, ": ", tyStr(lt), " і ", tyStr(rt), " не поєднуються"))
+    }
+
+    if !isInt(lt) || !isInt(rt) {
+        cgErr(cat6(op, ": ", tyStr(lt), " і ", tyStr(rt), " не поєднуються"))
+    }
+    var shift = strEq(op, "<<") || strEq(op, ">>")
+    if !shift && !tySame(lt, rt) {
+        cgErr(cat6(op, ": різні типи ", tyStr(lt), " і ", tyStr(rt), cat3(" - перетвори один явно, напр. ", tyStr(lt), "(...)")))
+    }
+    if cmp {
+        return compare(op, lt.signed, jumpFalse)
+    }
+    var w32 = lt.size <= 4
+    if strEq(op, "+") {
+        E("add %rcx, %rax")
+    } else if strEq(op, "-") {
+        E("sub %rcx, %rax")
+    } else if strEq(op, "*") {
+        E("imul %rcx, %rax")
+    } else if strEq(op, "/") || strEq(op, "%") {
+        var isDiv = strEq(op, "/")
+        if lt.signed && lt.size == 8 {
+            var norm = newLabel("div")
+            var done = newLabel("divd")
+            E("cmp $-1, %rcx")
+            E(cat("jne ", norm))
+            if isDiv {
+                E("neg %rax")
+            } else {
+                E("xor %eax, %eax")
+            }
+            E(cat("jmp ", done))
+            L(norm)
+            E("cqo")
+            E("idiv %rcx")
+            if !isDiv {
+                E("mov %rdx, %rax")
+            }
+            L(done)
+        } else {
+            if lt.signed {
+                E("cqo")
+                E("idiv %rcx")
+            } else {
+                E("xor %edx, %edx")
+                E("div %rcx")
+            }
+            if !isDiv {
+                E("mov %rdx, %rax")
+            }
+        }
+    } else if strEq(op, "&") {
+        E("and %rcx, %rax")
+    } else if strEq(op, "|") {
+        E("or %rcx, %rax")
+    } else if strEq(op, "^") {
+        E("xor %rcx, %rax")
+    } else if strEq(op, "<<") {
+        if w32 {
+            E("shl %cl, %eax")
+        } else {
+            E("shl %cl, %rax")
+        }
+    } else if strEq(op, ">>") {
+        if w32 {
+            if lt.signed {
+                E("sar %cl, %eax")
+            } else {
+                E("shr %cl, %eax")
+            }
+        } else {
+            if lt.signed {
+                E("sar %cl, %rax")
+            } else {
+                E("shr %cl, %rax")
+            }
+        }
+    } else {
+        cgErr(cat("невідомий оператор ", op))
+    }
+    canonReg(lt)
+    return lt
+}
+
+func ptrAdd(p: ptr<Ty>, idxReg: ptr<uint8>) {
+    var sz = elemSize(p)
+    if isScale(sz) {
+        E(cat5("lea (%rax,", idxReg, ",", its(sz), "), %rax"))
+    } else {
+        E(cat6("imul $", its(sz), ", ", idxReg, ", ", idxReg))
+        E(cat3("add ", idxReg, ", %rax"))
+    }
+}
+
+func compare(op: ptr<uint8>, signed: bool, jumpFalse: ptr<uint8>) -> ptr<Ty> {
+    E("cmp %rcx, %rax")
+    var cc: ptr<uint8> = ""
+    var inv: ptr<uint8> = ""
+    if strEq(op, "==") {
+        cc = "e"
+        inv = "ne"
+    } else if strEq(op, "!=") {
+        cc = "ne"
+        inv = "e"
+    } else if strEq(op, "<") {
+        if signed {
+            cc = "l"
+            inv = "ge"
+        } else {
+            cc = "b"
+            inv = "ae"
+        }
+    } else if strEq(op, "<=") {
+        if signed {
+            cc = "le"
+            inv = "g"
+        } else {
+            cc = "be"
+            inv = "a"
+        }
+    } else if strEq(op, ">") {
+        if signed {
+            cc = "g"
+            inv = "le"
+        } else {
+            cc = "a"
+            inv = "be"
+        }
+    } else {
+        if signed {
+            cc = "ge"
+            inv = "l"
+        } else {
+            cc = "ae"
+            inv = "b"
+        }
+    }
+    if jumpFalse != null {
+        E(cat4("j", inv, " ", jumpFalse))
+        cg_condFused = true
+        return T_BOOL
+    }
+    E(cat3("set", cc, " %al"))
+    E("movzbq %al, %rax")
+    return T_BOOL
+}
+
+// ---------- виклики ----------
+func isCastName(n: ptr<uint8>) -> bool {
+    return strEq(n, "int8") || strEq(n, "uint8") || strEq(n, "int16") || strEq(n, "uint16") || strEq(n, "int32") || strEq(n, "uint32") || strEq(n, "int64") || strEq(n, "uint64") || strEq(n, "float64") || strEq(n, "float32")
+}
+
+func argAt(c: ptr<Node>, i: int64) -> ptr<Node> {
+    return nodeAt(c.list, i)
+}
+
+func litHint(e: ptr<Node>) -> ptr<Ty> {
+    if isIntLit(e) {
+        return T_I64
+    }
+    return asptr(0)
+}
+
+func paramTypes(f: ptr<Func>) -> ptr<Vec> {
+    var v = vecNew()
+    var i: int64 = 0
+    while i < f.params.len {
+        var p: ptr<Param> = asptr(f.params.get(i))
+        v.pushPtr(p.type)
+        i = i + 1
+    }
+    return v
+}
+
+func types2(a: ptr<Ty>, b: ptr<Ty>) -> ptr<Vec> {
+    var v = vecNew()
+    v.pushPtr(a)
+    if b != null {
+        v.pushPtr(b)
+    }
+    return v
+}
+
+func call(c: ptr<Node>, want: ptr<Ty>) -> ptr<Ty> {
+    var n = c.s1
+    var a = c.list
+    var cnt = a.len
+    if isCastName(n) && cnt == 1 {
+        return castE(argAt(c, 0), parseType(n))
+    }
+    if strEq(n, "sizeof") {
+        if cnt != 1 || argAt(c, 0).kind != N_NAME {
+            cgErr("sizeof(тип)")
+        }
+        var st = parseType(argAt(c, 0).s1)
+        var sz = st.size
+        if st.kind == K_STRUCT {
+            sz = structInfo(st.sname).size
+        }
+        E(cat3("mov $", its(sz), ", %eax"))
+        return T_I64
+    }
+    if strEq(n, "stackbuf") {
+        if cnt != 1 {
+            cgErr("stackbuf(N)")
+        }
+        var size = constInt(argAt(c, 0), T_I64)
+        if size <= 0 || size > 1048576 {
+            cgErr("stackbuf: від 1 байта до 1 МБ")
+        }
+        cg_frame = cg_frame + (size + 15) / 16 * 16
+        cg_frame = (cg_frame + 15) / 16 * 16
+        E(cat3("lea ", its(0 - cg_frame), "(%rbp), %rax"))
+        return tyPtr(T_U8)
+    }
+    if strEq(n, "new") {
+        if cnt != 1 || argAt(c, 0).kind != N_NAME || structInfo(argAt(c, 0).s1) == null {
+            cgErr("new(Структура)")
+        }
+        var info = structInfo(argAt(c, 0).s1)
+        E(cat3("mov $", its(info.size), ", %edi"))
+        callLabel(funcGet("__nx_alloc").label)
+        return tyPtr(parseType(argAt(c, 0).s1))
+    }
+    if strEq(n, "asptr") {
+        if cnt != 1 {
+            cgErr("asptr(ціле або вказівник)")
+        }
+        var t = gen(argAt(c, 0), litHint(argAt(c, 0)))
+        if !isInt(t) && !isPtr(t) {
+            cgErr(cat("asptr: потрібне ціле або вказівник, а тут ", tyStr(t)))
+        }
+        return T_VOIDPTR
+    }
+    if strEq(n, "funcaddr") {
+        if cnt != 1 || argAt(c, 0).kind != N_NAME || funcGet(argAt(c, 0).s1) == null {
+            cgErr("funcaddr(ім'я функції)")
+        }
+        E(cat3("lea ", funcGet(argAt(c, 0).s1).label, "(%rip), %rax"))
+        return T_VOIDPTR
+    }
+    if strEq(n, "float64Bits") {
+        if cnt != 1 {
+            cgErr("float64Bits(x)")
+        }
+        var t1 = gen(argAt(c, 0), T_F64)
+        if !isFloat(t1) || t1.size != 8 {
+            cgErr(cat("float64Bits: потрібен float64, а тут ", tyStr(t1)))
+        }
+        E("movq %xmm0, %rax")
+        return T_I64
+    }
+    if strEq(n, "float32Bits") {
+        if cnt != 1 {
+            cgErr("float32Bits(x)")
+        }
+        var t2 = gen(argAt(c, 0), T_F32)
+        if !isFloat(t2) || t2.size != 4 {
+            cgErr(cat("float32Bits: потрібен float32, а тут ", tyStr(t2)))
+        }
+        E("movd %xmm0, %eax")
+        E("movslq %eax, %rax")
+        return T_I32
+    }
+    if strEq(n, "bitsToFloat32") {
+        if cnt != 1 {
+            cgErr("bitsToFloat32(n)")
+        }
+        var t3 = gen(argAt(c, 0), T_I32)
+        if !isInt(t3) || t3.size != 4 {
+            cgErr(cat("bitsToFloat32: потрібне int32/uint32, а тут ", tyStr(t3)))
+        }
+        E("movd %eax, %xmm0")
+        return T_F32
+    }
+    if strEq(n, "bitsToFloat64") {
+        if cnt != 1 {
+            cgErr("bitsToFloat64(n)")
+        }
+        var t4 = gen(argAt(c, 0), T_I64)
+        if !isInt(t4) || t4.size != 8 {
+            cgErr(cat("bitsToFloat64: потрібне int64/uint64, а тут ", tyStr(t4)))
+        }
+        E("movq %rax, %xmm0")
+        return T_F64
+    }
+    if strEq(n, "syscall") {
+        if cnt < 1 || cnt > 7 {
+            cgErr("syscall(номер, до 6 аргументів)")
+        }
+        var i: int64 = 0
+        while i < cnt {
+            var t5 = gen(argAt(c, i), litHint(argAt(c, i)))
+            if !inReg(t5) {
+                cgErr(cat3("syscall: аргумент ", tyStr(t5), " - лише цілі, bool і вказівники"))
+            }
+            pushT(t5)
+            i = i + 1
+        }
+        var j = cnt - 1
+        while j >= 0 {
+            popTo(syscallReg(j))
+            j = j - 1
+        }
+        E("syscall")
+        return T_I64
+    }
+    if strEq(n, "callptr") {
+        if cnt < 1 {
+            cgErr("callptr(адреса, аргументи...)")
+        }
+        var ft = gen(argAt(c, 0), asptr(0))
+        if !isPtr(ft) {
+            cgErr("callptr: першим має бути адреса функції (funcaddr)")
+        }
+        pushT(ft)
+        var rest = vecNew()
+        var k: int64 = 1
+        while k < cnt {
+            rest.push(a.get(k))
+            k = k + 1
+        }
+        return emitCall(rest, asptr(0), "*%r11", T_I64, true)
+    }
+    if strEq(n, "alloc") {
+        if cnt != 1 {
+            cgErr("alloc(байтів)")
+        }
+        var af = funcGet("__nx_alloc")
+        return emitCall(a, paramTypes(af), af.label, T_VOIDPTR, false)
+    }
+    if strEq(n, "addr") {
+        if cnt != 1 {
+            cgErr("addr(змінна, p[i] або p.поле)")
+        }
+        var a0 = argAt(c, 0)
+        if a0.kind == N_NAME {
+            var lv = tryLocal(a0.s1)
+            if lv != null {
+                if isRegOff(lv.off) {
+                    cgErr(cat3("внутрішня помилка: addr(", a0.s1, ") для змінної в регістрі"))
+                }
+                E(cat3("lea ", its(lv.off), "(%rbp), %rax"))
+                return tyPtr(lv.type)
+            }
+            var gv = globalGet(a0.s1)
+            if gv != null {
+                E(cat3("lea ", gv.label, "(%rip), %rax"))
+                return tyPtr(gv.type)
+            }
+            cgErr(cat3("невідома змінна «", a0.s1, "»"))
+        }
+        var at = address(a0)
+        return ptrTo(at)
+    }
+    if strEq(n, "offsetof") {
+        if cnt != 2 || argAt(c, 0).kind != N_NAME || argAt(c, 1).kind != N_NAME || structInfo(argAt(c, 0).s1) == null {
+            cgErr("offsetof(Структура, поле)")
+        }
+        var oi = structInfo(argAt(c, 0).s1)
+        var fo = fieldOf(oi, argAt(c, 1).s1)
+        if fo == null {
+            cgErr(cat4("у ", oi.name, " немає поля ", argAt(c, 1).s1))
+        }
+        E(cat3("mov $", its(fo.off), ", %eax"))
+        return T_I64
+    }
+    if strEq(n, "memcpy") || strEq(n, "memmove") || strEq(n, "memset") {
+        var isSet = strEq(n, "memset")
+        if cnt != 3 {
+            var mid: ptr<uint8> = "звідки"
+            if isSet {
+                mid = "байт"
+            }
+            cgErr(cat4(n, "(куди, ", mid, ", байтів)"))
+        }
+        var i2: int64 = 0
+        while i2 < 3 {
+            var t6 = gen(argAt(c, i2), litHint(argAt(c, i2)))
+            var bad = false
+            if isSet && i2 == 1 {
+                bad = !isInt(t6)
+            } else if i2 == 2 {
+                bad = !isInt(t6)
+            } else {
+                bad = !isPtr(t6)
+            }
+            if bad {
+                cgErr(cat6(n, ": аргумент ", its(i2 + 1), " - ", tyStr(t6), " не підходить"))
+            }
+            pushT(t6)
+            i2 = i2 + 1
+        }
+        popTo("%rcx")
+        if isSet {
+            popTo("%rax")
+        } else {
+            popTo("%rsi")
+        }
+        popTo("%rdi")
+        if isSet {
+            E("mov %rdi, %rdx")
+            E("rep stosb")
+            E("mov %rdx, %rax")
+            return T_VOIDPTR
+        }
+        var back = newLabel("mmback")
+        var done = newLabel("mmdone")
+        E("mov %rdi, %rdx")
+        E("cmp %rsi, %rdi")
+        E(cat3("jbe ", done, "0"))
+        E("lea (%rsi,%rcx), %rax")
+        E("cmp %rax, %rdi")
+        E(cat("jb ", back))
+        L(cat(done, "0"))
+        E("rep movsb")
+        E(cat("jmp ", done))
+        L(back)
+        E("lea -1(%rsi,%rcx), %rsi")
+        E("lea -1(%rdi,%rcx), %rdi")
+        E("std")
+        E("rep movsb")
+        E("cld")
+        L(done)
+        E("mov %rdx, %rax")
+        return T_VOIDPTR
+    }
+    if strEq(n, "free") {
+        if cnt != 1 {
+            cgErr("free(вказівник з alloc/new)")
+        }
+        return emitCall(a, types2(T_VOIDPTR, asptr(0)), funcGet("__nx_release").label, T_VOID, false)
+    }
+    if strEq(n, "realloc") {
+        if cnt != 2 {
+            cgErr("realloc(вказівник, байтів)")
+        }
+        return emitCall(a, types2(T_VOIDPTR, T_I64), funcGet("__nx_realloc").label, T_VOIDPTR, false)
+    }
+    if strEq(n, "atomicAdd") || strEq(n, "atomicSwap") || strEq(n, "atomicStore") {
+        if cnt != 2 {
+            cgErr(cat(n, "(вказівник, значення)"))
+        }
+        var el = atomicElem(argAt(c, 0), n, strEq(n, "atomicAdd"))
+        pushT(T_VOIDPTR)
+        var vt = gen(argAt(c, 1), el)
+        convert(vt, el, cat(n, ": значення"))
+        E("mov %rax, %rcx")
+        popTo("%rdx")
+        var r = sizedReg("c", el.size)
+        var sfx = sfxOf(el.size)
+        if strEq(n, "atomicAdd") {
+            E(cat5("lock xadd", sfx, " ", r, ", (%rdx)"))
+        } else {
+            E(cat5("xchg", sfx, " ", r, ", (%rdx)"))
+        }
+        if strEq(n, "atomicStore") {
+            return T_VOID
+        }
+        E("mov %rcx, %rax")
+        return canonT(el)
+    }
+    if strEq(n, "atomicCas") {
+        if cnt != 3 {
+            cgErr("atomicCas(вказівник, очікуване, нове)")
+        }
+        var el2 = atomicElem(argAt(c, 0), n, false)
+        pushT(T_VOIDPTR)
+        convert(gen(argAt(c, 1), el2), el2, "atomicCas: очікуване")
+        pushT(el2)
+        convert(gen(argAt(c, 2), el2), el2, "atomicCas: нове")
+        E("mov %rax, %rcx")
+        popTo("%rax")
+        popTo("%rdx")
+        E(cat5("lock cmpxchg", sfxOf(el2.size), " ", sizedReg("c", el2.size), ", (%rdx)"))
+        return canonT(el2)
+    }
+    if strEq(n, "atomicLoad") {
+        if cnt != 1 {
+            cgErr("atomicLoad(вказівник)")
+        }
+        var el3 = atomicElem(argAt(c, 0), n, false)
+        loadMem("(%rax)", el3)
+        return el3
+    }
+    if strEq(n, "fence") {
+        if cnt != 0 {
+            cgErr("fence() без аргументів")
+        }
+        E("mfence")
+        return T_VOID
+    }
+    if strEq(n, "cpuPause") {
+        if cnt != 0 {
+            cgErr("cpuPause() без аргументів")
+        }
+        E("pause")
+        return T_VOID
+    }
+    if strEq(n, "tls") {
+        if cnt != 0 {
+            cgErr("tls() без аргументів")
+        }
+        E("mov %fs:0, %rax")
+        E("add $64, %rax")
+        return tyPtr(T_U8)
+    }
+    if strEq(n, "__nx_clone") {
+        if cnt != 5 {
+            cgErr("__nx_clone(флаги, стек, ptid, ctid, tls)")
+        }
+        var ct = vecNew()
+        ct.pushPtr(T_I64)
+        ct.pushPtr(T_VOIDPTR)
+        ct.pushPtr(T_VOIDPTR)
+        ct.pushPtr(T_VOIDPTR)
+        ct.pushPtr(T_VOIDPTR)
+        return emitCall(a, ct, "__nx_clone_asm", T_I64, false)
+    }
+    if strEq(n, "asm") {
+        if cnt != 1 || argAt(c, 0).kind != N_STR {
+            cgErr("asm(\"інструкції\") - лише рядковий літерал")
+        }
+        emitAsm(argAt(c, 0).s1, argAt(c, 0).len)
+        return T_I64
+    }
+    if strEq(n, "put") {
+        if cnt != 1 {
+            cgErr("put(значення)")
+        }
+        printE(argAt(c, 0), false)
+        return T_VOID
+    }
+    if strEq(n, "print") {
+        if cnt != 1 {
+            cgErr("print(значення)")
+        }
+        printE(argAt(c, 0), true)
+        return T_VOID
+    }
+    var f = funcGet(n)
+    if f == null || f.owner != null {
+        cgErr(cat3("невідома функція «", n, "»"))
+    }
+    if cnt != f.params.len {
+        cgErr(cat6(n, " чекає ", its(f.params.len), " аргумент(и), а передано ", its(cnt), ""))
+    }
+    return emitCall(a, paramTypes(f), f.label, f.ret, false)
+}
+
+func isSpaceAsm(c: int64) -> bool {
+    return c == 32 || (c >= 9 && c <= 13)
+}
+
+// рядки вставки, кожен обрізаний з обох боків (code.Split('\n') + Trim)
+func emitAsm(code: ptr<uint8>, n: int64) {
+    var st: int64 = 0
+    var i: int64 = 0
+    while i <= n {
+        if i == n || code[i] == 10 {
+            var a = st
+            var b = i
+            while a < b && isSpaceAsm(int64(code[a])) {
+                a = a + 1
+            }
+            while b > a && isSpaceAsm(int64(code[b - 1])) {
+                b = b - 1
+            }
+            E(strNDup(code + a, b - a))
+            st = i + 1
+        }
+        i = i + 1
+    }
+}
+
+func syscallReg(i: int64) -> ptr<uint8> {
+    if i == 0 {
+        return "%rax"
+    } else if i == 1 {
+        return "%rdi"
+    } else if i == 2 {
+        return "%rsi"
+    } else if i == 3 {
+        return "%rdx"
+    } else if i == 4 {
+        return "%r10"
+    } else if i == 5 {
+        return "%r8"
+    }
+    return "%r9"
+}
+
+func method(mc: ptr<Node>) -> ptr<Ty> {
+    var ot = typeOf(mc.a)
+    if !(isPtr(ot) && ot.elem.kind == K_STRUCT) {
+        cgErr(cat5(".", mc.s2, "(): потрібен вказівник на структуру, а тут ", tyStr(ot), ""))
+    }
+    var key = cat3(ot.elem.sname, ".", mc.s2)
+    var f = funcGet(key)
+    if f == null {
+        cgErr(cat4("у ", ot.elem.sname, " немає методу ", mc.s2))
+    }
+    var args = vecNew()
+    args.pushPtr(mc.a)
+    var i: int64 = 0
+    while i < mc.list.len {
+        args.push(mc.list.get(i))
+        i = i + 1
+    }
+    if args.len != f.params.len {
+        cgErr(cat6(key, " чекає ", its(f.params.len - 1), " аргумент(и), а передано ", its(mc.list.len), ""))
+    }
+    return emitCall(args, paramTypes(f), f.label, f.ret, false)
+}
+
+func atomicElem(p: ptr<Node>, n: ptr<uint8>, intOnly: bool) -> ptr<Ty> {
+    var pt = gen(p, asptr(0))
+    if !isPtr(pt) || pt.elem.kind == K_VOID {
+        cgErr(cat3(n, ": першим має бути типізований вказівник (ptr<int64>, ptr<int32>...), а тут ", tyStr(pt)))
+    }
+    var el = pt.elem
+    var ok = isInt(el) || (!intOnly && (el.kind == K_BOOL || isPtr(el)))
+    if !ok {
+        var what: ptr<uint8> = "цілі, bool і вказівники"
+        if intOnly {
+            what = "цілі"
+        }
+        cgErr(cat5(n, ": ", tyStr(el), " не підходить - лише ", what))
+    }
+    return el
+}
+
+func sizedReg(r: ptr<uint8>, size: int64) -> ptr<uint8> {
+    if size == 1 {
+        return cat3("%", r, "l")
+    } else if size == 2 {
+        return cat3("%", r, "x")
+    } else if size == 4 {
+        return cat3("%e", r, "x")
+    }
+    return cat3("%r", r, "x")
+}
+
+func sfxOf(size: int64) -> ptr<uint8> {
+    if size == 1 {
+        return "b"
+    } else if size == 2 {
+        return "w"
+    } else if size == 4 {
+        return "l"
+    }
+    return "q"
+}
+
+func canonT(t: ptr<Ty>) -> ptr<Ty> {
+    if isInt(t) {
+        canonReg(t)
+    } else if t.kind == K_BOOL {
+        E("movzbq %al, %rax")
+    }
+    return t
+}
+
+// аргументи зліва направо на стек, далі по регістрах System V, виклик
+func emitCall(args: ptr<Vec>, types: ptr<Vec>, target: ptr<uint8>, ret: ptr<Ty>, popCallee: bool) -> ptr<Ty> {
+    var got = vecNew()
+    var i: int64 = 0
+    while i < args.len {
+        var arg = nodeAt(args, i)
+        var hint: ptr<Ty> = asptr(0)
+        if types != null {
+            hint = asptr(types.get(i))
+        }
+        if hint == null && isIntLit(arg) {
+            hint = T_I64
+        }
+        if hint != null && isPtr(hint) {
+            hint = asptr(0)
+        }
+        var t = gen(arg, hint)
+        if types != null {
+            convert(t, asptr(types.get(i)), cat("аргумент ", its(i + 1)))
+        }
+        if t.kind == K_VOID || t.kind == K_STRUCT {
+            cgErr(cat4("аргумент ", its(i + 1), ": ", cat(tyStr(t), " не можна передати")))
+        }
+        got.pushPtr(t)
+        pushT(t)
+        i = i + 1
+    }
+    var ni: int64 = 0
+    var nf: int64 = 0
+    i = 0
+    while i < got.len {
+        var gt: ptr<Ty> = asptr(got.get(i))
+        if isFloat(gt) {
+            nf = nf + 1
+        } else {
+            ni = ni + 1
+        }
+        i = i + 1
+    }
+    if ni > 6 || nf > 8 {
+        cgErr("більше 6 цілих / 8 дробових аргументів ще не підтримується")
+    }
+    var ii = ni
+    var fi = nf
+    i = got.len - 1
+    while i >= 0 {
+        var gt2: ptr<Ty> = asptr(got.get(i))
+        if isFloat(gt2) {
+            fi = fi - 1
+            popXmm(fi)
+        } else {
+            ii = ii - 1
+            popTo(intArgReg(ii))
+        }
+        i = i - 1
+    }
+    if popCallee {
+        popTo("%r11")
+    }
+    var pad = cg_depth % 16 != 0
+    if pad {
+        E("sub $8, %rsp")
+    }
+    E(cat3("mov $", its(nf), ", %eax"))
+    E(cat("call ", target))
+    if pad {
+        E("add $8, %rsp")
+    }
+    if isInt(ret) {
+        canonReg(ret)
+    } else if ret.kind == K_BOOL {
+        E("movzbq %al, %rax")
+    }
+    return ret
+}
+
+func castE(arg: ptr<Node>, to: ptr<Ty>) -> ptr<Ty> {
+    var hint: ptr<Ty> = asptr(0)
+    if isIntLit(arg) {
+        hint = T_I64
+    } else if isFloatLit(arg) {
+        if isFloat(to) {
+            hint = to
+        } else {
+            hint = T_F64
+        }
+    }
+    var from = gen(arg, hint)
+    if isInt(to) {
+        if isInt(from) {
+            canonReg(to)
+            return to
+        }
+        if isPtr(from) && to.size == 8 {
+            return to
+        }
+        if from.kind == K_BOOL {
+            return to
+        }
+        if isFloat(from) {
+            if from.size == 4 {
+                E("cvtss2sd %xmm0, %xmm0")
+            }
+            floatToInt(to)
+            return to
+        }
+    }
+    if isFloat(to) {
+        var x: ptr<uint8> = "sd"
+        if to.size == 4 {
+            x = "ss"
+        }
+        if isFloat(from) {
+            if from.size == 8 && to.size == 4 {
+                E("cvtsd2ss %xmm0, %xmm0")
+            } else if from.size == 4 && to.size == 8 {
+                E("cvtss2sd %xmm0, %xmm0")
+            }
+            return to
+        }
+        if isInt(from) {
+            if from.size == 8 && !from.signed {
+                var neg = newLabel("u2f")
+                var done = newLabel("u2fdone")
+                E("test %rax, %rax")
+                E(cat("js ", neg))
+                E(cat3("cvtsi2", x, " %rax, %xmm0"))
+                E(cat("jmp ", done))
+                L(neg)
+                E("mov %rax, %rcx")
+                E("shr $1, %rcx")
+                E("and $1, %eax")
+                E("or %rax, %rcx")
+                E(cat3("cvtsi2", x, " %rcx, %xmm0"))
+                E(cat3("add", x, " %xmm0, %xmm0"))
+                L(done)
+                return to
+            }
+            E(cat3("cvtsi2", x, "q %rax, %xmm0"))
+            return to
+        }
+    }
+    cgErr(cat5("перетворення ", tyStr(from), " -> ", tyStr(to), " не підтримується"))
+    return asptr(0)
+}
+
+func floatToInt(to: ptr<Ty>) {
+    var zero = newLabel("f2i0")
+    var maxL = newLabel("f2imax")
+    var clamp = newLabel("f2iclamp")
+    var done = newLabel("f2idone")
+    E("ucomisd %xmm0, %xmm0")
+    E(cat("jp ", zero))
+    if to.size == 8 && !to.signed {
+        var big = newLabel("f2ubig")
+        E("pxor %xmm1, %xmm1")
+        E("ucomisd %xmm1, %xmm0")
+        E(cat("jbe ", zero))
+        E("movabs $0x43f0000000000000, %rax")
+        E("movq %rax, %xmm1")
+        E("ucomisd %xmm1, %xmm0")
+        E(cat("jae ", maxL))
+        E("movabs $0x43e0000000000000, %rax")
+        E("movq %rax, %xmm1")
+        E("ucomisd %xmm1, %xmm0")
+        E(cat("jae ", big))
+        E("cvttsd2si %xmm0, %rax")
+        E(cat("jmp ", done))
+        L(big)
+        E("subsd %xmm1, %xmm0")
+        E("cvttsd2si %xmm0, %rax")
+        E("btc $63, %rax")
+        E(cat("jmp ", done))
+        L(maxL)
+        E("mov $-1, %rax")
+        E(cat("jmp ", done))
+        L(zero)
+        E("xor %eax, %eax")
+        L(done)
+        return
+    }
+    E("movabs $0x43e0000000000000, %rax")
+    E("movq %rax, %xmm1")
+    E("ucomisd %xmm1, %xmm0")
+    E(cat("jae ", maxL))
+    E("cvttsd2si %xmm0, %rax")
+    E(cat("jmp ", clamp))
+    L(maxL)
+    E("movabs $0x7fffffffffffffff, %rax")
+    E(cat("jmp ", clamp))
+    L(zero)
+    E("xor %eax, %eax")
+    E(cat("jmp ", done))
+    L(clamp)
+    if to.size < 8 {
+        var bits = to.size * 8
+        var lo: int64 = 0
+        var hi = (1 << bits) - 1
+        if to.signed {
+            lo = 0 - (1 << (bits - 1))
+            hi = (1 << (bits - 1)) - 1
+        }
+        var okLo = newLabel("f2ilo")
+        var okHi = newLabel("f2ihi")
+        E(cat3("movabs $", its(lo), ", %rcx"))
+        E("cmp %rcx, %rax")
+        E(cat("jge ", okLo))
+        E("mov %rcx, %rax")
+        L(okLo)
+        E(cat3("movabs $", its(hi), ", %rcx"))
+        E("cmp %rcx, %rax")
+        E(cat("jle ", okHi))
+        E("mov %rcx, %rax")
+        L(okHi)
+    }
+    L(done)
+}

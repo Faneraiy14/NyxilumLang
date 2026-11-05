@@ -1,0 +1,951 @@
+// Генератор x86-64 на Nx, частина 2: регістри (S5), функції, оператори, таблиця переходів (S4).
+// Порт відповідних частин NativeCodegenX64.cs.
+import "codegen.nx"
+
+func intArgReg(i: int64) -> ptr<uint8> {
+    if i == 0 {
+        return "%rdi"
+    } else if i == 1 {
+        return "%rsi"
+    } else if i == 2 {
+        return "%rdx"
+    } else if i == 3 {
+        return "%rcx"
+    } else if i == 4 {
+        return "%r8"
+    }
+    return "%r9"
+}
+
+func savedReg(i: int64) -> ptr<uint8> {
+    if i == 0 {
+        return "%rbx"
+    } else if i == 1 {
+        return "%r12"
+    } else if i == 2 {
+        return "%r13"
+    } else if i == 3 {
+        return "%r14"
+    }
+    return "%r15"
+}
+
+func isRegOff(off: int64) -> bool {
+    return off >= 1000
+}
+
+func loc(off: int64) -> ptr<uint8> {
+    if isRegOff(off) {
+        return savedReg(off - 1000)
+    }
+    return cat(its(off), "(%rbp)")
+}
+
+// ---------- S5: план регістрів ----------
+var pr_names: ptr<Vec> = null    // імена в порядку першої появи (як Dictionary у C#)
+var pr_index: ptr<Map> = null    // ім'я -> номер + 1 у pr_names
+var pr_weight: ptr<Vec> = null
+var pr_noReg: ptr<Map> = null
+
+func prUse(n: ptr<uint8>, depth: int64) {
+    var sh = 3 * depth
+    if sh > 30 {
+        sh = 30
+    }
+    var i = pr_index.get(n, 0)
+    if i == 0 {
+        pr_names.pushPtr(n)
+        pr_weight.push(0)
+        i = pr_names.len
+        pr_index.put(n, i)
+    }
+    pr_weight.set(i - 1, pr_weight.get(i - 1) + (1 << sh))
+}
+
+func prEx(e: ptr<Node>, d: int64) {
+    if e == null {
+        return
+    }
+    var k = e.kind
+    if k == N_NAME {
+        prUse(e.s1, d)
+    } else if k == N_BIN {
+        prEx(e.a, d)
+        prEx(e.b, d)
+    } else if k == N_UNARY {
+        prEx(e.a, d)
+    } else if k == N_CALL {
+        if strEq(e.s1, "addr") && e.list.len == 1 && nodeAt(e.list, 0).kind == N_NAME {
+            pr_noReg.put(nodeAt(e.list, 0).s1, 1)
+        }
+        prList(e.list, d)
+    } else if k == N_MCALL {
+        prEx(e.a, d)
+        prList(e.list, d)
+    } else if k == N_INDEX {
+        prEx(e.a, d)
+        prEx(e.b, d)
+    } else if k == N_MEMBER {
+        prEx(e.a, d)
+    } else if k == N_NEW {
+        var i: int64 = 0
+        while i < e.list.len {
+            prEx(nodeAt(e.list, i).a, d)
+            i = i + 1
+        }
+    } else if k == N_CALLV {
+        prEx(e.a, d)
+        prList(e.list, d)
+    }
+}
+
+func prList(l: ptr<Vec>, d: int64) {
+    var i: int64 = 0
+    while i < l.len {
+        prEx(nodeAt(l, i), d)
+        i = i + 1
+    }
+}
+
+func prSt(s: ptr<Node>, d: int64) {
+    var k = s.kind
+    if k == N_EXPR {
+        prEx(s.a, d)
+    } else if k == N_VAR {
+        prUse(s.s1, d)
+        prEx(s.a, d)
+    } else if k == N_IF {
+        prEx(s.a, d)
+        prBl(s.b, d)
+        if s.c != null {
+            prBl(s.c, d)
+        }
+    } else if k == N_WHILE {
+        prEx(s.a, d + 1)
+        prBl(s.b, d + 1)
+    } else if k == N_FOR {
+        prEx(s.a, d)
+        prEx(s.b, d)
+        prUse(s.s1, d + 1)
+        prUse(s.s1, d + 1)
+        prBl(s.c, d + 1)
+    } else if k == N_BLOCK {
+        prBl(s, d)
+    } else if k == N_RETURN {
+        prEx(s.a, d)
+    } else if k == N_PRINT {
+        prEx(s.a, d)
+    }
+}
+
+func prBl(b: ptr<Node>, d: int64) {
+    var i: int64 = 0
+    while i < b.list.len {
+        prSt(nodeAt(b.list, i), d)
+        i = i + 1
+    }
+}
+
+func planRegisters(f: ptr<Func>) {
+    pr_names = vecNew()
+    pr_index = mapNew()
+    pr_weight = vecNew()
+    pr_noReg = mapNew()
+    var i: int64 = 0
+    while i < f.params.len {
+        var p: ptr<Param> = asptr(f.params.get(i))
+        prUse(p.name, 0)
+        i = i + 1
+    }
+    prBl(f.decl.b, 0)
+    // кандидати в порядку появи, стабільно за спаданням ваги (OrderByDescending), перші 5
+    var cand = vecNew()
+    i = 0
+    while i < pr_names.len {
+        var n: ptr<uint8> = asptr(pr_names.get(i))
+        if !pr_noReg.has(n) && pr_weight.get(i) >= 2 && !cg_globals.has(n) {
+            cand.push(i)
+        }
+        i = i + 1
+    }
+    var a: int64 = 1
+    while a < cand.len {
+        var x = cand.get(a)
+        var j = a - 1
+        while j >= 0 && pr_weight.get(cand.get(j)) < pr_weight.get(x) {
+            cand.set(j + 1, cand.get(j))
+            j = j - 1
+        }
+        cand.set(j + 1, x)
+        a = a + 1
+    }
+    cg_regPlan = mapNew()
+    i = 0
+    while i < cand.len && i < 5 {
+        cg_regPlan.put(asptr(pr_names.get(cand.get(i))), i + 1)
+        i = i + 1
+    }
+    var r: int64 = 0
+    while r < 5 {
+        cg_usedRegs[r] = 0
+        r = r + 1
+    }
+}
+
+// ---------- функції ----------
+func compileFunc(f: ptr<Func>) {
+    cg_cur = f
+    cg_b = strBufNew()
+    planRegisters(f)
+    cg_scopes = vecNew()
+    cg_scopes.pushPtr(mapNew())
+    cg_frame = 0
+    cg_depth = 0
+    cg_loops = vecNew()
+    cg_line = f.decl.line
+    var ni: int64 = 0
+    var nf: int64 = 0
+    var i: int64 = 0
+    while i < f.params.len {
+        var p: ptr<Param> = asptr(f.params.get(i))
+        var type = p.type
+        if type.kind == K_STRUCT {
+            cgErr(cat5("параметр ", p.name, ": структуру передавай як ptr<", tyStr(type), ">"))
+        }
+        var off = slot(p.name, type)
+        if isFloat(type) {
+            if nf >= 8 {
+                cgErr("більше 8 дробових параметрів ще не підтримується")
+            }
+            E(cat4("movsd %xmm", its(nf), ", ", loc(off)))
+            nf = nf + 1
+        } else {
+            if ni >= 6 {
+                cgErr("більше 6 цілих параметрів ще не підтримується")
+            }
+            E(cat3("mov ", intArgReg(ni), ", %rax"))
+            ni = ni + 1
+            if type.kind == K_BOOL {
+                E("movzbq %al, %rax")
+            } else {
+                canonReg(type)
+            }
+            E(cat("mov %rax, ", loc(off)))
+        }
+        i = i + 1
+    }
+    var body = f.decl.b
+    i = 0
+    while i < body.list.len {
+        stmt(nodeAt(body.list, i))
+        i = i + 1
+    }
+    E("xor %eax, %eax")
+    E("pxor %xmm0, %xmm0")
+    L(cat(".Lret_", f.label))
+    var saveReg = vecNew()
+    var saveOff = vecNew()
+    var r: int64 = 0
+    while r < 5 {
+        if cg_usedRegs[r] != 0 {
+            cg_frame = cg_frame + 8
+            saveReg.pushPtr(savedReg(r))
+            saveOff.push(0 - cg_frame)
+        }
+        r = r + 1
+    }
+    i = 0
+    while i < saveReg.len {
+        E(cat4("mov ", its(saveOff.get(i)), "(%rbp), ", asptr(saveReg.get(i))))
+        i = i + 1
+    }
+    E("leave")
+    E("ret")
+    var frame = (cg_frame + 15) / 16 * 16
+    T(cat(".globl ", f.label))
+    T(cat3(".type ", f.label, ", @function"))
+    T(cat(f.label, ":"))
+    T("    push %rbp")
+    T("    mov %rsp, %rbp")
+    if frame > 0 {
+        T(cat3("    sub $", its(frame), ", %rsp"))
+    }
+    i = 0
+    while i < saveReg.len {
+        T(cat5("    mov ", asptr(saveReg.get(i)), ", ", its(saveOff.get(i)), "(%rbp)"))
+        i = i + 1
+    }
+    cg_text.addBuf(cg_b)
+}
+
+func addLocal(name: ptr<uint8>, t: ptr<Ty>, off: int64) {
+    var l = new(Local)
+    l.type = t
+    l.off = off
+    topScope().put(name, int64(l))
+}
+
+func slot(name: ptr<uint8>, type: ptr<Ty>) -> int64 {
+    var exv = topScope().get(name, 0)
+    if exv != 0 {
+        var ex: ptr<Local> = asptr(exv)
+        if !tySame(ex.type, type) {
+            cgErr(cat6("змінна «", name, "» уже є з типом ", tyStr(ex.type), ", а тут ", tyStr(type)))
+        }
+        return ex.off
+    }
+    var reg = cg_regPlan.get(name, 0)
+    if reg != 0 && inReg(type) && tryLocal(name) == null {
+        cg_usedRegs[reg - 1] = 1
+        addLocal(name, type, 1000 + reg - 1)
+        return 1000 + reg - 1
+    }
+    cg_frame = cg_frame + 8
+    addLocal(name, type, 0 - cg_frame)
+    return 0 - cg_frame
+}
+
+// ---------- оператори ----------
+func stmtTypeName(k: int64) -> ptr<uint8> {
+    if k == N_STRUCT {
+        return "StructDeclaration"
+    } else if k == N_IMPORT {
+        return "ImportStatement"
+    }
+    return "?"
+}
+
+func stmt(st: ptr<Node>) {
+    cg_line = st.line
+    var k = st.kind
+    if k == N_EXPR {
+        gen(st.a, asptr(0))
+    } else if k == N_VAR {
+        stmtVar(st)
+    } else if k == N_IF {
+        if tryJumpTable(st) {
+            return
+        }
+        var elseL = newLabel("else")
+        var endL = newLabel("endif")
+        cond(st.a, elseL)
+        block(st.b)
+        if st.c != null {
+            E(cat("jmp ", endL))
+            L(elseL)
+            block(st.c)
+            L(endL)
+        } else {
+            L(elseL)
+        }
+    } else if k == N_WHILE {
+        var top = newLabel("while")
+        var end = newLabel("wend")
+        L(top)
+        cond(st.a, end)
+        pushLoop(top, end)
+        block(st.b)
+        cg_loops.pop()
+        E(cat("jmp ", top))
+        L(end)
+    } else if k == N_FOR {
+        stmtFor(st)
+    } else if k == N_BLOCK {
+        block(st)
+    } else if k == N_BREAK {
+        if cg_loops.len == 0 {
+            cgErr("break поза циклом")
+        }
+        var lb: ptr<LoopL> = asptr(cg_loops.last())
+        E(cat("jmp ", lb.brk))
+    } else if k == N_CONTINUE {
+        if cg_loops.len == 0 {
+            cgErr("continue поза циклом")
+        }
+        var lc: ptr<LoopL> = asptr(cg_loops.last())
+        E(cat("jmp ", lc.cont))
+    } else if k == N_RETURN {
+        if st.a == null {
+            if cg_cur.ret.kind != K_VOID {
+                cgErr(cat3(cg_cur.name, " має повернути ", tyStr(cg_cur.ret)))
+            }
+        } else {
+            if cg_cur.ret.kind == K_VOID {
+                cgErr(cat(cg_cur.name, " нічого не повертає (додай -> тип)"))
+            }
+            convert(gen(st.a, cg_cur.ret), cg_cur.ret, "return")
+        }
+        E(cat("jmp .Lret_", cg_cur.label))
+    } else if k == N_PRINT {
+        printE(st.a, true)
+    } else if k == N_TRY || k == N_THROW {
+        cgErr("винятків (try/throw) у системному режимі ще немає")
+    } else if k == N_FUNC {
+        cgErr("вкладені функції в системному режимі ще не підтримуються")
+    } else {
+        cgErr(cat3("інструкція ", stmtTypeName(k), " ще не підтримується в системному режимі"))
+    }
+}
+
+func pushLoop(cont: ptr<uint8>, brk: ptr<uint8>) {
+    var l = new(LoopL)
+    l.cont = cont
+    l.brk = brk
+    cg_loops.pushPtr(l)
+}
+
+func stmtVar(vd: ptr<Node>) {
+    var t: ptr<Ty> = asptr(0)
+    if vd.s2 != null {
+        t = parseType(vd.s2)
+        if t.kind == K_VOID {
+            cgErr(cat3("змінна ", vd.s1, ": тип void"))
+        }
+        if isAggregate(t) {
+            if vd.a != null {
+                cgErr(cat5("змінна ", vd.s1, ": ", tyStr(t), " на стеку без початкового значення - заповни після"))
+            }
+            var size = t.size
+            if t.kind == K_STRUCT {
+                size = structInfo(t.sname).size
+            }
+            cg_frame = cg_frame + (size + 15) / 16 * 16
+            cg_frame = (cg_frame + 15) / 16 * 16
+            E(cat3("lea ", its(0 - cg_frame), "(%rbp), %rdi"))
+            E(cat3("mov $", its(size), ", %ecx"))
+            E("xor %eax, %eax")
+            E("rep stosb")
+            E(cat3("lea ", its(0 - cg_frame), "(%rbp), %rax"))
+            var pt = tyPtr(t)
+            if t.kind == K_ARRAY {
+                pt = tyPtr(t.elem)
+            }
+            storeLocal(slot(vd.s1, pt), pt)
+            return
+        }
+        if vd.a != null {
+            convert(gen(vd.a, t), t, cat("змінна ", vd.s1))
+        } else {
+            E("xor %eax, %eax")
+            E("pxor %xmm0, %xmm0")
+        }
+    } else {
+        if vd.a == null {
+            cgErr(cat3("змінна ", vd.s1, ": вкажи тип або початкове значення"))
+        }
+        t = gen(vd.a, asptr(0))
+        if t.kind == K_VOID {
+            cgErr(cat3("змінна ", vd.s1, ": вираз нічого не повертає"))
+        }
+    }
+    storeLocal(slot(vd.s1, t), t)
+}
+
+func stmtFor(fs: ptr<Node>) {
+    if fs.b == null {
+        cgErr("for по елементах масиву в системному режимі ще немає - лише for i in a..b")
+    }
+    var t: ptr<Ty> = asptr(0)
+    if isIntLit(fs.a) {
+        if isIntLit(fs.b) {
+            t = T_I64
+        } else {
+            t = typeOf(fs.b)
+        }
+    } else {
+        t = typeOf(fs.a)
+    }
+    if !isInt(t) {
+        cgErr("for: межі мають бути цілими")
+    }
+    convert(gen(fs.a, t), t, "for")
+    cg_scopes.pushPtr(mapNew())
+    var iv = slot(fs.s1, t)
+    storeLocal(iv, t)
+    var endName = cat("$for_end", its(cg_label))
+    cg_label = cg_label + 1
+    var endSlot = slot(endName, t)
+    convert(gen(fs.b, t), t, "for")
+    storeLocal(endSlot, t)
+    var top = newLabel("for")
+    var next = newLabel("fnext")
+    var end = newLabel("fend")
+    L(top)
+    E(cat3("mov ", loc(iv), ", %rax"))
+    E(cat3("cmp ", loc(endSlot), ", %rax"))
+    if t.signed {
+        E(cat("jge ", end))
+    } else {
+        E(cat("jae ", end))
+    }
+    pushLoop(next, end)
+    block(fs.c)
+    cg_loops.pop()
+    L(next)
+    E(cat3("mov ", loc(iv), ", %rax"))
+    E("add $1, %rax")
+    canonReg(t)
+    E(cat("mov %rax, ", loc(iv)))
+    E(cat("jmp ", top))
+    L(end)
+    cg_scopes.pop()
+}
+
+// S4: if-ланцюжок по одній цілій змінній і сталих -> таблиця переходів
+func tryJumpTable(first: ptr<Node>) -> bool {
+    var varName: ptr<uint8> = asptr(0)
+    var vt: ptr<Ty> = asptr(0)
+    var caseVals = vecNew()
+    var caseBodies = vecNew()
+    var dflt: ptr<Node> = asptr(0)
+    var cur = first
+    while cur != null {
+        var eq = cur.a
+        if !(eq.kind == N_BIN && strEq(eq.s1, "==")) {
+            return false
+        }
+        var lhs: ptr<Node> = asptr(0)
+        var rhs: ptr<Node> = asptr(0)
+        if eq.a.kind == N_NAME && isIntLit(eq.b) {
+            lhs = eq.a
+            rhs = eq.b
+        } else if eq.b.kind == N_NAME && isIntLit(eq.a) {
+            lhs = eq.b
+            rhs = eq.a
+        } else {
+            return false
+        }
+        var name = lhs.s1
+        if varName == null {
+            varName = name
+            var lv = tryLocal(name)
+            if lv != null {
+                vt = lv.type
+            } else {
+                var gv = globalGet(name)
+                if gv != null {
+                    vt = gv.type
+                } else {
+                    return false
+                }
+            }
+            if !isInt(vt) {
+                return false
+            }
+        } else if !strEq(name, varName) {
+            return false
+        }
+        var c: int64 = 0
+        if constIntTry(rhs, vt, addr(c)) != null {
+            return false
+        }
+        var i: int64 = 0
+        while i < caseVals.len {
+            if caseVals.get(i) == c {
+                return false
+            }
+            i = i + 1
+        }
+        caseVals.push(c)
+        caseBodies.pushPtr(cur.b)
+        var eb = cur.c
+        if eb != null && eb.list.len == 1 && nodeAt(eb.list, 0).kind == N_IF {
+            cur = nodeAt(eb.list, 0)
+        } else {
+            dflt = eb
+            cur = asptr(0)
+        }
+    }
+    if caseVals.len < 4 {
+        return false
+    }
+    var mn = caseVals.get(0)
+    var mx = caseVals.get(0)
+    var i2: int64 = 1
+    while i2 < caseVals.len {
+        if caseVals.get(i2) < mn {
+            mn = caseVals.get(i2)
+        }
+        if caseVals.get(i2) > mx {
+            mx = caseVals.get(i2)
+        }
+        i2 = i2 + 1
+    }
+    var range = mx - mn
+    if range < 0 || range > 4096 || range > caseVals.len * 4 + 16 {
+        return false
+    }
+    var tbl = newLabel("jt")
+    var def = newLabel("jtdef")
+    var end = newLabel("jtend")
+    var vn = nodeNew(N_NAME)
+    vn.s1 = varName
+    gen(vn, asptr(0))
+    if mn != 0 {
+        E(cat3("movabs $", its(mn), ", %rcx"))
+        E("sub %rcx, %rax")
+    }
+    E(cat3("cmp $", its(range), ", %rax"))
+    E(cat("ja ", def))
+    E(cat3("lea ", tbl, "(%rip), %rcx"))
+    E("movslq (%rcx,%rax,4), %rdx")
+    E("add %rcx, %rdx")
+    E("jmp *%rdx")
+    E(".balign 4")
+    L(tbl)
+    var labels = vecNew()
+    var j: int64 = 0
+    while j < caseVals.len {
+        labels.pushPtr(newLabel("case"))
+        j = j + 1
+    }
+    var v: int64 = 0
+    while v <= range {
+        var lb = def
+        var q: int64 = 0
+        while q < caseVals.len {
+            if caseVals.get(q) == mn + v {
+                lb = asptr(labels.get(q))
+            }
+            q = q + 1
+        }
+        E(cat4(".long ", lb, " - ", tbl))
+        v = v + 1
+    }
+    j = 0
+    while j < caseVals.len {
+        L(asptr(labels.get(j)))
+        block(asptr(caseBodies.get(j)))
+        E(cat("jmp ", end))
+        j = j + 1
+    }
+    L(def)
+    if dflt != null {
+        block(dflt)
+    }
+    L(end)
+    return true
+}
+
+func block(b: ptr<Node>) {
+    cg_scopes.pushPtr(mapNew())
+    var i: int64 = 0
+    while i < b.list.len {
+        stmt(nodeAt(b.list, i))
+        i = i + 1
+    }
+    cg_scopes.pop()
+}
+
+// простий операнд для rcx: ціла стала (32 біти) або змінна цілого/bool/ptr типу в локальних
+func simpleOperand(e: ptr<Node>, hint: ptr<Ty>, outT: ptr<int64>) -> ptr<uint8> {
+    outT[0] = 0
+    var shape = e.kind == N_NUM || (e.kind == N_UNARY && strEq(e.s1, "-") && isAnyLiteral(e.a))
+    if shape && isIntLit(e) {
+        var lt = T_I64
+        if hint != null && isInt(hint) {
+            lt = hint
+        }
+        var v: int64 = 0
+        if constIntTry(e, lt, addr(v)) != null {
+            return asptr(0)
+        }
+        if v < 0 - 2147483648 || v > 2147483647 {
+            return asptr(0)
+        }
+        outT[0] = int64(lt)
+        return cat("$", its(v))
+    }
+    if e.kind == N_NAME {
+        var lv = tryLocal(e.s1)
+        if lv != null && inReg(lv.type) {
+            outT[0] = int64(lv.type)
+            return loc(lv.off)
+        }
+    }
+    return asptr(0)
+}
+
+func isAnyLiteral(e: ptr<Node>) -> bool {
+    return e.kind == N_NUM || e.kind == N_STR || e.kind == N_BOOL || e.kind == N_NULL
+}
+
+func cond(c: ptr<Node>, falseLabel: ptr<uint8>) {
+    if c.kind == N_BOOL && c.flag != 0 {
+        return
+    }
+    if c.kind == N_BOOL {
+        E(cat("jmp ", falseLabel))
+        return
+    }
+    if c.kind == N_BIN && strEq(c.s1, "&&") {
+        cond(c.a, falseLabel)
+        cond(c.b, falseLabel)
+        return
+    }
+    if c.kind == N_BIN && isCmpOp(c.s1) {
+        cg_condJump = falseLabel
+        cg_condFused = false
+        var ct = binary(c, asptr(0))
+        cg_condJump = asptr(0)
+        if cg_condFused {
+            cg_condFused = false
+            return
+        }
+        if ct.kind != K_BOOL {
+            cgErr(cat("умова має бути bool, а тут ", tyStr(ct)))
+        }
+        E("test %al, %al")
+        E(cat("jz ", falseLabel))
+        return
+    }
+    var t = gen(c, asptr(0))
+    if t.kind != K_BOOL {
+        cgErr(cat3("умова має бути bool, а тут ", tyStr(t), " (порівняй явно: x != 0)"))
+    }
+    E("test %al, %al")
+    E(cat("jz ", falseLabel))
+}
+
+func isCmpOp(op: ptr<uint8>) -> bool {
+    return strEq(op, "==") || strEq(op, "!=") || strEq(op, "<") || strEq(op, "<=") || strEq(op, ">") || strEq(op, ">=")
+}
+
+func printE(e: ptr<Node>, newline: bool) {
+    var t = gen(e, asptr(0))
+    var fn: ptr<uint8> = asptr(0)
+    if t.kind == K_INT {
+        if t.signed {
+            fn = "__nx_print_i64"
+        } else {
+            fn = "__nx_print_u64"
+        }
+    } else if t.kind == K_BOOL {
+        fn = "__nx_print_bool"
+    } else if t.kind == K_FLOAT {
+        if t.size == 4 {
+            fn = "__nx_print_f32"
+        } else {
+            fn = "__nx_print_f64"
+        }
+    } else if t.kind == K_PTR && t.elem.kind == K_INT && t.elem.size == 1 {
+        fn = "__nx_print_str"
+    } else if t.kind == K_PTR {
+        fn = "__nx_print_u64"
+    } else {
+        cgErr(cat("print не вміє друкувати ", tyStr(t)))
+    }
+    if !isFloat(t) {
+        E("mov %rax, %rdi")
+    }
+    callLabel(funcGet(fn).label)
+    if newline {
+        callLabel(funcGet("__nx_print_nl").label)
+    }
+}
+
+func callLabel(label: ptr<uint8>) {
+    var pad = cg_depth % 16 != 0
+    if pad {
+        E("sub $8, %rsp")
+    }
+    E("xor %eax, %eax")
+    E(cat("call ", label))
+    if pad {
+        E("add $8, %rsp")
+    }
+}
+
+func pushT(t: ptr<Ty>) {
+    if isFloat(t) {
+        E("sub $8, %rsp")
+        E("movsd %xmm0, (%rsp)")
+    } else {
+        E("push %rax")
+    }
+    cg_depth = cg_depth + 8
+}
+
+func popTo(reg: ptr<uint8>) {
+    E(cat("pop ", reg))
+    cg_depth = cg_depth - 8
+}
+
+func popXmm(n: int64) {
+    E(cat3("movsd (%rsp), %xmm", its(n), ""))
+    E("add $8, %rsp")
+    cg_depth = cg_depth - 8
+}
+
+func storeLocal(off: int64, t: ptr<Ty>) {
+    if isFloat(t) {
+        E(cat("movsd %xmm0, ", loc(off)))
+    } else {
+        E(cat("mov %rax, ", loc(off)))
+    }
+}
+
+func loadLocal(off: int64, t: ptr<Ty>) {
+    if isFloat(t) {
+        E(cat3("movsd ", loc(off), ", %xmm0"))
+    } else {
+        E(cat3("mov ", loc(off), ", %rax"))
+    }
+}
+
+func loadMem(a: ptr<uint8>, t: ptr<Ty>) {
+    var k = t.kind
+    if k == K_FLOAT {
+        if t.size == 4 {
+            E(cat3("movss ", a, ", %xmm0"))
+        } else {
+            E(cat3("movsd ", a, ", %xmm0"))
+        }
+        return
+    }
+    if k == K_BOOL {
+        E(cat3("movzbq ", a, ", %rax"))
+        return
+    }
+    if k == K_PTR {
+        E(cat3("mov ", a, ", %rax"))
+        return
+    }
+    if k == K_INT {
+        if t.size == 1 {
+            if t.signed {
+                E(cat3("movsbq ", a, ", %rax"))
+            } else {
+                E(cat3("movzbq ", a, ", %rax"))
+            }
+        } else if t.size == 2 {
+            if t.signed {
+                E(cat3("movswq ", a, ", %rax"))
+            } else {
+                E(cat3("movzwq ", a, ", %rax"))
+            }
+        } else if t.size == 4 {
+            if t.signed {
+                E(cat3("movslq ", a, ", %rax"))
+            } else {
+                E(cat3("movl ", a, ", %eax"))
+            }
+        } else {
+            E(cat3("mov ", a, ", %rax"))
+        }
+        return
+    }
+    cgErr(cat("не можна прочитати значення типу ", tyStr(t)))
+}
+
+func storeMem(a: ptr<uint8>, t: ptr<Ty>) {
+    var k = t.kind
+    if k == K_FLOAT {
+        if t.size == 4 {
+            E(cat("movss %xmm0, ", a))
+        } else {
+            E(cat("movsd %xmm0, ", a))
+        }
+        return
+    }
+    if k == K_BOOL {
+        E(cat("movb %al, ", a))
+        return
+    }
+    if k == K_PTR {
+        E(cat("mov %rax, ", a))
+        return
+    }
+    if k == K_INT {
+        if t.size == 1 {
+            E(cat("movb %al, ", a))
+        } else if t.size == 2 {
+            E(cat("movw %ax, ", a))
+        } else if t.size == 4 {
+            E(cat("movl %eax, ", a))
+        } else {
+            E(cat("mov %rax, ", a))
+        }
+        return
+    }
+    cgErr(cat("не можна записати значення типу ", tyStr(t)))
+}
+
+func canonReg(t: ptr<Ty>) {
+    if !isInt(t) {
+        return
+    }
+    if t.size == 1 {
+        if t.signed {
+            E("movsbq %al, %rax")
+        } else {
+            E("movzbq %al, %rax")
+        }
+    } else if t.size == 2 {
+        if t.signed {
+            E("movswq %ax, %rax")
+        } else {
+            E("movzwq %ax, %rax")
+        }
+    } else if t.size == 4 {
+        if t.signed {
+            E("movslq %eax, %rax")
+        } else {
+            E("mov %eax, %eax")
+        }
+    }
+}
+
+func convert(from: ptr<Ty>, to: ptr<Ty>, where: ptr<uint8>) {
+    if tySame(from, to) {
+        return
+    }
+    if isPtr(from) && isPtr(to) && (from.elem.kind == K_VOID || to.elem.kind == K_VOID) {
+        return
+    }
+    var hint: ptr<uint8> = "asptr(...)"
+    if !isPtr(to) {
+        hint = cat(tyStr(to), "(...)")
+    }
+    cgErr(cat6(where, ": очікується ", tyStr(to), ", а тут ", tyStr(from), cat3(" (перетвори явно: ", hint, ")")))
+}
+
+func isIntLit(e: ptr<Node>) -> bool {
+    if e.kind == N_NUM {
+        return isIntText(e)
+    }
+    if e.kind == N_UNARY && (strEq(e.s1, "-") || strEq(e.s1, "~")) {
+        return isIntLit(e.a)
+    }
+    return false
+}
+
+func isFloatLit(e: ptr<Node>) -> bool {
+    if e.kind == N_NUM {
+        return !isIntText(e)
+    }
+    if e.kind == N_UNARY && strEq(e.s1, "-") {
+        return isFloatLit(e.a)
+    }
+    return false
+}
+
+// тип виразу без коду (стан відкочується, як TypeOf у C#)
+func typeOf(e: ptr<Node>) -> ptr<Ty> {
+    var saved = cg_b
+    var sd = cg_depth
+    var sl = cg_label
+    var sf = cg_frame
+    var sro = cg_rodata.len
+    var sstr = cg_strCount
+    cg_b = strBufNew()
+    var t = gen(e, asptr(0))
+    cg_b = saved
+    cg_depth = sd
+    cg_label = sl
+    cg_frame = sf
+    cg_rodata.len = sro
+    cg_rodata.data[sro] = 0
+    cg_strCount = sstr
+    return t
+}
